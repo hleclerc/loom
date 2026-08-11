@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sdot/support/common_macros.h"
+#include <loom/support/common_macros.h>
 #include "../util/TypePromote.h"
 
 namespace sdot {

@@ -2,7 +2,7 @@
 
 Un fichier de test ressemble à :
 
-    from sdot.testing import test        # ( + check_grad si besoin )
+    from loom.testing import test        # ( + check_grad si besoin )
 
     if test( "my test", [ "[fast]" ] ):
         assert 0 == 0
@@ -17,8 +17,8 @@ Le runner recharge chaque module de test une fois par test sélectionné, de sor
 que chaque corps de test s'exécute isolément et qu'un échec (assert / exception)
 soit capturé test par test, exactement comme le harnais C++.
 """
-from sdot.util.info import info, infox
-from sdot import new_batch_axis
+from loom.util import info, infox
+from loom import new_batch_axis
 from .grad_check import check_grad
 import sys
 

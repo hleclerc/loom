@@ -1,6 +1,6 @@
 // #include "../../src/cpp/sdot/support/containers/CartesianProduct.h"
 // #include "../../src/cpp/sdot/support/containers/Range.h"
-#include <sdot/support/containers/TupleRep.h>
+#include <loom/support/containers/TupleRep.h>
 #include "main.h"
 #include <array>
 

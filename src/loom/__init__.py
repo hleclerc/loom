@@ -1,21 +1,33 @@
-from .util.Aggregate import Aggregate as Aggregate
+"""loom — agnostic Jax/Torch → SYCL interface.
 
-from .tensor.CtShapeVar import CtShapeVar as CtShapeVar
-from .tensor.AxisList import AxisList as AxisList
-from .tensor.ShapeVar import ShapeVar as ShapeVar
-from .tensor.Tensor import Tensor as Tensor
-from .tensor.Axis import Axis as Axis
+Lazy imports: `import loom` is instant. Heavy modules (Tensor, driver, FfiCode)
+are loaded on first access, e.g. `from loom import Tensor`.
+"""
 
-from .tensor.batch import new_batch_axis as new_batch_axis
+import sys as _sys
 
-from .compilation.FfiCode import FfiCode as FfiCode
 
-from .drivers.driver import driver as driver
+def __getattr__(name: str):
+    """Lazy attribute lookup for heavy modules."""
+    _lazy = {
+        "Aggregate":       (".util.Aggregate",       "Aggregate"),
+        "Axis":            (".tensor.Axis",           "Axis"),
+        "AxisList":        (".tensor.AxisList",       "AxisList"),
+        "CtShapeVar":      (".tensor.CtShapeVar",     "CtShapeVar"),
+        "FfiCode":         (".compilation.FfiCode",   "FfiCode"),
+        "ShapeVar":        (".tensor.ShapeVar",       "ShapeVar"),
+        "Tensor":          (".tensor.Tensor",         "Tensor"),
+        "driver":          (".drivers.driver",        "driver"),
+        "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
+    }
 
-from .distributions.SumOfDiracs1d import SumOfDiracs1d as SumOfDiracs1d
-from .distributions.SumOfDiracs import SumOfDiracs as SumOfDiracs
-from .distributions.ProjectedSumOfDiracs import ProjectedSumOfDiracs as ProjectedSumOfDiracs
-from .distributions.Image import Image as Image
+    if name in _lazy:
+        mod_path, attr = _lazy[name]
+        import importlib
+        mod = importlib.import_module(mod_path, package=__package__)
+        val = getattr(mod, attr)
+        # Cache in module globals so __getattr__ is not called again
+        globals()[name] = val
+        return val
 
-from .OtPlan1d import OtPlan1d as OtPlan1d
-from .Cell import Cell as Cell
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

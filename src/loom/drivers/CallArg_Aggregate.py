@@ -92,9 +92,9 @@ class CallArg_Aggregate( CallArg ):
     # ADL at instantiation, but their declarations must be visible) and `Ct` for the transfer-cost
     # fold. The MEMBERS are template parameters, so no container header is needed here -- a
     # `TensorView` vs a `NoneTensor` is decided at the instantiation site, not in the definition.
-    _CPP_SUPPORT_INCLUDES = ( "sdot/support/common_types.h", "sdot/support/Ct.h",
-                              "sdot/support/kernels/make_avaiable.h",
-                              "sdot/support/kernels/transfer_cost.h" )
+    _CPP_SUPPORT_INCLUDES = ( "loom/support/common_types.h", "loom/support/Ct.h",
+                              "loom/support/kernels/make_avaiable.h",
+                              "loom/support/kernels/transfer_cost.h" )
 
     def cpp_includes( self ):
         """The headers the call needs for us: our OWN struct's header, plus -- whether that header

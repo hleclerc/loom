@@ -143,17 +143,17 @@ def call_body( body: str, device ):
 _CALL_TEMPLATE = """\
 #include "xla/ffi/api/ffi.h"
 #define SDOT_QUEUE {queue_type}
-#include "sdot/Queue.h"
-#include "sdot/support/algorithms/CartesianIndices.h"
-#include "sdot/support/kernels/run_parallel.h"
-#include "sdot/support/common_types.h"
-#include "sdot/support/Ct.h"
-#include "sdot/support/containers/TensorView.h"
-#include "sdot/support/containers/ShapeVarView.h"
-#include "sdot/support/containers/ErrorBuffer.h"
-#include "sdot/support/containers/NoneTensor.h"
-#include "sdot/support/containers/ZeroTensor.h"
-#include "sdot/support/containers/FillTensor.h"
+#include <sdot/Queue.h>
+#include <loom/support/algorithms/CartesianIndices.h>
+#include <loom/support/kernels/run_parallel.h>
+#include <loom/support/common_types.h>
+#include <loom/support/Ct.h>
+#include <loom/support/containers/TensorView.h>
+#include <loom/support/containers/ShapeVarView.h>
+#include <loom/support/containers/ErrorBuffer.h>
+#include <loom/support/containers/NoneTensor.h>
+#include <loom/support/containers/ZeroTensor.h>
+#include <loom/support/containers/FillTensor.h>
 #include <cstdint>
 #include <iostream>
 

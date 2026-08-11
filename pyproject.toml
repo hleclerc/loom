@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loom"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "typing_extensions",
+]
+
+[project.optional-dependencies]
+jax = ["jax"]
+torch = ["torch"]
+
+[project.scripts]
+loom-toolchain = "loom.toolchain:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"include" = "loom/_include"
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "include",
+]

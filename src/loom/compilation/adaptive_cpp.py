@@ -737,7 +737,7 @@ def make_executable( exe_name, src_paths, device, *, profile = None, extra_flags
     include/runtime wiring, so we only add the project's C++ include dir. Returns the path to
     the built executable.
     """
-    from . import build_dir, cpp_include_root
+    from . import build_dir, cpp_include_root, additional_include_dirs
 
     targets, resolved_profile, backends = resolve_targets( device )
     profile = profile or resolved_profile
@@ -749,11 +749,16 @@ def make_executable( exe_name, src_paths, device, *, profile = None, extra_flags
 
     omp_flags = _macos_omp_include_flags() if _needs_omp_headers( targets ) else []
 
+    extra_includes = []
+    for d in additional_include_dirs():
+        extra_includes += ["-I", d]
+
     cmd = [
         acpp,
         f"--acpp-targets={ targets }",
         "-std=c++20", "-O2",
         "-I", cpp_include_root(),
+        *extra_includes,
         *omp_flags,
         *( extra_flags or [] ),
         "-o", exe,
@@ -775,7 +780,7 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
     a hash of the inputs, a changed source naturally produces a new name and a rebuild.
     Returns the path to the built library.
     """
-    from . import build_dir, cpp_include_root
+    from . import build_dir, cpp_include_root, additional_include_dirs
 
     targets, resolved_profile, backends = resolve_targets( device )
 
@@ -791,12 +796,17 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
 
     omp_flags = _macos_omp_include_flags() if _needs_omp_headers( targets ) else []
 
+    extra_includes = []
+    for d in additional_include_dirs():
+        extra_includes += ["-I", d]
+
     cmd = [
         acpp,
         f"--acpp-targets={ targets }",
         "-std=c++20", "-O2",
         "-fPIC", "-shared",
         "-I", cpp_include_root(),
+        *extra_includes,
         *omp_flags,
         *( extra_flags or [] ),
         "-o", lib,

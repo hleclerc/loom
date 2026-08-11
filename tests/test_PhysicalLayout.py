@@ -1,7 +1,7 @@
 import math
 
-from sdot.tensor.PhysicalLayout import PhysicalLayout, items_per_alignment
-from sdot.testing import test
+from loom.tensor import PhysicalLayout, items_per_alignment
+from loom.testing import test
 
 
 def _contiguous( shape ):
@@ -111,8 +111,8 @@ if test( "phys_num_reorders_after_batch_group" ):
 
 if test( "device_batch_alignment" ):
     # the factor (BYTES) lives on the Device, and a per-call value overrides it
-    from sdot.devices.Cpu import Cpu
-    from sdot.devices.CudaGpu import CudaGpu
+    from loom.devices import Cpu
+    from loom.devices import CudaGpu
 
     assert Cpu().batch_alignment == 1
     assert Cpu().resolve_batch_alignment() == 1

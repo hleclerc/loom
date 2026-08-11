@@ -65,7 +65,7 @@ class AbstractAxis( Attribute ):
         axis's business, not the call's -- the call only asks for it by name."""
         from ..compilation.generated_headers import shared_header
         content = ( "#pragma once\n\n"
-                    '#include "sdot/support/containers/AxisNames.h"\n\n'
+                    '#include <loom/support/containers/AxisNames.h>\n\n'
                     f"DEFINE_AXIS( { name } );\n" )
         return shared_header( f"sdot/generated/axes/{ name }.h", content )
 

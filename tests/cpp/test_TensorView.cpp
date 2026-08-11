@@ -1,15 +1,15 @@
 // #include "../../src/cpp/sdot/support/containers/contiguous_strides.h"
 // #include "../../src/cpp/sdot/support/hardware/MemorySpace_CpuRam.h"
 // #include "../../src/cpp/sdot/support/hardware/Run.h"
-#include <sdot/support/containers/TensorView.h>
-#include <sdot/support/kernels/run_parallel.h>
-#include <sdot/support/algorithms/CartesianIndices.h>
-#include <sdot/support/algorithms/indices_of.h>
-#include <sdot/support/algorithms/reductions.h>
-#include <sdot/support/containers/Range.h>
+#include <loom/support/containers/TensorView.h>
+#include <loom/support/kernels/run_parallel.h>
+#include <loom/support/algorithms/CartesianIndices.h>
+#include <loom/support/algorithms/indices_of.h>
+#include <loom/support/algorithms/reductions.h>
+#include <loom/support/containers/Range.h>
 // #include "sdot_test_matrix.h"
-#include "sdot/support/common_macros.h"
-#include "sdot/support/kernels/CpuHostMemorySpace.h"
+#include <loom/support/common_macros.h>
+#include <loom/support/kernels/CpuHostMemorySpace.h>
 #include "main.h"
 #include <algorithm>
 #include <numeric>

@@ -17,8 +17,8 @@ par rapport à son buffer, un `Tensor` en sortie est comparé sur sa vue dense
 (`.tensor`) -- le padding de capacité est retiré pour nous, sans écrire de
 `.raw[ :n ]`.
 """
-from sdot.tensor.Tensor import Tensor
-from sdot import driver
+from loom.tensor import Tensor
+from loom import driver
 
 
 def _raw( x ):

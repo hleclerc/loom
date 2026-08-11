@@ -1,5 +1,5 @@
-from sdot import ShapeVar, Axis, AxisList, Tensor, Aggregate, driver
-from sdot.testing import test
+from loom import ShapeVar, Axis, AxisList, Tensor, Aggregate, driver
+from loom.testing import test
 import numpy
 
 if test( "basic" ):
@@ -278,7 +278,7 @@ if test( "tensor_transpose" ):
 
 
 if test( "tensor_ref_broadcast" ):
-    from sdot import new_batch_axis
+    from loom import new_batch_axis
 
     row = Axis( ShapeVar(), name = "row" )
     col = Axis( ShapeVar(), name = "col" )
@@ -333,9 +333,9 @@ if test( "tensor_physical_layout_view" ):
     # a Tensor whose buffer is laid out NON-contiguously (batch axis flattened + padded) still reads
     # back its LOGICAL values: `.tensor` gathers them through the layout (the physical<->logical
     # boundary). Everything else reads `.tensor`, so ops/results stay logical whatever the storage.
-    from sdot.tensor.PhysicalLayout import PhysicalLayout
-    from sdot.tensor.ReferenceShape import ReferenceShape
-    from sdot import driver
+    from loom.tensor import PhysicalLayout
+    from loom.tensor import ReferenceShape
+    from loom import driver
 
     logical = numpy.array( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ], dtype = float )   # logical [2,3]
     raw = numpy.zeros( ( 4, 3 ) ); raw[ :2 ] = logical                     # batch(2)->flat padded to 4

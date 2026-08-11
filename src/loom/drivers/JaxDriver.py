@@ -1046,7 +1046,7 @@ class JaxDriver:
     #     base_signature = [ code.signature(), main_list.arguments.signature(), self.device.signature ]
 
     #     # module name
-    #     from sdot.util.encode_base_62 import encode_base_62
+    #     from loom.util import encode_base_62
     #     res = re.sub( r'[^\w]', '_', str.join( "_", base_signature ) )
     #     while "__" in res:
     #         res = res.replace( "__", "_" )
@@ -1145,7 +1145,7 @@ class JaxDriver:
     #     Called at JAX trace time when the backward is first needed, so bfai correctly
     #     reflects which tensors are None/Zero vs real based on the actual cotangents.
     #     """
-    #     from sdot.util.encode_base_62 import encode_base_62
+    #     from loom.util import encode_base_62
     #     raw = f"bwd_{ fwd_module_name }_{ bfai.arguments.signature() }"
     #     bwd_module_name = re.sub( r'[^\w]', '_', raw )
     #     while "__" in bwd_module_name:

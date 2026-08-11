@@ -1,5 +1,5 @@
-from sdot import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, FfiCode
-from sdot.testing import test
+from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, FfiCode
+from loom.testing import test
 
 # An `@aggregate` instance is built BEFORE the call and passed as a plain kwarg. Inputs and
 # outputs are DISJOINT (as in XLA): a kernel never writes what it reads, so there is no
@@ -714,7 +714,7 @@ if test( "batch_alignment_forced" ):
     #
     # This exercises the non-identity path completely: a padded `jax_out_spec`, the 4-arg
     # `tensor_view` (logical extents + physical BYTE strides), and `Tensor.tensor`'s gather.
-    from sdot.tensor.batch import new_batch_axis
+    from loom.tensor import new_batch_axis
 
     class Cell7( Aggregate ):
         scale            : Tensor[ "dim" ]
@@ -773,9 +773,9 @@ if test( "physical_axis_reorder" ):
     # name (`row=`, `col=`) and must recover the right values -- proving the 4-arg `tensor_view`
     # honours an arbitrary per-axis stride, so a hardware reorder is pure performance.
     import numpy
-    from sdot.tensor.PhysicalLayout import PhysicalLayout
-    from sdot.tensor.ReferenceShape import ReferenceShape
-    from sdot import Axis, ShapeVar, Tensor
+    from loom.tensor import PhysicalLayout
+    from loom.tensor import ReferenceShape
+    from loom import Axis, ShapeVar, Tensor
 
     code = FfiCode( name = "test_call_phys_reorder", fwd_code = """
     run_parallel( queue, global_batch_indices,

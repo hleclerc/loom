@@ -15,32 +15,32 @@ def _src_root():
 
 
 def _dev_repo_root():
-    """Repo root, but only when this really looks like a dev checkout (a sibling
-    src/cpp/sdot exists) -- None when running from an installed wheel."""
+    """Repo root, but only when this really looks like a dev checkout (loom/include/loom
+    exists) -- None when running from an installed wheel."""
     candidate = Path( __file__ ).resolve().parents[ 4 ]
-    return candidate if ( candidate / "src" / "cpp" / "sdot" ).is_dir() else None
+    return candidate if ( candidate / "loom" / "include" / "loom" ).is_dir() else None
 
 
 def cpp_include_root():
     """The `-I` root so `#include <sdot/Cell.h>` resolves, from a dev checkout OR an
     installed wheel.
 
-    Dev: the sibling `src/cpp` tree (edit C++ without rebuilding the wheel). Installed: the
-    `sdot/_cpp` tree the wheel ships next to the package (pure `__file__`-relative, no repo
-    assumption). The generated headers live elsewhere, on their own `-I` root -- see
-    generated_headers.include_root().
+    Dev: `<repo>/sdot/include` (edit C++ without rebuilding the wheel). Installed: the
+    `sdot/_include` tree the wheel ships next to the package (pure `__file__`-relative,
+    no repo assumption). The generated headers live elsewhere, on their own `-I` root --
+    see generated_headers.include_root().
     """
     dev_root = _dev_repo_root()
     if dev_root is not None:
-        return dev_root / "src" / "cpp"
+        return dev_root / "sdot" / "include"
 
-    packaged = Path( __file__ ).resolve().parents[ 1 ] / "_cpp"
+    packaged = Path( __file__ ).resolve().parents[ 1 ] / "_include"
     if ( packaged / "sdot" / "Cell.h" ).is_file():
         return packaged
 
     raise RuntimeError(
-        "sdot: cannot locate the C++ header tree (neither a dev checkout's src/cpp nor "
-        "the packaged sdot/_cpp were found) -- broken install?"
+        "sdot: cannot locate the C++ header tree (neither a dev checkout's sdot/include nor "
+        "the packaged sdot/_include were found) -- broken install?"
     )
 
 
@@ -125,6 +125,10 @@ def build_dir():
 
 
 def additional_include_dirs():
+    """Extra `-I` roots needed alongside cpp_include_root() — e.g. the loom support headers."""
+    dev_root = _dev_repo_root()
+    if dev_root is not None:
+        return [ str( dev_root / "loom" / "include" ) ]
     return []
 
 
@@ -175,7 +179,8 @@ def make_executable( exe_name: str, src_paths: list, device: Device, requires = 
         "SDOT_XMAKE_NEEDS_CUDA": str( int( device.is_cuda_gpu ) ),
         "SDOT_XMAKE_REQUIRES"  : ",".join( requires ),
         "SDOT_XMAKE_INCLUDES"  : str.join( ",", map( str, [
-                                      project_root / "src" / "cpp"
+                                      project_root / "sdot" / "include",
+                                      project_root / "loom" / "include",
                                   ] + additional_include_dirs() ) ),
         "SDOT_XMAKE_CXXFLAGS"  : "-fno-strict-aliasing",
         "SDOT_XMAKE_SOURCES"   : ",".join( map( str, sources ) ),

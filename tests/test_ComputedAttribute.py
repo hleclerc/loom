@@ -1,8 +1,8 @@
 """Test ComputedAttribute caching and invalidation."""
 
-from sdot.util.Aggregate import Aggregate
-from sdot.util.ComputedAttribute import ComputedAttribute
-from sdot.tensor.Tensor import Tensor
+from loom.util import Aggregate
+from loom.util import ComputedAttribute
+from loom.tensor import Tensor
 
 
 class SimpleBox( Aggregate ):

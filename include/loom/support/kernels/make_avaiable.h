@@ -1,7 +1,7 @@
 #pragma once
 
-#include "sdot/support/algorithms/apply_values.h"
-#include "sdot/support/common_macros.h"
+#include <loom/support/algorithms/apply_values.h>
+#include <loom/support/common_macros.h>
 #include <type_traits>
 
 namespace sdot {

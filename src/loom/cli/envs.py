@@ -95,7 +95,8 @@ def wrap_remote_command(remote_python: str, env_cfg: dict | None, remote_dir: st
     """Build the command prefix for remote execution (SSH).
 
     Returns a shell string that replaces `remote_python` on the remote side.
-    For apptainer envs: `apptainer exec <flags> --bind ... <image> <python>`
+    For apptainer envs: `apptainer exec <flags> --bind ... <image> python`
+      (the container has its own python; host.python is irrelevant inside the container)
     For micromamba / unknown: returns `remote_python` unchanged (host's python is used directly).
 
     The caller should compose this into the SSH command, e.g.:
@@ -113,7 +114,8 @@ def wrap_remote_command(remote_python: str, env_cfg: dict | None, remote_dir: st
         mount_flags = []
         for src, dst in mounts.items():
             mount_flags += ["--bind", f"{remote_dir}/{src}:{dst}"]
-        parts = ["apptainer", "exec", *flags, *mount_flags, f"{remote_dir}/{image}", remote_python]
+        # Use the container's own python (PATH is set by the image's %environment).
+        parts = ["apptainer", "exec", *flags, *mount_flags, f"{remote_dir}/{image}", "python"]
         return " ".join(parts)
 
     return remote_python

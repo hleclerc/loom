@@ -28,6 +28,31 @@ def cmd_test(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
     env_vars = envs.build_env_vars(args)
+
+    if args.host:
+        host, remote_dir, hostname, python_wrapped = _remote_setup(args, env_cfg)
+        if host is None:
+            return 1
+
+        # Reconstruct test flags for the remote `./run test` invocation.
+        # Don't pass --env (already inside the container) or --host (no recursion).
+        test_flags = []
+        if args.name:
+            test_flags.append(f"--name={args.name}")
+        if args.project:
+            test_flags.append(f"--project={args.project}")
+        if args.device:
+            test_flags.append(f"--device={args.device}")
+        if args.fp:
+            test_flags.append(f"--fp={args.fp}")
+
+        runner = f"{remote_dir}/run"
+        env_str = " ".join(f"{k}={v}" for k, v in env_vars.items())
+        flags_str = " ".join(test_flags)
+        remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {python_wrapped} {runner} test {flags_str}"
+        return _ssh_run(hostname, remote_dir, remote_cmd)
+
+    # Local execution
     filters = [args.name] if args.name else []
     failures = _run_cpp_tests(filters) + _run_python_tests(filters, args.project)
     print("\n" + "=" * 48)
@@ -165,47 +190,44 @@ def _run_entry(kind, args):
     return run(cmd, env=env_vars)
 
 
-def _run_remote(kind, entry, args, env_vars, env_cfg):
+RSYNC_EXCLUDES = ["--exclude=build","--exclude=*.so","--exclude=*.o","--exclude=*.dylib",
+                  "--exclude=node_modules","--exclude=.venv","--exclude=tmp",
+                  "--exclude=__pycache__","--exclude=*.pyc","--exclude=.git",
+                  "--exclude=dist","--exclude=*.egg-info","--exclude=*.sif"]
+
+
+def _remote_setup(args, env_cfg):
+    """Sync the repo and check the .sif (if apptainer).  Returns (host, remote_dir, hostname, python_wrapped) or (None,)*4 on failure."""
     from . import envs
     host = envs.get_host(args.host)
-    if host is None: print(_err(f"Host '{args.host}' not found in .hosts.toml")); return 1
-    hostname = host["hostname"]; remote_dir = host["remote_dir"]
-    excludes = ["--exclude=build","--exclude=*.so","--exclude=*.o","--exclude=*.dylib",
-                "--exclude=node_modules","--exclude=.venv","--exclude=tmp",
-                "--exclude=__pycache__","--exclude=*.pyc","--exclude=.git",
-                "--exclude=dist","--exclude=*.egg-info"]
+    if host is None:
+        print(_err(f"Host '{args.host}' not found in .hosts.toml"))
+        return None, None, None, None
+    hostname = host["hostname"]
+    remote_dir = host["remote_dir"]
 
     print(_hdr(f"syncing → {hostname}:{remote_dir}"))
-    run(["rsync", "-a", "--delete", *excludes, f"{ROOT}/", f"{hostname}:{remote_dir}/"])
+    run(["rsync", "-a", "--delete", *RSYNC_EXCLUDES, f"{ROOT}/", f"{hostname}:{remote_dir}/"])
 
-    # For apptainer envs, check the .sif exists on the remote before running.
     if env_cfg and env_cfg.get("type") == "apptainer":
         image = env_cfg["image"]
         if not envs.sif_exists_on_host(host, env_cfg):
             print(_err(f"\n  Container image not found on {hostname}: {remote_dir}/{image}"))
             print(_err(f"  Build it first:"))
             print(_dim(f"    ./run build-sif --env {args.env or env_cfg.get('_name','?')} --host {args.host}"))
-            return 1
+            return None, None, None, None
 
     remote_python = host.get("python", sys.executable)
-    # Wrap with apptainer if the env requires it.
-    remote_python_wrapped = envs.wrap_remote_command(remote_python, env_cfg, remote_dir)
-    entry_name = getattr(args, f"{kind}_name")
-    runner = f"{remote_dir}/run"
-    env_assignments = []
-    extra_flags = []
-    for k, v in env_vars.items():
-        env_assignments.append(f"{k}={v}")
-        if k.startswith("SDOT_ARG_"):
-            extra_flags.append(f"--{k[9:].lower().replace('_', '-')}={v}")
-    env_str = " ".join(env_assignments); flags_str = " ".join(extra_flags)
-    remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {remote_python_wrapped} {runner} {kind} {entry_name} {flags_str}"
-    ssh_cmd = ["ssh", hostname, remote_cmd]
+    python_wrapped = envs.wrap_remote_command(remote_python, env_cfg, remote_dir)
+    return host, remote_dir, hostname, python_wrapped
 
+
+def _ssh_run(hostname, remote_dir, remote_cmd):
+    """Execute `remote_cmd` on the host via SSH, stream output, rsync back OUTPUT: files."""
+    ssh_cmd = ["ssh", hostname, remote_cmd]
     print(_hdr(f"executing on {hostname}"))
     print(_dim(f"  {remote_cmd}"))
 
-    import selectors
     proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     output_files = []
     for line in proc.stdout:
@@ -223,6 +245,25 @@ def _run_remote(kind, entry, args, env_vars, env_cfg):
             local_path = ROOT / path; local_path.parent.mkdir(parents=True, exist_ok=True)
             run(["rsync", "-a", f"{hostname}:{remote_dir}/{path}", str(local_path)])
     return rc
+
+
+def _run_remote(kind, entry, args, env_vars, env_cfg):
+    host, remote_dir, hostname, python_wrapped = _remote_setup(args, env_cfg)
+    if host is None:
+        return 1
+
+    runner = f"{remote_dir}/run"
+    entry_name = getattr(args, f"{kind}_name")
+    env_assignments = []
+    extra_flags = []
+    for k, v in env_vars.items():
+        env_assignments.append(f"{k}={v}")
+        if k.startswith("SDOT_ARG_"):
+            extra_flags.append(f"--{k[9:].lower().replace('_', '-')}={v}")
+    env_str = " ".join(env_assignments)
+    flags_str = " ".join(extra_flags)
+    remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {python_wrapped} {runner} {kind} {entry_name} {flags_str}"
+    return _ssh_run(hostname, remote_dir, remote_cmd)
 
 
 def _list_available(kind):

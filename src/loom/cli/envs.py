@@ -91,6 +91,48 @@ def wrap_command(cmd: list[str], env_cfg: dict | None) -> list[str]:
     return cmd
 
 
+def wrap_remote_command(remote_python: str, env_cfg: dict | None, remote_dir: str) -> str:
+    """Build the command prefix for remote execution (SSH).
+
+    Returns a shell string that replaces `remote_python` on the remote side.
+    For apptainer envs: `apptainer exec <flags> --bind ... <image> <python>`
+    For micromamba / unknown: returns `remote_python` unchanged (host's python is used directly).
+
+    The caller should compose this into the SSH command, e.g.:
+        ... {wrap_remote_command(python, env_cfg, dir)} {runner} {kind} ...
+    """
+    if env_cfg is None:
+        return remote_python
+
+    etype = env_cfg.get("type", "")
+
+    if etype == "apptainer":
+        image = env_cfg["image"]
+        flags = env_cfg.get("flags", [])
+        mounts = env_cfg.get("mounts", {})
+        mount_flags = []
+        for src, dst in mounts.items():
+            mount_flags += ["--bind", f"{remote_dir}/{src}:{dst}"]
+        parts = ["apptainer", "exec", *flags, *mount_flags, f"{remote_dir}/{image}", remote_python]
+        return " ".join(parts)
+
+    return remote_python
+
+
+def sif_exists_on_host(host_cfg: dict, env_cfg: dict) -> bool:
+    """Check whether the .sif image exists on the remote host (via SSH)."""
+    import subprocess
+    hostname = host_cfg["hostname"]
+    remote_dir = host_cfg["remote_dir"]
+    image = env_cfg["image"]
+    sif_path = f"{remote_dir}/{image}"
+    rc = subprocess.run(
+        ["ssh", hostname, "test", "-f", sif_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode
+    return rc == 0
+
+
 def build_env_vars(args) -> dict[str, str]:
     """Build env vars dict from CLI args (for the child process)."""
     env = {"PYTHONUNBUFFERED": "1"}  # always: real-time output over pipes

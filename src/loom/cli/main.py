@@ -178,7 +178,18 @@ def _run_remote(kind, entry, args, env_vars, env_cfg):
     print(_hdr(f"syncing → {hostname}:{remote_dir}"))
     run(["rsync", "-a", "--delete", *excludes, f"{ROOT}/", f"{hostname}:{remote_dir}/"])
 
+    # For apptainer envs, check the .sif exists on the remote before running.
+    if env_cfg and env_cfg.get("type") == "apptainer":
+        image = env_cfg["image"]
+        if not envs.sif_exists_on_host(host, env_cfg):
+            print(_err(f"\n  Container image not found on {hostname}: {remote_dir}/{image}"))
+            print(_err(f"  Build it first:"))
+            print(_dim(f"    ./run build-sif --env {args.env or env_cfg.get('_name','?')} --host {args.host}"))
+            return 1
+
     remote_python = host.get("python", sys.executable)
+    # Wrap with apptainer if the env requires it.
+    remote_python_wrapped = envs.wrap_remote_command(remote_python, env_cfg, remote_dir)
     entry_name = getattr(args, f"{kind}_name")
     runner = f"{remote_dir}/run"
     env_assignments = []
@@ -188,7 +199,7 @@ def _run_remote(kind, entry, args, env_vars, env_cfg):
         if k.startswith("SDOT_ARG_"):
             extra_flags.append(f"--{k[9:].lower().replace('_', '-')}={v}")
     env_str = " ".join(env_assignments); flags_str = " ".join(extra_flags)
-    remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {remote_python} {runner} {kind} {entry_name} {flags_str}"
+    remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {remote_python_wrapped} {runner} {kind} {entry_name} {flags_str}"
     ssh_cmd = ["ssh", hostname, remote_cmd]
 
     print(_hdr(f"executing on {hostname}"))

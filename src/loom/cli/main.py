@@ -228,6 +228,76 @@ def _list_available(kind):
 
 # ── other commands ────────────────────────────────────────────────────────────
 
+def cmd_build_sif(args):
+    """Build Apptainer .sif images from .def files.
+
+    Reads .hosts.toml for apptainer-type environments and derives the .def file
+    from the image path. Builds locally or remotely (via --host).
+    """
+    from . import envs
+
+    apptainer_envs = envs.list_apptainer_envs()
+
+    # Filter by --env if specified
+    if args.env_name:
+        if args.env_name not in apptainer_envs:
+            print(_err(f"Unknown apptainer env: {args.env_name}"))
+            print(_dim(f"  Available: {', '.join(apptainer_envs) or '(none)'}"))
+            return 1
+        apptainer_envs = {args.env_name: apptainer_envs[args.env_name]}
+
+    if not apptainer_envs:
+        print(_err("No apptainer environments found in .hosts.toml"))
+        print(_dim("  Add an [envs.<name>] with type = \"apptainer\" and an image = \"containers/<name>.sif\" path."))
+        return 1
+
+    host_cfg = None
+    if args.host:
+        host_cfg = envs.get_host(args.host)
+        if host_cfg is None:
+            print(_err(f"Unknown host: {args.host}"))
+            return 1
+
+    rc = 0
+    for env_name, env_cfg in apptainer_envs.items():
+        def_file = envs.def_for_image(env_cfg["image"])
+        if not (ROOT / def_file).exists():
+            print(_err(f"  {env_name}: .def file not found: {def_file}"))
+            rc = 1
+            continue
+
+        if host_cfg:
+            print(_hdr(f"\nbuild-sif: {env_name} → {env_cfg['image']} (on {args.host})"))
+            # Show which scratch dir will be used
+            sd = args.scratch_dir or host_cfg.get("apptainer_scratch", "")
+            if sd:
+                print(_dim(f"  scratch: {sd}"))
+            commands = envs.remote_build_sif(
+                host_cfg, env_cfg,
+                force=args.force, fakeroot=args.fakeroot,
+                scratch_dir=args.scratch_dir,
+            )
+            for cmd in commands:
+                if run(cmd) != 0:
+                    rc = 1
+                    break
+        else:
+            print(_hdr(f"\nbuild-sif: {env_name} → {env_cfg['image']}"))
+            cmd = envs.build_sif_command(env_cfg, force=args.force, fakeroot=args.fakeroot)
+            if args.scratch_dir:
+                cmd_env = os.environ.copy()
+                cmd_env["APPTAINER_TMPDIR"] = args.scratch_dir
+                cmd_env["APPTAINER_CACHEDIR"] = args.scratch_dir
+                print(_dim(f"  APPTAINER_TMPDIR={args.scratch_dir}"))
+                if run(cmd, env=cmd_env) != 0:
+                    rc = 1
+            else:
+                if run(cmd) != 0:
+                    rc = 1
+
+    return rc
+
+
 def cmd_env(args):
     from . import envs
     cfg = envs.load_config()
@@ -293,6 +363,12 @@ def main(argv=None):
 
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)
     p_tool = sub.add_parser("toolchain", help="Toolchain diagnostic"); add_shared(p_tool)
+    p_sif = sub.add_parser("build-sif", help="Build Apptainer .sif images from .def files")
+    add_shared(p_sif)
+    p_sif.add_argument("--env", dest="env_name", help="Specific apptainer env to build (from .hosts.toml)")
+    p_sif.add_argument("--force", action="store_true", help="Force rebuild (pass --force to apptainer)")
+    p_sif.add_argument("--fakeroot", action="store_true", help="Use --fakeroot for apptainer build")
+    p_sif.add_argument("--scratch-dir", help="Scratch directory (APPTAINER_TMPDIR / APPTAINER_CACHEDIR)")
     p_env = sub.add_parser("env", help="Environment management")
     p_env.add_argument("env_action", nargs="?", default="list", choices=["list"])
 
@@ -326,7 +402,7 @@ def main(argv=None):
         args = known
 
     dispatch = {"test":cmd_test,"experiment":cmd_experiment,"bench":cmd_bench,
-                "install":cmd_install,"toolchain":cmd_toolchain,"env":cmd_env}
+                "install":cmd_install,"toolchain":cmd_toolchain,"build-sif":cmd_build_sif,"env":cmd_env}
     if args.command not in dispatch: parser.print_help(); return 1
     return dispatch[args.command](args)
 

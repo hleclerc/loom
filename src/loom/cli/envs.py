@@ -116,3 +116,96 @@ def arg_overrides_to_env(args, params: dict) -> dict[str, str]:
             # Convert to string (the harness will parse back to the right type)
             env[f"SDOT_ARG_{pname.upper()}"] = str(val)
     return env
+
+
+# ── build-sif ─────────────────────────────────────────────────────────────────
+
+def list_apptainer_envs() -> dict[str, dict]:
+    """Return {env_name: env_cfg} for all apptainer-type environments in .hosts.toml."""
+    cfg = load_config()
+    envs = cfg.get("envs", {})
+    return {name: ec for name, ec in envs.items() if ec.get("type") == "apptainer"}
+
+
+def def_for_image(image_path: str) -> str:
+    """Derive the .def file path from the .sif image path.
+
+    >>> def_for_image('containers/cuda-jax.sif')
+    'containers/cuda-jax.def'
+    """
+    p = Path(image_path)
+    if p.suffix == ".sif":
+        return str(p.with_suffix(".def"))
+    raise ValueError(f"Expected a .sif image path, got: {image_path}")
+
+
+def build_sif_command(
+    env_cfg: dict,
+    *,
+    force: bool = False,
+    fakeroot: bool = False,
+) -> list[str]:
+    """Build the `apptainer build` command line for an apptainer environment.
+
+    The .def file is derived from env_cfg["image"] (e.g. containers/cuda.sif → .def).
+    """
+    image = env_cfg["image"]
+    def_file = env_cfg.get("def_file", def_for_image(image))
+    cmd = ["apptainer", "build"]
+    if fakeroot:
+        cmd.append("--fakeroot")
+    if force:
+        cmd.append("--force")
+    cmd += [image, def_file]
+    return cmd
+
+
+def remote_build_sif(
+    host_cfg: dict,
+    env_cfg: dict,
+    *,
+    force: bool = False,
+    fakeroot: bool = False,
+    scratch_dir: str | None = None,
+) -> list[list[str]]:
+    """Return the sequence of commands to build a .sif on a remote host.
+
+    Steps: rsync the repo → ssh + apptainer build.
+
+    scratch_dir overrides the host's apptainer_scratch.  When None, the host's
+    apptainer_scratch is used automatically.  Set to "" to suppress both.
+
+    Returns a list of commands; each command is a list[str] suitable for subprocess.
+    """
+    hostname = host_cfg["hostname"]
+    remote_dir = host_cfg["remote_dir"]
+    image = env_cfg["image"]
+    def_file = env_cfg.get("def_file", def_for_image(image))
+
+    # Resolve scratch dir: explicit arg → host config → none
+    sd = scratch_dir
+    if sd is None:
+        sd = host_cfg.get("apptainer_scratch", "")
+    tmpdir_flag = f"APPTAINER_TMPDIR={sd}" if sd else ""
+    cachedir_flag = f"APPTAINER_CACHEDIR={sd}" if sd else ""
+
+    rsync_excludes = "--exclude='build' --exclude='*.so' --exclude='node_modules' --exclude='.venv' --exclude='tmp' --exclude='*.sif'"
+
+    rsync_cmd = f"rsync -a {rsync_excludes} . {hostname}:{remote_dir}"
+    build_cmd_parts = ["apptainer", "build"]
+    if fakeroot:
+        build_cmd_parts.append("--fakeroot")
+    if force:
+        build_cmd_parts.append("--force")
+    build_cmd_parts += [str(Path(remote_dir) / image), str(Path(remote_dir) / def_file)]
+    build_cmd = " ".join(build_cmd_parts)
+
+    env_parts = []
+    if tmpdir_flag:
+        env_parts.append(tmpdir_flag)
+    if cachedir_flag:
+        env_parts.append(cachedir_flag)
+    env_prefix = " ".join(env_parts)
+    ssh_cmd = f"ssh -t {hostname} \"cd {remote_dir} && {env_prefix} {build_cmd}\""
+
+    return [["bash", "-c", rsync_cmd], ["bash", "-c", ssh_cmd]]

@@ -26,7 +26,7 @@ def python(): return sys.executable
 
 def cmd_test(args):
     from . import envs
-    env_cfg = envs.get_env(driver=args.driver)
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
     env_vars = envs.build_env_vars(args)
     filters = [args.name] if args.name else []
     failures = _run_cpp_tests(filters) + _run_python_tests(filters, args.project)
@@ -138,7 +138,7 @@ def _run_entry(kind, args):
         print(msg, file=sys.stderr, flush=True); print(msg, flush=True)
         _list_available(kind); return 1
 
-    env_cfg = envs.get_env(driver=args.driver)
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
     env_vars = envs.build_env_vars(args)
     env_vars["SDOT_RUN_PHASE"] = "1"
 
@@ -301,20 +301,55 @@ def cmd_build_sif(args):
 def cmd_env(args):
     from . import envs
     cfg = envs.load_config()
-    print(_hdr("\nEnvironments:"))
-    for name, ecfg in cfg.get("envs", {}).items():
-        print(f"  {name:20s}  driver={ecfg.get('driver','?'):6s}  type={ecfg.get('type','?')}")
-    if not cfg.get("envs"): print(_dim("  (none configured)"))
-    print(_hdr("\nHosts:"))
-    for name, hcfg in cfg.get("hosts", {}).items():
-        print(f"  {name:20s}  hostname={hcfg.get('hostname','?')}")
-    if not cfg.get("hosts"): print(_dim("  (none configured)"))
+    all_envs = cfg.get("envs", {})
+
+    print(_hdr("\nEnvironments (.hosts.toml → [envs]):"))
+    if not all_envs:
+        print(_dim("  (none configured)"))
+    else:
+        # Determine the default env (replicate get_env resolution)
+        if "default" in all_envs:
+            default_name = "default"
+        elif all_envs:
+            default_name = next(iter(all_envs))
+        else:
+            default_name = None
+
+        for name, ecfg in all_envs.items():
+            marker = " ← default" if name == default_name else ""
+            etype = ecfg.get("type", "?")
+            driver = ecfg.get("driver", "?")
+            extra = ""
+            if etype == "micromamba":
+                extra = f'name={ecfg.get("name","?")}'
+            elif etype == "apptainer":
+                extra = f'image={ecfg.get("image","?")}'
+            print(f"  {name:18s}  driver={driver:6s}  type={etype:12s}  {extra}{marker}")
+            # Show mounts for apptainer envs
+            mounts = ecfg.get("mounts", {})
+            if mounts:
+                for src, dst in mounts.items():
+                    print(f"  {'':18s}  mount: {src} → {dst}")
+
+        print(_dim(f"\n  Select with: --env <name>  (or --driver <{', '.join(sorted(set(e.get('driver','?') for e in all_envs.values())))})>"))
+
+    print(_hdr("\nHosts (.hosts.toml → [hosts]):"))
+    hosts = cfg.get("hosts", {})
+    if not hosts:
+        print(_dim("  (none configured)"))
+    else:
+        for name, hcfg in hosts.items():
+            scratch = hcfg.get("apptainer_scratch", "")
+            extra = f'  scratch={scratch}' if scratch else ""
+            print(f"  {name:18s}  hostname={hcfg.get('hostname','?')}{extra}")
+        print(_dim("\n  Select with: --host <name>  |  builds sync via rsync → ssh"))
+
     return 0
 
 
 def cmd_install(args):
     from . import envs
-    env_cfg = envs.get_env(driver=args.driver); rc = 0
+    env_cfg = envs.get_env(name=args.env, driver=args.driver); rc = 0
     for proj in ["loom", "sdot", "otrec"]:
         proj_dir = ROOT / proj
         if not (proj_dir / "pyproject.toml").exists(): continue
@@ -327,7 +362,7 @@ def cmd_install(args):
 
 def cmd_toolchain(args):
     from . import envs
-    env_cfg = envs.get_env(driver=args.driver)
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
     cmd = [python(), "-m", "loom.toolchain"]
     cmd = envs.wrap_command(cmd, env_cfg)
     return run(cmd)
@@ -336,10 +371,31 @@ def cmd_toolchain(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
+    EPILOG = """
+Environment selection (--env / --driver / --host):
+  --env NAME      Use a specific environment from .hosts.toml (e.g. "cuda-jax", "torch")
+  --driver jax    Auto-select the first env whose driver matches
+  --host HOST     Run on the remote machine (uses the remote's python + env)
+  --device cuda   Set SDOT_DEVICE and JAX_PLATFORMS for the child process
+  --fp FP64       Set SDOT_FTYPE (FP32 or FP64)
+
+  When neither --env nor --driver is given, the env named "default" is used.
+  Run `./run env list` to see all configured environments and hosts.
+
+  Examples:
+    ./run test --env cuda-jax              # Run tests in a specific env
+    ./run test --driver torch              # Auto-select the torch env
+    ./run test --host lmo                  # Run tests remotely on lmo
+    ./run test --env cuda-jax --host lmo   # Specific env on a remote host
+    ./run build-sif --env cuda-jax         # Build a specific container image
+    ./run build-sif --host lmo             # Build all containers on a remote host
+"""
     parser = argparse.ArgumentParser(prog="run", description="nsdot unified dev runner",
+                                     epilog=EPILOG,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
     def add_shared(p):
+        p.add_argument("--env", default=None, help="Environment from .hosts.toml (default: auto by driver, then 'default')")
         p.add_argument("--driver", default=None, help="Framework driver: jax, torch")
         p.add_argument("--fp", default=None, help="Floating-point precision (FP32, FP64)")
         p.add_argument("--device", default=None, help="Target device (cpu, cuda)")
@@ -364,8 +420,8 @@ def main(argv=None):
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)
     p_tool = sub.add_parser("toolchain", help="Toolchain diagnostic"); add_shared(p_tool)
     p_sif = sub.add_parser("build-sif", help="Build Apptainer .sif images from .def files")
-    add_shared(p_sif)
-    p_sif.add_argument("--env", dest="env_name", help="Specific apptainer env to build (from .hosts.toml)")
+    p_sif.add_argument("--env", dest="env_name", help="Apptainer env to build from .hosts.toml (default: all)")
+    p_sif.add_argument("--host", help="Remote host to build on (rsync → ssh → apptainer build)")
     p_sif.add_argument("--force", action="store_true", help="Force rebuild (pass --force to apptainer)")
     p_sif.add_argument("--fakeroot", action="store_true", help="Use --fakeroot for apptainer build")
     p_sif.add_argument("--scratch-dir", help="Scratch directory (APPTAINER_TMPDIR / APPTAINER_CACHEDIR)")

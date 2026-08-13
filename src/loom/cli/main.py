@@ -2,7 +2,7 @@
 """nsdot unified dev runner — CLI entry point. See README.md for usage."""
 
 from __future__ import annotations
-import argparse, os, subprocess, sys
+import argparse, copy, itertools, os, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -140,6 +140,61 @@ def cmd_experiment(args): return _run_entry("experiment", args)
 def cmd_bench(args): return _run_entry("benchmark", args)
 
 
+def _expand_param_combos(args, params):
+    """Split any `--flag=a,b,c` dynamic param into a cartesian-product sweep.
+
+    Dynamic params are parsed as raw strings (see main()'s two-pass argument
+    registration) precisely so a `,` can be detected here, before type
+    coercion. Any param whose raw value contains `,` becomes a multi-valued
+    axis; the cartesian product of all such axes yields one argparse.Namespace
+    per combination (a shallow copy of `args` with each axis pinned to one
+    value). Params without `,` keep their single (coerced) value in every
+    combination unchanged.
+
+    Returns a list of (variants, Namespace) pairs, `variants` being just the
+    {pname: value} that varied in that combination (for the run header) --
+    empty/singleton when nothing was swept, so the non-sweep case is silent.
+    Returns None (having already printed an error) if any value fails to
+    parse or violates `choices` -- the caller should abort with rc=1.
+    """
+    axis_values = {}  # pname -> list[coerced values], only for non-bool params the user passed
+    ok = True
+    for pname, p in params.items():
+        raw = getattr(args, pname, None)
+        if raw is None or p.ptype is bool:
+            continue
+        parts = raw.split(",") if isinstance(raw, str) else [raw]
+        try:
+            values = [p.ptype(x) for x in parts]
+        except (TypeError, ValueError):
+            print(_err(f"--{pname.replace('_','-')}: cannot parse {raw!r} as {p.ptype.__name__}"))
+            ok = False
+            continue
+        if p.choices:
+            bad = [v for v in values if v not in p.choices]
+            if bad:
+                print(_err(f"--{pname.replace('_','-')}: invalid value(s) {bad} (choices: {p.choices})"))
+                ok = False
+                continue
+        axis_values[pname] = values
+
+    if not ok:
+        return None
+
+    names = list(axis_values)
+    combos = list(itertools.product(*(axis_values[n] for n in names))) if names else [()]
+    out = []
+    for combo in combos:
+        a = copy.copy(args)
+        variants = {}
+        for pname, val in zip(names, combo):
+            setattr(a, pname, val)
+            if len(axis_values[pname]) > 1:
+                variants[pname] = val
+        out.append((variants, a))
+    return out
+
+
 def _run_entry(kind, args):
     from .harness import collect, lookup
     from . import envs
@@ -164,8 +219,6 @@ def _run_entry(kind, args):
         _list_available(kind); return 1
 
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
-    env_vars = envs.build_env_vars(args)
-    env_vars["SDOT_RUN_PHASE"] = "1"
 
     py_root = ROOT
     if args.host:
@@ -175,19 +228,38 @@ def _run_entry(kind, args):
                 if (py_root / p / "src").is_dir() or args.host]
     existing_pp = os.environ.get("PYTHONPATH", "")
     if existing_pp: pp_parts.insert(0, existing_pp)
-    env_vars["PYTHONPATH"] = ":".join(pp_parts)
+    pythonpath = ":".join(pp_parts)
 
-    arg_overrides = envs.arg_overrides_to_env(args, entry["params"])
-    env_vars.update(arg_overrides)
+    combos = _expand_param_combos(args, entry["params"])
+    if combos is None:
+        return 1
+    rc = 0
+    for i, (variants, combo_args) in enumerate(combos):
+        if len(combos) > 1:
+            label = ", ".join(f"{k.replace('_','-')}={v}" for k, v in variants.items())
+            # flush explicitly: stdout is fully buffered (not line-buffered) when
+            # redirected/piped, so without this every sweep header would print only
+            # at process exit -- all bunched after every child's own (unbuffered) output.
+            print(_hdr(f"\n=== sweep [{i+1}/{len(combos)}] {label} ==="), flush=True)
 
-    if args.host: return _run_remote(kind, entry, args, env_vars, env_cfg)
+        env_vars = envs.build_env_vars(combo_args)
+        env_vars["SDOT_RUN_PHASE"] = "1"
+        env_vars["PYTHONPATH"] = pythonpath
 
-    print(_hdr(f"\n{kind}: {entry['description']}"))
-    print(_dim(f"  file: {entry['file']}"))
-    if arg_overrides: print(_dim(f"  overrides: {arg_overrides}"))
-    cmd = [python(), entry["file"]]
-    cmd = envs.wrap_command(cmd, env_cfg)
-    return run(cmd, env=env_vars)
+        arg_overrides = envs.arg_overrides_to_env(combo_args, entry["params"])
+        env_vars.update(arg_overrides)
+
+        if combo_args.host:
+            r = _run_remote(kind, entry, combo_args, env_vars, env_cfg)
+        else:
+            print(_hdr(f"\n{kind}: {entry['description']}"))
+            print(_dim(f"  file: {entry['file']}"))
+            if arg_overrides: print(_dim(f"  overrides: {arg_overrides}"))
+            cmd = [python(), entry["file"]]
+            cmd = envs.wrap_command(cmd, env_cfg)
+            r = run(cmd, env=env_vars)
+        rc = rc or r
+    return rc
 
 
 RSYNC_EXCLUDES = ["--exclude=build","--exclude=*.so","--exclude=*.o","--exclude=*.dylib",
@@ -498,8 +570,11 @@ Environment selection (--env / --driver / --host):
             for pname, p in entry["params"].items():
                 flag = f"--{pname.replace('_', '-')}"
                 if p.ptype is bool: target.add_argument(flag, action="store_true", default=None, help=p.help)
-                else: target.add_argument(flag, type=p.ptype, default=None, help=p.help)
-                if p.choices: target._actions[-1].choices = p.choices
+                else:
+                    # type=str (not p.ptype): a value may be "a,b,c" for a cartesian-product
+                    # sweep (see _expand_param_combos), which has to be split BEFORE type
+                    # coercion -- argparse's own type= runs too early to see the raw string.
+                    target.add_argument(flag, type=str, default=None, help=p.help)
         if wants_help:
             target = p_exp if known.command == "experiment" else p_bench
             target.print_help()

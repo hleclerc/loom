@@ -1,24 +1,24 @@
 """
-Shared harness for experiments & benchmarks — the "leveled-up" cousin of `test()`.
+Shared harness for experiments — the "leveled-up" cousin of `test()`/`bench()`
+(loom.testing), for the one-per-file, heavier, explicitly-named case.
 
-Two-phase protocol (same as `loom.testing.test()`):
-  PHASE_COLLECT (SDOT_RUN_PHASE=0): module is imported, `experiment()` / `benchmark()`
-  register metadata and return None.
+Two-phase protocol (same as loom.testing.test()/bench()):
+  PHASE_COLLECT (SDOT_RUN_PHASE=0): module is imported, `experiment()`
+  registers its metadata and returns None.
   PHASE_RUN (SDOT_RUN_PHASE=1): the selected entry runs with parsed CLI args.
 
-Usage — experiment (exp_lung.py):
+Usage (exp_lung.py):
     from loom.cli import experiment, Param
     if p := experiment("lung BFGS", nb_diracs=Param(1000, help="Number of diracs")):
         print(f"Running with {p.nb_diracs} diracs")
 
-Usage — benchmark (bench_speed.py):
-    from loom.cli import benchmark, Param
-    if p := benchmark("execution speed", nb_angles=Param(500)):
-        ...
-
 CLI:
     ./run experiment lung --nb-diracs=5000
     ./run experiment lung --help     # auto-generated from Param declarations
+
+For multiple tests/benchmarks per file (call-site granular, mixable in one
+file), see `loom.testing.test`/`bench` instead — this module is only for the
+one-entry-per-file, param-sweep case.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+
+from loom.testing import Args, Param
 
 # ── phases ────────────────────────────────────────────────────────────────────
 PHASE_COLLECT = 0
@@ -51,49 +53,11 @@ for k, v in os.environ.items():
         _arg_overrides[k[9:]] = v  # strip SDOT_ARG_ prefix
 
 
-# ── Param ─────────────────────────────────────────────────────────────────────
-
-class Param:
-    """A typed CLI parameter with a default value.
-
-    Type is inferred from the default: Param(1000) → int, Param("BFGS") → str.
-    """
-    __slots__ = ("default", "help", "choices")
-
-    def __init__(self, default: Any, *, help: str = "", choices: list | None = None):
-        self.default = default
-        self.help = help
-        self.choices = choices
-
-    @property
-    def ptype(self):
-        return type(self.default)
-
-
-# ── Args ──────────────────────────────────────────────────────────────────────
-
-class Args:
-    """Parsed CLI arguments, accessible as attributes (p.nb_diracs)."""
-    __slots__ = ("__dict__",)
-
-    def __init__(self, **kwargs: Any):
-        self.__dict__.update(kwargs)
-
-    def __repr__(self) -> str:
-        items = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
-        return f"Args({items})"
-
-
 # ── registration & dispatch ───────────────────────────────────────────────────
 
 def experiment(description: str, **params: Param) -> Args | None:
     """Register an experiment (collect) or return its parsed args (run)."""
     return _register("experiment", description, params)
-
-
-def benchmark(description: str, **params: Param) -> Args | None:
-    """Register a benchmark (collect) or return its parsed args (run)."""
-    return _register("benchmark", description, params)
 
 
 def _register(kind: str, description: str, params: dict[str, Param]) -> Args | None:
@@ -129,16 +93,15 @@ def _register(kind: str, description: str, params: dict[str, Param]) -> Args | N
 # ── CLI-facing helpers (used by main.py) ──────────────────────────────────────
 
 def collect(roots: list[str]) -> dict[str, dict]:
-    """Import all exp_*.py and bench_*.py from `roots` in COLLECT mode.
+    """Import all exp_*.py from `roots` in COLLECT mode.
 
     Returns the populated registry: entry_id → {kind, description, params, file}.
     """
     _registry.clear()
     for root_str in roots:
         root = Path(root_str)
-        for pattern in ["exp_*.py", "bench_*.py"]:
-            for pyfile in sorted(root.rglob(pattern)):
-                _import_file(pyfile)
+        for pyfile in sorted(root.rglob("exp_*.py")):
+            _import_file(pyfile)
     return dict(_registry)
 
 

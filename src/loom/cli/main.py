@@ -2,8 +2,11 @@
 """nsdot unified dev runner — CLI entry point. See README.md for usage."""
 
 from __future__ import annotations
-import argparse, copy, itertools, os, subprocess, sys
+import argparse, contextlib, copy, datetime, fnmatch, hashlib, io, itertools
+import os, resource, shutil, subprocess, sys, time, traceback
 from pathlib import Path
+
+from . import layers
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -22,39 +25,489 @@ def run(cmd, *, env=None, cwd=None):
 def python(): return sys.executable
 
 
+def run_in_env(seq, argv, env_vars=None, pull=None):
+    """Run `argv` through the layer sequence `seq`: a local subprocess
+    (relative paths in `argv`/PYTHONPATH resolve against ROOT), or shipped
+    over ssh when `seq` starts with a Remote layer (same relative paths
+    resolve against the remote checkout, via `cd`) -- `pull` paths (relative
+    to root), if given, are rsynced back afterwards; meaningless and ignored
+    when running locally."""
+    cmd = layers.Command(list(argv), dict(env_vars or {}))
+    result = layers.resolve(seq, cmd, layers.Context(root=ROOT), pull=pull)
+    if isinstance(result, int):
+        return result
+    return run(result.argv, env=result.env)
+
+
+# ── per-entry output directories ────────────────────────────────────────────────
+#
+# tmp/{kind}/{file}__{name}/[param_hash]/{env}/{date}/ -- one leaf directory
+# per (test/bench case, resolved param set, env, date). `param_hash` is only
+# present when the entry has params (a short hash rather than a stringified
+# param set, to keep paths short). Only the leaf is cleared+recreated before
+# each run -- its ancestors accumulate history across envs/dates, which is
+# exactly what the two rollup levels below summarize.
+#
+# Pulled back from a remote host as a single deterministic `tmp/{kind}`
+# rsync (see cmd_test/cmd_bench) -- no runtime-declared marker mechanism.
+
+def _slug(s):
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s)).strip("_") or "_"
+
+
+def _param_hash(resolved_params):
+    if not resolved_params:
+        return None
+    blob = repr(sorted(resolved_params.items()))
+    return hashlib.sha256(blob.encode()).hexdigest()[:10]
+
+
+def _entry_dirs(env_name, date_str, kind, entry, resolved_params):
+    """Returns (leaf_dir, hash_dir): leaf_dir is where result.yaml/output.txt
+    land for this run; hash_dir is its .../[param_hash]/ ancestor -- the root
+    the two rollup levels are computed under (.../[hash]/{env}/ and .../[hash]/)."""
+    label = f"{_slug(Path(entry.file).stem)}__{_slug(entry.name)}"
+    hash_dir = ROOT / "tmp" / kind / label
+    h = _param_hash(resolved_params)
+    if h: hash_dir = hash_dir / h
+    return hash_dir / _slug(env_name) / date_str, hash_dir
+
+
+def _clear_dir(path):
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _today_utc():
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def _resolve_for_path(params, overrides_env):
+    """Same resolution as loom.testing.resolve_params, against an explicit
+    {SDOT_ARG_X: val} dict rather than os.environ -- lets the (local)
+    controller predict the exact hash_dir a --env remote run will use,
+    *before* it has actually run, to pull back only that."""
+    resolved = {}
+    for pname, p in params.items():
+        raw = overrides_env.get(f"SDOT_ARG_{pname.upper()}")
+        if raw is not None:
+            try: resolved[pname] = p.ptype(raw)
+            except (ValueError, TypeError): resolved[pname] = p.default
+        else:
+            resolved[pname] = p.default
+    return resolved
+
+
+def _pull_dirs_for(kind, entries, env_name, overrides_env):
+    """The exact set of hash_dir's (leaf's grandparent -- includes the
+    refreshed rollups, not just the raw result) this invocation's entries
+    will write to. tmp/ isn't touched by the repo push/--delete, so a remote
+    host can carry old, unrelated runs -- pulling this precise set instead of
+    the whole tmp/{kind} avoids dragging that back."""
+    date_str = _today_utc()
+    dirs = set()
+    for e in entries:
+        resolved = _resolve_for_path(e.params, overrides_env)
+        _, hash_dir = _entry_dirs(env_name, date_str, kind, e, resolved)
+        dirs.add(str(hash_dir.relative_to(ROOT)))
+    return sorted(dirs)
+
+
+def _ram_mb():
+    """Peak RSS of this process so far -- a running high-water-mark (tests run
+    in-process, reimported one after another), not an isolated per-entry
+    measurement: it won't go back down between entries."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
+
+
+class _Tee:
+    def __init__(self, *streams): self._streams = streams
+    def write(self, s):
+        for st in self._streams: st.write(s)
+        return len(s)
+    def flush(self):
+        for st in self._streams: st.flush()
+
+
+@contextlib.contextmanager
+def _capture_output():
+    """Mirror stdout/stderr to a buffer while still printing live, so a run's
+    text output can be saved to output.txt without losing the console feed."""
+    buf = io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Tee(old_out, buf), _Tee(old_err, buf)
+    try:
+        yield buf
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+
+
+def _yaml_safe(v):
+    """Best-effort sanitizer so an unpicklable value stuffed into p.results
+    (a numpy/jax scalar, say) degrades to its repr() instead of crashing the
+    write of an otherwise-successful run's result.yaml."""
+    if isinstance(v, dict): return {k: _yaml_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)): return [_yaml_safe(x) for x in v]
+    if v is None or isinstance(v, (str, int, float, bool)): return v
+    return repr(v)
+
+
+def _write_result_yaml(out_dir, *, kind, entry, env_name, status, error,
+                        duration_s, ram_mb, params, results, output_text):
+    import yaml
+    output_file = None
+    if output_text.strip():
+        output_file = "output.txt"
+        (out_dir / output_file).write_text(output_text)
+    data = {
+        "name": entry.name,
+        "file": str(Path(entry.file).relative_to(ROOT)),
+        "line": entry.line,
+        "kind": kind,
+        "env": env_name,
+        "status": status,
+        "error": error,
+        "duration_s": round(duration_s, 3),
+        "ram_mb": round(ram_mb, 1),
+        "params": _yaml_safe(params),
+        "results": _yaml_safe(results),
+        "output_file": output_file,
+    }
+    with open(out_dir / "result.yaml", "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    return data
+
+
+def _numeric_summary(row):
+    """min/max across p.results' numeric values (what a bench put there);
+    falls back to duration_s when there's nothing numeric in results (e.g. a
+    plain test) so every row still gets a meaningful pair."""
+    vals = [v for v in row.get("results", {}).values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not vals:
+        vals = [row["duration_s"]]
+    return min(vals), max(vals)
+
+
+def _write_rollup(dir_path, rows_by_label):
+    """rows_by_label: {label: result.yaml-dict}. One row per label: status +
+    min/max of that single run's numeric values (see _numeric_summary)."""
+    import yaml
+    entries = {}
+    for label, row in sorted(rows_by_label.items()):
+        lo, hi = _numeric_summary(row)
+        entries[label] = {"status": row["status"], "min": lo, "max": hi}
+    data = {
+        "ok": sum(1 for r in rows_by_label.values() if r["status"] == "PASS"),
+        "not_ok": sum(1 for r in rows_by_label.values() if r["status"] != "PASS"),
+        "entries": entries,
+    }
+    with open(dir_path / "summary.yaml", "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+
+
+def _refresh_rollups(hash_dir, env_name):
+    """Recompute the two ancestor summaries after a result.yaml changed under
+    `hash_dir` (re-scanning the filesystem, not an in-memory ledger -- self-
+    healing, and correct however many separate invocations contributed):
+
+    hash_dir/{env}/summary.yaml   rows = dates, this env only ("sans la date")
+    hash_dir/summary.yaml         rows = "env/date", across all envs ("sans l'env")
+    """
+    import yaml
+
+    def _load(rf):
+        return yaml.safe_load(rf.read_text()) if rf.exists() else None
+
+    env_dir = hash_dir / env_name
+    by_date = {p.name: _load(p / "result.yaml") for p in sorted(env_dir.iterdir()) if p.is_dir()}
+    _write_rollup(env_dir, {k: v for k, v in by_date.items() if v})
+
+    by_env_date = {}
+    for one_env_dir in sorted(p for p in hash_dir.iterdir() if p.is_dir()):
+        for date_dir in sorted(p for p in one_env_dir.iterdir() if p.is_dir()):
+            row = _load(date_dir / "result.yaml")
+            if row:
+                by_env_date[f"{one_env_dir.name}/{date_dir.name}"] = row
+    _write_rollup(hash_dir, by_env_date)
+
+
+# ── test / bench discovery ──────────────────────────────────────────────────────
+#
+# A pattern is a comma-separated list of `file[::name]` specs (both globbable
+# with `*`). The file part locates a *.py anywhere in the repo by stem (the
+# legacy test_/bench_ prefix is optional: "Cell" matches "test_Cell.py"), no
+# project/directory distinction -- with no `*` it must resolve to exactly one
+# file. The name part, if given, filters that file's test()/bench() entries by
+# name (fnmatch; no `*` means exact). No pattern at all means "everything".
+
+_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", "build", "dist", ".venv", "tmp",
+    ".private", ".cache", "graphify-out",
+}
+
+
+def _iter_py_files(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.endswith(".egg-info")]
+        for f in filenames:
+            if f.endswith(".py"):
+                yield Path(dirpath) / f
+
+
+def _looks_like_test_file(path):
+    """Cheap text check (no import): does this file plausibly declare a
+    test/bench? Without this, searching the whole repo makes any source file
+    that happens to share its test's name (Cell.py vs. test_Cell.py -- the
+    common case) a false ambiguity, or a wrong match, for what should be an
+    unambiguous lookup."""
+    try:
+        return "loom.testing" in path.read_text(errors="ignore")
+    except OSError:
+        return False
+
+
+def _test_candidates(project_filter):
+    candidates = sorted(p for p in _iter_py_files(ROOT) if _looks_like_test_file(p))
+    if project_filter:
+        candidates = [p for p in candidates if p.relative_to(ROOT).parts[0] == project_filter]
+    return candidates
+
+
+def _file_stems(path):
+    s = path.stem
+    yield s
+    for pre in ("test_", "bench_"):
+        if s.startswith(pre):
+            yield s[len(pre):]
+
+
+def _resolve_spec(spec, candidates):
+    """spec: 'file[::name]', either side globbable with `*`, either side optional.
+    Returns (matched_files: list[Path], name_glob: str | None)."""
+    file_part, _, name_glob = spec.partition("::")
+    file_part = file_part.strip()
+    name_glob = name_glob.strip() if "::" in spec else None
+    name_glob = name_glob or None
+
+    if not file_part:
+        return list(candidates), name_glob
+
+    has_wild = "*" in file_part or "?" in file_part
+    if has_wild:
+        matched = [p for p in candidates if any(fnmatch.fnmatchcase(s, file_part) for s in _file_stems(p))]
+    else:
+        matched = [p for p in candidates if any(s == file_part for s in _file_stems(p))]
+        if len(matched) > 1:
+            names = ", ".join(str(p.relative_to(ROOT)) for p in matched)
+            raise ValueError(f"'{file_part}' matches several files ({names}) -- use a glob (e.g. '{file_part}*') to select them all")
+        # 0 matches is NOT an error here: the file part may name a C++ test
+        # (loom/tests/cpp/, a separate discovery path) instead of a Python
+        # one -- the caller decides what "nothing at all matched" means.
+
+    return matched, name_glob
+
+
+def _resolve_pattern(pattern, project_filter):
+    """Returns [(matched_files, name_glob), ...], one per comma-separated spec."""
+    candidates = _test_candidates(project_filter)
+    specs = [s.strip() for s in pattern.split(",")] if pattern else [""]
+    return [_resolve_spec(s, candidates) for s in specs]
+
+
+_SCAN_PKG = "_sdot_scan"  # synthetic namespace root, mirrors real directories -- never collides
+                          # with an installed package, unlike using the real dir names directly
+                          # (a file under sdot/tests/ is NOT part of the real `sdot` package, whose
+                          # __path__ is sdot/src/sdot -- reusing "sdot" here would shadow/conflict).
+
+
+def _import_test_file(path):
+    """Import `path` under `_sdot_scan.<dir>.<dir>...<stem>`, ancestor
+    directories registered as namespace packages with their real __path__ --
+    so a relative import inside it (`from .sibling import x`) resolves
+    against the file's actual directory. A flat synthetic name (the old
+    scheme) has no package context at all, so those always failed. Ancestor
+    packages are cached; only the leaf module is freshly re-executed on every
+    call, needed for the test/bench reimport-per-entry model."""
+    import importlib.util
+    rel_parts = path.resolve().relative_to(ROOT).with_suffix("").parts
+    pkg_name, pkg_dir = _SCAN_PKG, ROOT
+    for part in rel_parts[:-1]:
+        pkg_name, pkg_dir = f"{pkg_name}.{part}", pkg_dir / part
+        if pkg_name not in sys.modules:
+            pkg_spec = importlib.util.spec_from_loader(pkg_name, loader=None, is_package=True)
+            pkg_mod = importlib.util.module_from_spec(pkg_spec)
+            pkg_mod.__path__ = [str(pkg_dir)]
+            sys.modules[pkg_name] = pkg_mod
+
+    name = f"{pkg_name}.{rel_parts[-1]}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod, name
+
+
+def _select_entries(kind, resolved_specs):
+    """Import every file matched by any spec (collect phase), then keep the
+    `kind` entries whose file+name matches the spec that selected that file."""
+    from loom import testing as tm
+
+    files = sorted({f for matched, _ in resolved_specs for f in matched}, key=str)
+    tm.test_phase = tm.PHASE_COLLECT
+    tm.all_entries.clear()
+    file_modules = {}
+    for f in files:
+        _, mname = _import_test_file(f)
+        file_modules[mname] = f
+
+    selected = []
+    for e in tm.all_entries:
+        if e.kind != kind:
+            continue
+        efile = Path(e.file)
+        for matched, name_glob in resolved_specs:
+            if efile not in matched:
+                continue
+            if name_glob is None or fnmatch.fnmatchcase(e.name, name_glob):
+                selected.append(e)
+                break
+    return selected, file_modules
+
+
+def _entries_and_overrides(kind, args):
+    """Resolve args.pattern -> (entries, file_modules, union-of-declared-params)."""
+    resolved_specs = _resolve_pattern(getattr(args, "pattern", None), getattr(args, "project", None))
+    entries, file_modules = _select_entries(kind, resolved_specs)
+    seen_params = {}
+    for e in entries:
+        seen_params.update(e.params)
+    return entries, file_modules, seen_params
+
+
+def _print_entries_help(kind, entries):
+    if not entries:
+        print(_dim(f"  no {kind} matched"))
+        return
+    from loom import testing as tm
+    for e in entries:
+        where = f"{Path(e.file).relative_to(ROOT)}:{e.line}"
+        print(_hdr(f"\n{e.name}") + _dim(f"  ({where})"))
+        if e.tags: print(_dim(f"  tags: {e.tag_text}"))
+        for pname, p in e.params.items():
+            flag = f"--{pname.replace('_', '-')}"
+            print(f"  {flag:24s} default={p.default!r}  {p.help}")
+
+
+def _run_entries(kind, entries, file_modules, env_name):
+    """Run `entries` (already filtered to `kind`) one at a time, reimporting
+    each entry's module so bodies execute isolated -- exactly the C++ harness's
+    model. Each run gets its own tmp/{kind}/... leaf directory (see above), a
+    result.yaml (status, timing, RAM, params, p.results, captured output), and
+    the two ancestor rollups get refreshed right after."""
+    from loom import testing as tm
+    if not entries:
+        return []
+    print(f"\n{'='*12} [{kind}] {len(entries)} entrie(s) {'='*12}", flush=True)
+    tm.test_phase = tm.PHASE_RUN
+    failures = []
+    date_str = _today_utc()
+    try:
+        for e in entries:
+            tm.test_filter = e
+            where = f"{Path(e.file).name}:{e.line}"
+            resolved = tm.resolve_params(e.params)
+            if e.params:
+                summary = ", ".join(f"{k}={v!r}" for k, v in resolved.items())
+                print(_dim(f"  {e.name} ({where}) -- {summary}"), flush=True)
+
+            leaf_dir, hash_dir = _entry_dirs(env_name, date_str, kind, e, resolved)
+            _clear_dir(leaf_dir)
+            os.environ["SDOT_OUT_DIR"] = str(leaf_dir.relative_to(ROOT))
+
+            t0 = time.perf_counter()
+            status, error = "PASS", None
+            with _capture_output() as buf:
+                try:
+                    _import_test_file(file_modules[e.module])
+                except Exception as exc:
+                    status, error = "FAIL", str(exc)
+                    traceback.print_exc()
+            duration_s = time.perf_counter() - t0
+
+            if status == "PASS":
+                print(f"{tm.GREEN}PASS:{tm.RESET} {e.name} ({where})", flush=True)
+            else:
+                print(f"{tm.RED}FAIL:{tm.RESET} {e.name} ({where}) - {error}", flush=True)
+                sys.stdout.flush()
+                failures.append((kind, e.name, "run"))
+
+            _write_result_yaml(
+                leaf_dir, kind=kind, entry=e, env_name=env_name,
+                status=status, error=error, duration_s=duration_s, ram_mb=_ram_mb(),
+                params=resolved, results=dict(tm.current_results), output_text=buf.getvalue(),
+            )
+            _refresh_rollups(hash_dir, _slug(env_name))
+    finally:
+        tm.test_phase = tm.PHASE_COLLECT; tm.test_filter = None
+    return failures
+
+
+def _cpp_filters(pattern):
+    """Best-effort translation into cpp test filters: the C++ side (test_main.h)
+    has its own, separate substring matcher, so `*`/`::` markup is stripped
+    rather than interpreted -- only enough to narrow which test_*.cpp files
+    to build (by filename substring) and what to pass the executable."""
+    if not pattern:
+        return []
+    out = []
+    for spec in pattern.split(","):
+        file_part, _, name_part = spec.partition("::")
+        out.append((file_part or name_part).strip().strip("*"))
+    return [f for f in out if f]
+
+
 # ── test ──────────────────────────────────────────────────────────────────────
 
 def cmd_test(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
-    env_vars = envs.build_env_vars(args)
+    seq = env_cfg.seq if env_cfg else []
+    # SDOT_ENV_NAME, if set, means we're the remote-side half of a dispatch:
+    # use the ORIGINATING env's name for output-path labeling rather than
+    # "default" (no --env crosses the ssh hop, precisely to avoid
+    # re-resolving the same Remote layer and ssh'ing from the remote host
+    # back out to itself -- see the run_in_env call below).
+    env_name = os.environ.get("SDOT_ENV_NAME") or (env_cfg.name if env_cfg else "default")
 
-    if args.host:
-        host, remote_dir, hostname, python_wrapped = _remote_setup(args, env_cfg)
-        if host is None:
-            return 1
+    try:
+        entries, file_modules, seen_params = _entries_and_overrides("test", args)
+    except ValueError as e:
+        print(_err(str(e)))
+        return 1
 
-        # Reconstruct test flags for the remote `./run test` invocation.
-        # Don't pass --env (already inside the container) or --host (no recursion).
-        test_flags = []
-        if args.name:
-            test_flags.append(f"--name={args.name}")
-        if args.project:
-            test_flags.append(f"--project={args.project}")
-        if args.device:
-            test_flags.append(f"--device={args.device}")
-        if args.fp:
-            test_flags.append(f"--fp={args.fp}")
+    if envs.remote_of(env_cfg):
+        overrides = envs.arg_overrides_to_env(args, seen_params)
+        env_vars = envs.build_env_vars(args)
+        env_vars.update(overrides)
+        pattern_arg = [args.pattern] if getattr(args, "pattern", None) else []
+        pull = _pull_dirs_for("test", entries, env_name, overrides)
+        # NOT "--env {env_name}": the remote side re-resolves .envs.py itself,
+        # and that name's seq still starts with the same Remote layer -- it'd
+        # try to ssh from the remote host back out to itself. SDOT_ENV_NAME
+        # only overrides the output-path label, without touching dispatch.
+        env_vars["SDOT_ENV_NAME"] = env_name
+        return run_in_env(seq, ["python", "./run", "test", *pattern_arg], env_vars, pull=pull)
 
-        runner = f"{remote_dir}/run"
-        env_str = " ".join(f"{k}={v}" for k, v in env_vars.items())
-        flags_str = " ".join(test_flags)
-        remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {python_wrapped} {runner} test {flags_str}"
-        return _ssh_run(hostname, remote_dir, remote_cmd)
+    if seen_params:
+        os.environ.update(envs.arg_overrides_to_env(args, seen_params))
 
-    # Local execution
-    filters = [args.name] if args.name else []
-    failures = _run_cpp_tests(filters) + _run_python_tests(filters, args.project)
+    cpp_ran, cpp_failures = _run_cpp_tests(_cpp_filters(getattr(args, "pattern", None)))
+    failures = cpp_failures + _run_entries("test", entries, file_modules, env_name)
+    if getattr(args, "pattern", None) and not entries and not cpp_ran:
+        print(_err(f"No test matched '{args.pattern}'"))
+        return 1
     print("\n" + "=" * 48)
     if failures:
         for label, name, phase in failures:
@@ -64,62 +517,18 @@ def cmd_test(args):
     return 0
 
 
-def _run_python_tests(filters, project_filter):
-    import importlib, importlib.util, traceback
-    projects = ["loom", "sdot", "otrec"]
-    if project_filter: projects = [p for p in projects if p in project_filter]
-    files = []
-    for proj in projects:
-        td = ROOT / proj / "tests"
-        if td.is_dir(): files += sorted(td.glob("test_*.py"))
-    if not files: return []
-    filter_names = [f for f in filters if "[" not in f]
-    if filter_names:
-        files = [f for f in files if any(n.split("::")[0].lower() in f.stem.lower() for n in filter_names)]
-    if not files: return []
-    tm = importlib.import_module("loom.testing")
-    tm.test_phase = tm.PHASE_COLLECT
-    tm.all_the_tests.clear()
-    def _import_test(path):
-        name = "_sdot_test__" + "__".join(str(path.resolve().relative_to(ROOT).with_suffix("")).split("/"))
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-        return mod, name
-    file_modules = {}
-    for f in files: _, mname = _import_test(f); file_modules[mname] = f
-    filter_tags = [f for f in filters if "[" in f]
-    selected = [t for t in tm.all_the_tests if tm.matches(t, filter_names, filter_tags)]
-    if not selected: return []
-    print(f"\n{'='*12} [python] {len(selected)} test(s) {'='*12}", flush=True)
-    tm.test_phase = tm.PHASE_RUN
-    failures = []
-    try:
-        for t in selected:
-            tm.test_filter = t
-            where = f"{Path(t.file).name}:{t.line}"
-            try:
-                _import_test(file_modules[t.module])
-                print(f"{tm.GREEN}PASS:{tm.RESET} {t.name} ({where})", flush=True)
-            except Exception as e:
-                print(f"{tm.RED}FAIL:{tm.RESET} {t.name} ({where}) - {e}", flush=True)
-                traceback.print_exc(); sys.stdout.flush()
-                failures.append(("python", t.name, "run"))
-    finally:
-        tm.test_phase = tm.PHASE_COLLECT; tm.test_filter = None
-    return failures
-
-
 def _run_cpp_tests(filters):
+    """Returns (nb_files_matched, failures) -- the count lets the caller tell
+    "nothing matched" apart from "matched, ran, all passed" (both look like
+    an empty failures list otherwise)."""
     from loom.compilation.adaptive_cpp import make_executable
     from loom.devices.Device import Device
     cpp_dir = ROOT / "loom" / "tests" / "cpp"
-    if not cpp_dir.is_dir(): return []
+    if not cpp_dir.is_dir(): return 0, []
     files = sorted(cpp_dir.glob("test_*.*"))
-    if not files: return []
     filter_names = [f for f in filters if "[" not in f]
     if filter_names: files = [f for f in files if any(k.lower() in f.stem.lower() for k in filter_names)]
+    if not files: return 0, []
     failures = []
     for f in files:
         for dev_name in ["cuda", "cpu"]:
@@ -131,13 +540,56 @@ def _run_cpp_tests(filters):
             except Exception as e:
                 print(f"  BUILD-FAIL: {e}", flush=True); failures.append((device, f.stem, "build")); continue
             if subprocess.run([str(exe), *filters]).returncode: failures.append((device, f.stem, "run"))
-    return failures
+    return len(files), failures
 
 
-# ── experiment / bench ────────────────────────────────────────────────────────
+# ── bench ─────────────────────────────────────────────────────────────────────
+
+def cmd_bench(args):
+    from . import envs
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    seq = env_cfg.seq if env_cfg else []
+    # see cmd_test's comment on SDOT_ENV_NAME
+    env_name = os.environ.get("SDOT_ENV_NAME") or (env_cfg.name if env_cfg else "default")
+
+    try:
+        entries, file_modules, seen_params = _entries_and_overrides("bench", args)
+    except ValueError as e:
+        print(_err(str(e)))
+        return 1
+
+    if envs.remote_of(env_cfg):
+        overrides = envs.arg_overrides_to_env(args, seen_params)
+        env_vars = envs.build_env_vars(args)
+        env_vars.update(overrides)
+        pattern_arg = [args.pattern] if getattr(args, "pattern", None) else []
+        pull = _pull_dirs_for("bench", entries, env_name, overrides)
+        # see cmd_test's comment on SDOT_ENV_NAME vs "--env": passing --env
+        # here would make the remote side re-resolve the same Remote layer
+        # and try to ssh back out to itself.
+        env_vars["SDOT_ENV_NAME"] = env_name
+        return run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull)
+
+    if seen_params:
+        os.environ.update(envs.arg_overrides_to_env(args, seen_params))
+
+    if not entries:
+        print(_err(f"No bench matched '{args.pattern}'" if getattr(args, "pattern", None) else "No bench found"))
+        return 1
+
+    failures = _run_entries("bench", entries, file_modules, env_name)
+    print("\n" + "=" * 48)
+    if failures:
+        for label, name, phase in failures:
+            print(f"  [{label}] {name}: {phase} FAILED")
+        return 1
+    print("  all good")
+    return 0
+
+
+# ── experiment ────────────────────────────────────────────────────────────────
 
 def cmd_experiment(args): return _run_entry("experiment", args)
-def cmd_bench(args): return _run_entry("benchmark", args)
 
 
 def _expand_param_combos(args, params):
@@ -204,11 +656,9 @@ def _run_entry(kind, args):
 
     roots = [str(ROOT / p / "src" / p / "experiments") for p in ("loom", "sdot", "otrec")
              if (ROOT / p / "src" / p / "experiments").is_dir()]
-    roots += [str(ROOT / p / "src" / p / "benchmarks") for p in ("loom", "sdot", "otrec")
-              if (ROOT / p / "src" / p / "benchmarks").is_dir()]
     registry = collect(roots)
 
-    entry_id = f"exp_{name}" if kind == "experiment" else f"bench_{name}"
+    entry_id = f"exp_{name}"
     entry = lookup(entry_id)
     if entry is None:
         for eid, edata in registry.items():
@@ -219,16 +669,18 @@ def _run_entry(kind, args):
         _list_available(kind); return 1
 
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    seq = env_cfg.seq if env_cfg else []
+    remote = envs.remote_of(env_cfg)
 
-    py_root = ROOT
-    if args.host:
-        host = envs.get_host(args.host)
-        if host: py_root = Path(host["remote_dir"])
-    pp_parts = [str(py_root / p / "src") for p in ("loom", "sdot", "otrec")
-                if (py_root / p / "src").is_dir() or args.host]
+    # PYTHONPATH entries stay relative to the repo root -- the subprocess's
+    # cwd is always that root (locally, or remotely via Remote's `cd`).
+    pp_parts = [f"{p}/src" for p in ("loom", "sdot", "otrec")
+                if remote or (ROOT / p / "src").is_dir()]
     existing_pp = os.environ.get("PYTHONPATH", "")
     if existing_pp: pp_parts.insert(0, existing_pp)
     pythonpath = ":".join(pp_parts)
+
+    entry_file = str(Path(entry["file"]).relative_to(ROOT))
 
     combos = _expand_param_combos(args, entry["params"])
     if combos is None:
@@ -249,93 +701,16 @@ def _run_entry(kind, args):
         arg_overrides = envs.arg_overrides_to_env(combo_args, entry["params"])
         env_vars.update(arg_overrides)
 
-        if combo_args.host:
-            r = _run_remote(kind, entry, combo_args, env_vars, env_cfg)
-        else:
-            print(_hdr(f"\n{kind}: {entry['description']}"))
-            print(_dim(f"  file: {entry['file']}"))
-            if arg_overrides: print(_dim(f"  overrides: {arg_overrides}"))
-            cmd = [python(), entry["file"]]
-            cmd = envs.wrap_command(cmd, env_cfg)
-            r = run(cmd, env=env_vars)
+        print(_hdr(f"\n{kind}: {entry['description']}"))
+        print(_dim(f"  file: {entry['file']}"))
+        if arg_overrides: print(_dim(f"  overrides: {arg_overrides}"))
+        # No pull=: experiments write to ad hoc paths they choose themselves
+        # (no fixed naming scheme like test/bench's tmp/{kind}/...), and tmp/
+        # isn't reset by the repo push, so a remote host can carry old,
+        # unrelated files there -- nothing precise to pull back automatically.
+        r = run_in_env(seq, [python(), entry_file], env_vars)
         rc = rc or r
     return rc
-
-
-RSYNC_EXCLUDES = ["--exclude=build","--exclude=*.so","--exclude=*.o","--exclude=*.dylib",
-                  "--exclude=node_modules","--exclude=.venv","--exclude=tmp",
-                  "--exclude=__pycache__","--exclude=*.pyc","--exclude=.git",
-                  "--exclude=dist","--exclude=*.egg-info","--exclude=*.sif"]
-
-
-def _remote_setup(args, env_cfg):
-    """Sync the repo and check the .sif (if apptainer).  Returns (host, remote_dir, hostname, python_wrapped) or (None,)*4 on failure."""
-    from . import envs
-    host = envs.get_host(args.host)
-    if host is None:
-        print(_err(f"Host '{args.host}' not found in .hosts.toml"))
-        return None, None, None, None
-    hostname = host["hostname"]
-    remote_dir = host["remote_dir"]
-
-    print(_hdr(f"syncing → {hostname}:{remote_dir}"))
-    run(["rsync", "-a", "--delete", *RSYNC_EXCLUDES, f"{ROOT}/", f"{hostname}:{remote_dir}/"])
-
-    if env_cfg and env_cfg.get("type") == "apptainer":
-        image = env_cfg["image"]
-        if not envs.sif_exists_on_host(host, env_cfg):
-            print(_err(f"\n  Container image not found on {hostname}: {remote_dir}/{image}"))
-            print(_err(f"  Build it first:"))
-            print(_dim(f"    ./run build-sif --env {args.env or env_cfg.get('_name','?')} --host {args.host}"))
-            return None, None, None, None
-
-    remote_python = host.get("python", sys.executable)
-    python_wrapped = envs.wrap_remote_command(remote_python, env_cfg, remote_dir)
-    return host, remote_dir, hostname, python_wrapped
-
-
-def _ssh_run(hostname, remote_dir, remote_cmd):
-    """Execute `remote_cmd` on the host via SSH, stream output, rsync back OUTPUT: files."""
-    ssh_cmd = ["ssh", hostname, remote_cmd]
-    print(_hdr(f"executing on {hostname}"))
-    print(_dim(f"  {remote_cmd}"))
-
-    proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    output_files = []
-    for line in proc.stdout:
-        line = line.rstrip("\n")
-        if line.startswith("OUTPUT:"):
-            output_files.append(line.split("OUTPUT:", 1)[1].strip())
-            print(_ok(f"  ← {line.partition('OUTPUT:')[2]}"))
-        else:
-            print(line)
-    rc = proc.wait()
-
-    if output_files:
-        print(_hdr("retrieving outputs"))
-        for path in output_files:
-            local_path = ROOT / path; local_path.parent.mkdir(parents=True, exist_ok=True)
-            run(["rsync", "-a", f"{hostname}:{remote_dir}/{path}", str(local_path)])
-    return rc
-
-
-def _run_remote(kind, entry, args, env_vars, env_cfg):
-    host, remote_dir, hostname, python_wrapped = _remote_setup(args, env_cfg)
-    if host is None:
-        return 1
-
-    runner = f"{remote_dir}/run"
-    entry_name = getattr(args, f"{kind}_name")
-    env_assignments = []
-    extra_flags = []
-    for k, v in env_vars.items():
-        env_assignments.append(f"{k}={v}")
-        if k.startswith("SDOT_ARG_"):
-            extra_flags.append(f"--{k[9:].lower().replace('_', '-')}={v}")
-    env_str = " ".join(env_assignments)
-    flags_str = " ".join(extra_flags)
-    remote_cmd = f"cd {remote_dir} && mkdir -p tmp && {env_str} {python_wrapped} {runner} {kind} {entry_name} {flags_str}"
-    return _ssh_run(hostname, remote_dir, remote_cmd)
 
 
 def _list_available(kind):
@@ -353,51 +728,44 @@ def _list_available(kind):
 # ── other commands ────────────────────────────────────────────────────────────
 
 def cmd_build_sif(args):
-    """Build Apptainer .sif images from .def files.
+    """Build Apptainer .sif images out of .envs.py's Apptainer layers.
 
-    Reads .hosts.toml for apptainer-type environments and derives the .def file
-    from the image path. Builds locally or remotely (via --host).
+    Iterates every env (or just --env NAME); envs without an Apptainer layer
+    are skipped. Builds locally, or on the env's Remote (rsync -> ssh ->
+    apptainer build) when it has one.
     """
     from . import envs
 
-    apptainer_envs = envs.list_apptainer_envs()
+    all_envs = envs.load_envs()
+    if args.env_name and args.env_name not in all_envs:
+        print(_err(f"Unknown env: {args.env_name}"))
+        print(_dim(f"  Available: {', '.join(all_envs) or '(none)'}"))
+        return 1
+    targets = [all_envs[args.env_name]] if args.env_name else list(all_envs.values())
 
-    # Filter by --env if specified
-    if args.env_name:
-        if args.env_name not in apptainer_envs:
-            print(_err(f"Unknown apptainer env: {args.env_name}"))
-            print(_dim(f"  Available: {', '.join(apptainer_envs) or '(none)'}"))
-            return 1
-        apptainer_envs = {args.env_name: apptainer_envs[args.env_name]}
-
-    if not apptainer_envs:
-        print(_err("No apptainer environments found in .hosts.toml"))
-        print(_dim("  Add an [envs.<name>] with type = \"apptainer\" and an image = \"containers/<name>.sif\" path."))
+    with_image = [(e, envs.apptainer_of(e)) for e in targets]
+    with_image = [(e, a) for e, a in with_image if a is not None]
+    if not with_image:
+        scope = f"matching '{args.env_name}'" if args.env_name else "in .envs.py"
+        print(_err(f"No Apptainer-based env found {scope}"))
         return 1
 
-    host_cfg = None
-    if args.host:
-        host_cfg = envs.get_host(args.host)
-        if host_cfg is None:
-            print(_err(f"Unknown host: {args.host}"))
-            return 1
-
     rc = 0
-    for env_name, env_cfg in apptainer_envs.items():
-        def_file = envs.def_for_image(env_cfg["image"])
+    for env_cfg, apptainer in with_image:
+        def_file = envs.def_for_image(apptainer.image)
         if not (ROOT / def_file).exists():
-            print(_err(f"  {env_name}: .def file not found: {def_file}"))
+            print(_err(f"  {env_cfg.name}: .def file not found: {def_file}"))
             rc = 1
             continue
 
-        if host_cfg:
-            print(_hdr(f"\nbuild-sif: {env_name} → {env_cfg['image']} (on {args.host})"))
-            # Show which scratch dir will be used
-            sd = args.scratch_dir or host_cfg.get("apptainer_scratch", "")
+        remote = envs.remote_of(env_cfg)
+        if remote:
+            print(_hdr(f"\nbuild-sif: {env_cfg.name} → {apptainer.image} (on {remote.host})"))
+            sd = args.scratch_dir or remote.apptainer_scratch or ""
             if sd:
                 print(_dim(f"  scratch: {sd}"))
-            commands = envs.remote_build_sif(
-                host_cfg, env_cfg,
+            commands = envs.remote_build_sif_commands(
+                remote, apptainer,
                 force=args.force, fakeroot=args.fakeroot,
                 scratch_dir=args.scratch_dir,
             )
@@ -406,12 +774,10 @@ def cmd_build_sif(args):
                     rc = 1
                     break
         else:
-            print(_hdr(f"\nbuild-sif: {env_name} → {env_cfg['image']}"))
-            cmd = envs.build_sif_command(env_cfg, force=args.force, fakeroot=args.fakeroot)
+            print(_hdr(f"\nbuild-sif: {env_cfg.name} → {apptainer.image}"))
+            cmd = envs.build_sif_command(apptainer, force=args.force, fakeroot=args.fakeroot)
             if args.scratch_dir:
-                cmd_env = os.environ.copy()
-                cmd_env["APPTAINER_TMPDIR"] = args.scratch_dir
-                cmd_env["APPTAINER_CACHEDIR"] = args.scratch_dir
+                cmd_env = {"APPTAINER_TMPDIR": args.scratch_dir, "APPTAINER_CACHEDIR": args.scratch_dir}
                 print(_dim(f"  APPTAINER_TMPDIR={args.scratch_dir}"))
                 if run(cmd, env=cmd_env) != 0:
                     rc = 1
@@ -424,128 +790,125 @@ def cmd_build_sif(args):
 
 def cmd_env(args):
     from . import envs
-    cfg = envs.load_config()
-    all_envs = cfg.get("envs", {})
+    all_envs = envs.load_envs()
 
-    print(_hdr("\nEnvironments (.hosts.toml → [envs]):"))
+    print(_hdr("\nEnvironments (.envs.py):"))
     if not all_envs:
         print(_dim("  (none configured)"))
-    else:
-        # Determine the default env (replicate get_env resolution)
-        if "default" in all_envs:
-            default_name = "default"
-        elif all_envs:
-            default_name = next(iter(all_envs))
-        else:
-            default_name = None
+        return 0
 
-        for name, ecfg in all_envs.items():
-            marker = " ← default" if name == default_name else ""
-            etype = ecfg.get("type", "?")
-            driver = ecfg.get("driver", "?")
-            extra = ""
-            if etype == "micromamba":
-                extra = f'name={ecfg.get("name","?")}'
-            elif etype == "apptainer":
-                extra = f'image={ecfg.get("image","?")}'
-            print(f"  {name:18s}  driver={driver:6s}  type={etype:12s}  {extra}{marker}")
-            # Show mounts for apptainer envs
-            mounts = ecfg.get("mounts", {})
-            if mounts:
-                for src, dst in mounts.items():
-                    print(f"  {'':18s}  mount: {src} → {dst}")
+    default_name = "default" if "default" in all_envs else next(iter(all_envs), None)
 
-        print(_dim(f"\n  Select with: --env <name>  (or --driver <{', '.join(sorted(set(e.get('driver','?') for e in all_envs.values())))})>"))
+    for name, e in all_envs.items():
+        marker = " ← default" if name == default_name else ""
+        parts = []
+        for layer in e.seq:
+            if isinstance(layer, layers.Remote):
+                parts.append(f"remote={layer.host}")
+            elif isinstance(layer, layers.Micromamba):
+                parts.append(f"micromamba={layer.name}")
+            elif isinstance(layer, layers.Venv):
+                parts.append(f"venv={layer.python}")
+            elif isinstance(layer, layers.Apptainer):
+                parts.append(f"apptainer={layer.image}")
+        print(f"  {name:18s}  driver={e.driver or '?':6s}  {' '.join(parts)}{marker}")
+        remote = envs.remote_of(e)
+        if remote and remote.apptainer_scratch:
+            print(f"  {'':18s}  scratch: {remote.apptainer_scratch}")
 
-    print(_hdr("\nHosts (.hosts.toml → [hosts]):"))
-    hosts = cfg.get("hosts", {})
-    if not hosts:
-        print(_dim("  (none configured)"))
-    else:
-        for name, hcfg in hosts.items():
-            scratch = hcfg.get("apptainer_scratch", "")
-            extra = f'  scratch={scratch}' if scratch else ""
-            print(f"  {name:18s}  hostname={hcfg.get('hostname','?')}{extra}")
-        print(_dim("\n  Select with: --host <name>  |  builds sync via rsync → ssh"))
-
+    drivers = sorted({e.driver for e in all_envs.values() if e.driver})
+    print(_dim(f"\n  Select with: --env <name>  (or --driver <{', '.join(drivers)}>)"))
     return 0
 
 
 def cmd_install(args):
     from . import envs
-    env_cfg = envs.get_env(name=args.env, driver=args.driver); rc = 0
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    seq = env_cfg.seq if env_cfg else []
+    remote = envs.remote_of(env_cfg)
+    rc = 0
+    driver_layer = env_cfg.driver_layer if env_cfg else None
+    if driver_layer and driver_layer.pip:
+        print(_hdr(f"\ninstall: {driver_layer.pip}"))
+        # installed first so it's already satisfied when a project's own
+        # dependencies (e.g. otrec -> optax -> jax) pull in the plain package
+        if run_in_env(seq, [python(), "-m", "pip", "install", driver_layer.pip]) != 0: rc = 1
     for proj in ["loom", "sdot", "otrec"]:
-        proj_dir = ROOT / proj
-        if not (proj_dir / "pyproject.toml").exists(): continue
+        if not remote and not (ROOT / proj / "pyproject.toml").exists(): continue
         print(_hdr(f"\ninstall: {proj}"))
-        cmd = [python(), "-m", "pip", "install", "-e", str(proj_dir)]
-        cmd = envs.wrap_command(cmd, env_cfg)
-        if run(cmd) != 0: rc = 1
+        if run_in_env(seq, [python(), "-m", "pip", "install", "-e", proj]) != 0: rc = 1
     return rc
 
 
 def cmd_toolchain(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
-    cmd = [python(), "-m", "loom.toolchain"]
-    cmd = envs.wrap_command(cmd, env_cfg)
-    return run(cmd)
+    seq = env_cfg.seq if env_cfg else []
+    return run_in_env(seq, [python(), "-m", "loom.toolchain"])
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
     EPILOG = """
-Environment selection (--env / --driver / --host):
-  --env NAME      Use a specific environment from .hosts.toml (e.g. "cuda-jax", "torch")
+Environment selection (--env / --driver):
+  --env NAME      Use a specific environment from .envs.py (e.g. "cuda-jax", "lmo-cuda-jax")
   --driver jax    Auto-select the first env whose driver matches
-  --host HOST     Run on the remote machine (uses the remote's python + env)
   --device cuda   Set SDOT_DEVICE and JAX_PLATFORMS for the child process
   --fp FP64       Set SDOT_FTYPE (FP32 or FP64)
 
   When neither --env nor --driver is given, the env named "default" is used.
-  Run `./run env list` to see all configured environments and hosts.
+  A remote machine is just an env whose seq starts with a Remote layer --
+  select it like any other env (no separate --host flag).
+  Run `./run env` to see all configured environments.
+
+Test / bench selection (positional pattern, comma-separated file[::name] specs):
+  ./run test                             # everything
+  ./run test Cell                        # everything in test_Cell.py
+  ./run test Cell::batch                 # just "batch" in test_Cell.py
+  ./run test "Cell::batch*,OtPlan1d::*"  # multiple specs
+  A bare file part with no `*` must resolve to exactly one file.
 
   Examples:
     ./run test --env cuda-jax              # Run tests in a specific env
     ./run test --driver torch              # Auto-select the torch env
-    ./run test --host lmo                  # Run tests remotely on lmo
-    ./run test --env cuda-jax --host lmo   # Specific env on a remote host
+    ./run test --env lmo-cuda-jax          # Run tests on lmo, in a container
+    ./run bench "OtPlan1d::*" --nb-diracs=5000
     ./run build-sif --env cuda-jax         # Build a specific container image
-    ./run build-sif --host lmo             # Build all containers on a remote host
+    ./run build-sif                        # Build every Apptainer-backed env
 """
     parser = argparse.ArgumentParser(prog="run", description="nsdot unified dev runner",
                                      epilog=EPILOG,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
     def add_shared(p):
-        p.add_argument("--env", default=None, help="Environment from .hosts.toml (default: auto by driver, then 'default')")
+        p.add_argument("--env", default=None, help="Environment from .envs.py (default: auto by driver, then 'default')")
         p.add_argument("--driver", default=None, help="Framework driver: jax, torch")
         p.add_argument("--fp", default=None, help="Floating-point precision (FP32, FP64)")
         p.add_argument("--device", default=None, help="Target device (cpu, cuda)")
-        p.add_argument("--host", default=None, help="Remote host (from .hosts.toml)")
         p.add_argument("-v", "--verbose", action="store_true")
 
-    p_test = sub.add_parser("test", help="Run tests")
+    p_test = sub.add_parser("test", help="Run tests", add_help=False)
     add_shared(p_test)
-    p_test.add_argument("--name", help="Test name filter")
-    p_test.add_argument("--project", help="Restrict to project (loom, sdot, otrec)")
+    p_test.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
+    p_test.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
+    p_test.add_argument("-h", "--help", action="store_true", help="Show matched tests and their params")
+
+    p_bench = sub.add_parser("bench", help="Run benchmarks", add_help=False)
+    add_shared(p_bench)
+    p_bench.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
+    p_bench.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
+    p_bench.add_argument("-h", "--help", action="store_true", help="Show matched benchmarks and their params")
 
     p_exp = sub.add_parser("experiment", help="Run an experiment", add_help=False)
     add_shared(p_exp)
     p_exp.add_argument("experiment_name", nargs="?", help="Experiment name")
     p_exp.add_argument("-h", "--help", action="store_true", help="Show help with dynamic params")
 
-    p_bench = sub.add_parser("bench", help="Run a benchmark", add_help=False)
-    add_shared(p_bench)
-    p_bench.add_argument("bench_name", nargs="?", help="Benchmark name")
-    p_bench.add_argument("-h", "--help", action="store_true", help="Show help with dynamic params")
-
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)
     p_tool = sub.add_parser("toolchain", help="Toolchain diagnostic"); add_shared(p_tool)
-    p_sif = sub.add_parser("build-sif", help="Build Apptainer .sif images from .def files")
-    p_sif.add_argument("--env", dest="env_name", help="Apptainer env to build from .hosts.toml (default: all)")
-    p_sif.add_argument("--host", help="Remote host to build on (rsync → ssh → apptainer build)")
+    p_sif = sub.add_parser("build-sif", help="Build Apptainer .sif images from .envs.py")
+    p_sif.add_argument("--env", dest="env_name", help="Env to build from .envs.py (default: all with an Apptainer layer)")
     p_sif.add_argument("--force", action="store_true", help="Force rebuild (pass --force to apptainer)")
     p_sif.add_argument("--fakeroot", action="store_true", help="Use --fakeroot for apptainer build")
     p_sif.add_argument("--scratch-dir", help="Scratch directory (APPTAINER_TMPDIR / APPTAINER_CACHEDIR)")
@@ -555,29 +918,39 @@ Environment selection (--env / --driver / --host):
     # Two-pass for dynamic params
     known, remaining = parser.parse_known_args(argv)
     wants_help = getattr(known, "help", False)
-    if known.command in ("experiment", "bench") and (getattr(known, f"{known.command}_name", None) or wants_help):
+
+    if known.command in ("test", "bench") and (getattr(known, "pattern", None) or wants_help):
+        target = p_test if known.command == "test" else p_bench
+        try:
+            entries, _, seen_params = _entries_and_overrides(known.command, known)
+        except ValueError as e:
+            print(_err(str(e)))
+            return 1
+        for pname, p in seen_params.items():
+            flag = f"--{pname.replace('_', '-')}"
+            if p.ptype is bool: target.add_argument(flag, action="store_true", default=None, help=p.help)
+            else:
+                # type=str (not p.ptype): argparse's own type= runs too early
+                # to see the raw string if a sweep-style "a,b,c" needs splitting.
+                target.add_argument(flag, type=str, default=None, help=p.help)
+        if wants_help:
+            _print_entries_help(known.command, entries)
+            return 0
+        args = parser.parse_args(argv)
+    elif known.command == "experiment" and (getattr(known, "experiment_name", None) or wants_help):
         from .harness import collect, lookup
         roots = [str(ROOT / p / "src" / p / "experiments") for p in ("loom","sdot","otrec")
                  if (ROOT / p / "src" / p / "experiments").is_dir()]
-        roots += [str(ROOT / p / "src" / p / "benchmarks") for p in ("loom","sdot","otrec")
-                  if (ROOT / p / "src" / p / "benchmarks").is_dir()]
         registry = collect(roots)
-        name = getattr(known, f"{known.command}_name")
-        entry_id = f"exp_{name}" if known.command == "experiment" else f"bench_{name}"
-        entry = lookup(entry_id) or next((e for eid, e in registry.items() if name.lower() in e["description"].lower()), None)
+        name = known.experiment_name
+        entry = lookup(f"exp_{name}") or next((e for eid, e in registry.items() if name and name.lower() in e["description"].lower()), None)
         if entry:
-            target = p_exp if known.command == "experiment" else p_bench
             for pname, p in entry["params"].items():
                 flag = f"--{pname.replace('_', '-')}"
-                if p.ptype is bool: target.add_argument(flag, action="store_true", default=None, help=p.help)
-                else:
-                    # type=str (not p.ptype): a value may be "a,b,c" for a cartesian-product
-                    # sweep (see _expand_param_combos), which has to be split BEFORE type
-                    # coercion -- argparse's own type= runs too early to see the raw string.
-                    target.add_argument(flag, type=str, default=None, help=p.help)
+                if p.ptype is bool: p_exp.add_argument(flag, action="store_true", default=None, help=p.help)
+                else: p_exp.add_argument(flag, type=str, default=None, help=p.help)
         if wants_help:
-            target = p_exp if known.command == "experiment" else p_bench
-            target.print_help()
+            p_exp.print_help()
             if entry: print(_hdr(f"\n  {entry['description']}")+_dim(f"\n  file: {entry['file']}"))
             return 0
         args = parser.parse_args(argv)

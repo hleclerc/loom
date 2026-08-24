@@ -1,1 +1,1 @@
-from .harness import Param, Args, experiment, benchmark, collect, lookup, entries
+from .harness import Param, Args, experiment, collect, lookup, entries

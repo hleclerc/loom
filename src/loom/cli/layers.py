@@ -30,6 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+
+def _dim(s: str) -> str:
+    return f"{DIM}{s}{RESET}"
+
 
 @dataclass
 class Command:
@@ -159,6 +166,10 @@ class Remote:
         remote_ctx = Context(root=Path(self.remote_dir), remote=True)
         argv = [self.python, *cmd.argv[1:]] if cmd.argv else cmd.argv
         wrapped = compose(inner_seq, Command(argv, cmd.env), remote_ctx)
+        # flush explicitly: see main.py's `_env_banner` for why (block
+        # buffering once piped means an unflushed print here would appear
+        # AFTER the ssh subprocess's own unbuffered output, not before it).
+        print(_dim(f"  rsync push → {self.host}:{self.remote_dir}"), flush=True)
         push(local_root, self.host, self.remote_dir)
         inner = f"cd {self.remote_dir} && mkdir -p tmp && {wrapped.shell()}"
         # ssh runs this non-interactively, so the remote shell never sources
@@ -171,6 +182,7 @@ class Remote:
         remote_shell = f"$SHELL -ic {shlex.quote(inner)}"
         rc = subprocess.run(["ssh", self.host, remote_shell]).returncode
         if pull:
+            print(_dim(f"  rsync pull ← {self.host}:{self.remote_dir} [{', '.join(pull)}]"), flush=True)
             pull_paths(pull, self.host, self.remote_dir, local_root)
         return rc
 

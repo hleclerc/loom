@@ -25,6 +25,24 @@ def run(cmd, *, env=None, cwd=None):
 def python(): return sys.executable
 
 
+def _env_banner(seq):
+    """Grey status line: which machine this is about to run on and with
+    which driver -- rsync push/pull get their own line from `layers.Remote
+    .run` itself, since only it knows whether/what it actually synced."""
+    remote = seq[0] if seq and isinstance(seq[0], layers.Remote) else None
+    driver_layer = next((l for l in seq if isinstance(l, layers.Driver)), None)
+    machine = f"{remote.host} ({remote.remote_dir})" if remote else "local"
+    parts = [f"machine={machine}"]
+    if driver_layer:
+        parts.append(f"driver={driver_layer.name}")
+    # flush explicitly: stdout is block-buffered (not line-buffered) once
+    # piped/redirected, and the point of this banner is to show up BEFORE
+    # the actual work starts -- unflushed, it sits behind everything else
+    # (including a remote ssh subprocess's own unbuffered output) until
+    # this process exits, printing dead last instead of first.
+    print(_dim(f"  → {'  '.join(parts)}"), flush=True)
+
+
 def run_in_env(seq, argv, env_vars=None, pull=None):
     """Run `argv` through the layer sequence `seq`: a local subprocess
     (relative paths in `argv`/PYTHONPATH resolve against ROOT), or shipped
@@ -32,6 +50,7 @@ def run_in_env(seq, argv, env_vars=None, pull=None):
     resolve against the remote checkout, via `cd`) -- `pull` paths (relative
     to root), if given, are rsynced back afterwards; meaningless and ignored
     when running locally."""
+    _env_banner(seq)
     cmd = layers.Command(list(argv), dict(env_vars or {}))
     result = layers.resolve(seq, cmd, layers.Context(root=ROOT), pull=pull)
     if isinstance(result, int):
@@ -500,6 +519,7 @@ def cmd_test(args):
         env_vars["SDOT_ENV_NAME"] = env_name
         return run_in_env(seq, ["python", "./run", "test", *pattern_arg], env_vars, pull=pull)
 
+    _env_banner(seq)
     if seen_params:
         os.environ.update(envs.arg_overrides_to_env(args, seen_params))
 
@@ -570,6 +590,7 @@ def cmd_bench(args):
         env_vars["SDOT_ENV_NAME"] = env_name
         return run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull)
 
+    _env_banner(seq)
     if seen_params:
         os.environ.update(envs.arg_overrides_to_env(args, seen_params))
 

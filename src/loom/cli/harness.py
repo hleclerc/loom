@@ -7,14 +7,15 @@ Two-phase protocol (same as loom.testing.test()/bench()):
   registers its metadata and returns None.
   PHASE_RUN (SDOT_RUN_PHASE=1): the selected entry runs with parsed CLI args.
 
-Usage (exp_lung.py):
+Usage (exp_lung.py -- any name works, but a `exp_`-style prefix is the
+convention, same spirit as test_/bench_ for loom.testing):
     from loom.cli import experiment, Param
     if p := experiment("lung BFGS", nb_diracs=Param(1000, help="Number of diracs")):
         print(f"Running with {p.nb_diracs} diracs")
 
-CLI:
-    ./run experiment lung --nb-diracs=5000
-    ./run experiment lung --help     # auto-generated from Param declarations
+CLI (full file stem, no auto-prefixing):
+    ./run experiment exp_lung --nb-diracs=5000
+    ./run experiment exp_lung --help     # auto-generated from Param declarations
 
 For multiple tests/benchmarks per file (call-site granular, mixable in one
 file), see `loom.testing.test`/`bench` instead — this module is only for the
@@ -92,16 +93,16 @@ def _register(kind: str, description: str, params: dict[str, Param]) -> Args | N
 
 # ── CLI-facing helpers (used by main.py) ──────────────────────────────────────
 
-def collect(roots: list[str]) -> dict[str, dict]:
-    """Import all exp_*.py from `roots` in COLLECT mode.
+def collect(files: list[Path]) -> dict[str, dict]:
+    """Import each of `files` in COLLECT mode (discovery itself -- which
+    files plausibly declare an experiment -- is main.py's job, the same
+    repo-wide search used for test/bench; see `_candidates_for` there).
 
     Returns the populated registry: entry_id → {kind, description, params, file}.
     """
     _registry.clear()
-    for root_str in roots:
-        root = Path(root_str)
-        for pyfile in sorted(root.rglob("exp_*.py")):
-            _import_file(pyfile)
+    for pyfile in files:
+        _import_file(Path(pyfile))
     return dict(_registry)
 
 

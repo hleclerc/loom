@@ -255,8 +255,8 @@ def _refresh_rollups(hash_dir, env_name):
 # ── test / bench discovery ──────────────────────────────────────────────────────
 #
 # A pattern is a comma-separated list of `file[::name]` specs (both globbable
-# with `*`). The file part locates a *.py anywhere in the repo by stem (the
-# legacy test_/bench_ prefix is optional: "Cell" matches "test_Cell.py"), no
+# with `*`). The file part locates a *.py anywhere in the repo by its FULL
+# stem, `test_`/`bench_` prefix included ("test_Cell", not "Cell"), no
 # project/directory distinction -- with no `*` it must resolve to exactly one
 # file. The name part, if given, filters that file's test()/bench() entries by
 # name (fnmatch; no `*` means exact). No pattern at all means "everything".
@@ -275,31 +275,40 @@ def _iter_py_files(root):
                 yield Path(dirpath) / f
 
 
-def _looks_like_test_file(path):
-    """Cheap text check (no import): does this file plausibly declare a
-    test/bench? Without this, searching the whole repo makes any source file
-    that happens to share its test's name (Cell.py vs. test_Cell.py -- the
-    common case) a false ambiguity, or a wrong match, for what should be an
-    unambiguous lookup."""
+# Marker substring identifying a file as declaring an entry of this kind --
+# test/bench via `loom.testing.test()`/`bench()`, experiment via
+# `loom.cli.experiment()` (see harness.py). Same repo-wide discovery for all
+# three (see `_candidates_for`): no directory restricted to one kind.
+_KIND_MARKERS = {"test": "loom.testing", "bench": "loom.testing", "experiment": "from loom.cli import"}
+
+
+def _looks_like_kind_file(path, marker):
+    """Cheap text check (no import): does this file plausibly declare an
+    entry of this kind? Without this, searching the whole repo makes any
+    source file that happens to share its test/experiment's name (Cell.py
+    vs. test_Cell.py -- the common case) a false ambiguity, or a wrong
+    match, for what should be an unambiguous lookup."""
     try:
-        return "loom.testing" in path.read_text(errors="ignore")
+        return marker in path.read_text(errors="ignore")
     except OSError:
         return False
 
 
-def _test_candidates(project_filter):
-    candidates = sorted(p for p in _iter_py_files(ROOT) if _looks_like_test_file(p))
+_CLI_DIR = Path(__file__).resolve().parent  # loom/src/loom/cli itself -- excluded below: its own
+                                             # source necessarily contains _KIND_MARKERS' literal
+                                             # strings (and usage-example mentions of them), so it
+                                             # would otherwise self-match every kind's marker check
+
+
+def _candidates_for(kind, project_filter=None):
+    marker = _KIND_MARKERS[kind]
+    candidates = sorted(
+        p for p in _iter_py_files(ROOT)
+        if _CLI_DIR not in p.parents and _looks_like_kind_file(p, marker)
+    )
     if project_filter:
         candidates = [p for p in candidates if p.relative_to(ROOT).parts[0] == project_filter]
     return candidates
-
-
-def _file_stems(path):
-    s = path.stem
-    yield s
-    for pre in ("test_", "bench_"):
-        if s.startswith(pre):
-            yield s[len(pre):]
 
 
 def _resolve_spec(spec, candidates):
@@ -315,9 +324,9 @@ def _resolve_spec(spec, candidates):
 
     has_wild = "*" in file_part or "?" in file_part
     if has_wild:
-        matched = [p for p in candidates if any(fnmatch.fnmatchcase(s, file_part) for s in _file_stems(p))]
+        matched = [p for p in candidates if fnmatch.fnmatchcase(p.stem, file_part)]
     else:
-        matched = [p for p in candidates if any(s == file_part for s in _file_stems(p))]
+        matched = [p for p in candidates if p.stem == file_part]
         if len(matched) > 1:
             names = ", ".join(str(p.relative_to(ROOT)) for p in matched)
             raise ValueError(f"'{file_part}' matches several files ({names}) -- use a glob (e.g. '{file_part}*') to select them all")
@@ -328,9 +337,9 @@ def _resolve_spec(spec, candidates):
     return matched, name_glob
 
 
-def _resolve_pattern(pattern, project_filter):
+def _resolve_pattern(kind, pattern, project_filter):
     """Returns [(matched_files, name_glob), ...], one per comma-separated spec."""
-    candidates = _test_candidates(project_filter)
+    candidates = _candidates_for(kind, project_filter)
     specs = [s.strip() for s in pattern.split(",")] if pattern else [""]
     return [_resolve_spec(s, candidates) for s in specs]
 
@@ -397,7 +406,7 @@ def _select_entries(kind, resolved_specs):
 
 def _entries_and_overrides(kind, args):
     """Resolve args.pattern -> (entries, file_modules, union-of-declared-params)."""
-    resolved_specs = _resolve_pattern(getattr(args, "pattern", None), getattr(args, "project", None))
+    resolved_specs = _resolve_pattern(kind, getattr(args, "pattern", None), getattr(args, "project", None))
     entries, file_modules = _select_entries(kind, resolved_specs)
     seen_params = {}
     for e in entries:
@@ -684,17 +693,25 @@ def _run_entry(kind, args):
     if not name:
         print(_err(f"Usage: ./run {kind} <name>")); _list_available(kind); return 1
 
-    roots = [str(ROOT / p / "src" / p / "experiments") for p in ("loom", "sdot", "otrec")
-             if (ROOT / p / "src" / p / "experiments").is_dir()]
-    registry = collect(roots)
-
-    entry_id = f"exp_{name}"
-    entry = lookup(entry_id)
+    # Same repo-wide, marker-filtered discovery as test/bench (see
+    # `_candidates_for`) -- `name` is the file's full stem, no auto-prefixing
+    # and no fuzzy description fallback (removed: with the full name now
+    # required, a silent partial-description match would be more confusing
+    # than helpful -- `_list_available` below covers "I don't remember the
+    # exact name"). Only the MATCHED file is imported (like test/bench's
+    # `_select_entries`, not every candidate) -- the marker is a cheap text
+    # check, not a real import guarantee, so an unrelated file that happens
+    # to mention the marker string (e.g. a docstring) must never be
+    # imported just for appearing in the candidate list.
+    candidates = _candidates_for(kind)
+    matched = [p for p in candidates if p.stem == name]
+    if len(matched) > 1:
+        names = ", ".join(str(p.relative_to(ROOT)) for p in matched)
+        print(_err(f"'{name}' matches several files ({names})")); return 1
+    collect(matched)
+    entry = lookup(name)
     if entry is None:
-        for eid, edata in registry.items():
-            if name.lower() in edata["description"].lower(): entry = edata; break
-    if entry is None:
-        msg = _err(f"No {kind} found matching '{name}'")
+        msg = _err(f"No {kind} found matching '{name}' (full file name required, e.g. 'exp_lung')")
         print(msg, file=sys.stderr, flush=True); print(msg, flush=True)
         _list_available(kind); return 1
 
@@ -744,15 +761,14 @@ def _run_entry(kind, args):
 
 
 def _list_available(kind):
-    from .harness import entries
-    matching = [e for e in entries() if e["kind"] == kind]
-    if matching:
+    """Lists candidate file stems for `kind` -- no import (see `_run_entry`:
+    only the exact requested file gets imported, never every candidate),
+    so no description/params preview here, just the names to pick from."""
+    candidates = _candidates_for(kind)
+    if candidates:
         print(_dim(f"\n  Available {kind}s:"))
-        for e in matching:
-            eid = Path(e["file"]).stem
-            ps = ", ".join(f"{n}={p.default!r}" for n, p in e["params"].items())
-            print(_dim(f"    {eid:30s}  {e['description']}"))
-            if e["params"]: print(_dim(f"    {'':30s}  params: {ps}"))
+        for p in candidates:
+            print(_dim(f"    {p.stem}  ({p.relative_to(ROOT)})"))
 
 
 # ── other commands ────────────────────────────────────────────────────────────
@@ -932,7 +948,7 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
 
     p_exp = sub.add_parser("experiment", help="Run an experiment", add_help=False)
     add_shared(p_exp)
-    p_exp.add_argument("experiment_name", nargs="?", help="Experiment name")
+    p_exp.add_argument("experiment_name", nargs="?", help="Full experiment file name, e.g. exp_lung")
     p_exp.add_argument("-h", "--help", action="store_true", help="Show help with dynamic params")
 
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)
@@ -969,11 +985,10 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
         args = parser.parse_args(argv)
     elif known.command == "experiment" and (getattr(known, "experiment_name", None) or wants_help):
         from .harness import collect, lookup
-        roots = [str(ROOT / p / "src" / p / "experiments") for p in ("loom","sdot","otrec")
-                 if (ROOT / p / "src" / p / "experiments").is_dir()]
-        registry = collect(roots)
         name = known.experiment_name
-        entry = lookup(f"exp_{name}") or next((e for eid, e in registry.items() if name and name.lower() in e["description"].lower()), None)
+        matched = [p for p in _candidates_for("experiment") if name and p.stem == name]
+        collect(matched)
+        entry = lookup(name) if name else None
         if entry:
             for pname, p in entry["params"].items():
                 flag = f"--{pname.replace('_', '-')}"

@@ -519,7 +519,14 @@ def cmd_test(args):
         env_vars["SDOT_ENV_NAME"] = env_name
         return run_in_env(seq, ["python", "./run", "test", *pattern_arg], env_vars, pull=pull)
 
-    _env_banner(seq)
+    # SDOT_ENV_NAME set means we're the remote HALF of a dispatch: the
+    # originating side already printed the correct banner before ssh'ing in
+    # (see run_in_env) -- re-resolving --env-less here would just print a
+    # wrong, confusing "local"/default one (the env actually active on this
+    # process comes from the outer Micromamba/Apptainer wrapping, not from
+    # re-reading .envs.py).
+    if not os.environ.get("SDOT_ENV_NAME"):
+        _env_banner(seq)
     if seen_params:
         os.environ.update(envs.arg_overrides_to_env(args, seen_params))
 
@@ -590,7 +597,9 @@ def cmd_bench(args):
         env_vars["SDOT_ENV_NAME"] = env_name
         return run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull)
 
-    _env_banner(seq)
+    # see cmd_test's comment on SDOT_ENV_NAME vs re-printing this banner
+    if not os.environ.get("SDOT_ENV_NAME"):
+        _env_banner(seq)
     if seen_params:
         os.environ.update(envs.arg_overrides_to_env(args, seen_params))
 

@@ -10,6 +10,7 @@ dependencies = [
     "numpy",
     "typing_extensions",
     "pyyaml",
+    "devtools",
 ]
 
 [project.optional-dependencies]

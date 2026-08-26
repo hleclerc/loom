@@ -20,20 +20,13 @@ class Axis( AbstractAxis ):
 
     @property
     def max( self ):
-        res = self.offset
-        for shape_var, m in self.coeffs.items():
-            # an unresolved ShapeVar leaves the extent unsolved: there is no int to hand back yet.
-            count = shape_var.raw
-            if count is None:
-                return None
-            res += m * count.max()
-        return int( res )
+        # an unresolved count leaves the whole extent unsolved: there is no int to hand back yet
+        # (`Affine.value` gives `None` as soon as one symbol has none).
+        res = self.numeric_extent( lambda sv: None if sv.raw is None else sv.raw.max() )
+        return None if res is None else int( res )
 
     def max_list( self ):
         return [ self.max ]
 
     def capacity_list( self, capacity_of ):
-        res = self.offset
-        for shape_var, m in self.coeffs.items():
-            res += m * capacity_of( shape_var )
-        return [ int( res ) ]
+        return [ int( self.numeric_extent( capacity_of ) ) ]

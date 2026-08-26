@@ -145,8 +145,6 @@ class Aggregate:
                     # It's a ComputedAttribute[RealType, deps]
                     # Create the real attribute (Tensor, ShapeVar, etc.)
                     attr = get_attribute( name, self, real_type )
-                    if hasattr( attr, "_computed_cache" ):
-                        attr._computed_cache = True   # see `Tensor.is_undefined`
                     # Also create a ComputedAttribute tracker for invalidation
                     computed_tracker = ComputedAttribute()
                     computed_tracker.name = name
@@ -216,8 +214,6 @@ class Aggregate:
             elif _is_tensor_field( type_to_check ):
                 attr = _batched_schema( type_to_check, self.batch_axes )( scope = self )
                 attr.name = name
-                if hasattr( attr, "_computed_cache" ):
-                    attr._computed_cache = ( real_type is not None )   # see `Tensor.is_undefined`
                 self.__dict__[ name ] = attr
 
     def _rebuild_field_unbatched( self, name ):
@@ -229,8 +225,6 @@ class Aggregate:
         schema = real_type if real_type is not None else type_attr
         attr = schema( scope = self )
         attr.name = name
-        if hasattr( attr, "_computed_cache" ):
-            attr._computed_cache = ( real_type is not None )   # see `Tensor.is_undefined`
         self.__dict__[ name ] = attr
         return attr
 

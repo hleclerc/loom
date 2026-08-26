@@ -47,9 +47,9 @@ class AxisList( AbstractAxis ):
 
         # Last resort: this tensor is the ONLY witness of the loop count (e.g. just `values` set, so
         # `nb_dims` is read FROM it). The width is then the total array-dim count minus what the
-        # siblings take -- from `_shape` (logical) if we have it, else the buffer rank (capacity).
-        total = ( len( tensor._shape ) if tensor._shape is not None
-                  else tensor._raw.ndim if tensor._raw is not None else None )
+        # siblings take -- from the reference shape (logical) if we have one, else the buffer rank.
+        total = ( len( tensor.reference_shape ) if tensor.reference_shape is not None
+                  else tensor.buffer_rank )
         return self._structural_width( tensor, total )
 
     def _structural_width( self, tensor, total ):
@@ -87,25 +87,25 @@ class AxisList( AbstractAxis ):
     def register_in( self, tensor ):
         # This family spans several array dimensions of `tensor` (we find our own position, so no
         # index is passed -- `_dim_index`, resolved at PULL time when `tensor.axes` is complete). Two
-        # resolvers per ShapeVar, `logical` reading `_shape` (the value's unpadded sizes) and
-        # `capacity` reading the buffer over the span:
+        # resolvers per ShapeVar, `logical` reading the reference shape (the value's unpadded sizes)
+        # and `capacity` reading the buffer over the span:
         #  - the loop axis (`nb_dims`): its count IS our width, taken from STRUCTURE (`_structural_width`)
         #    -- NOT from `loop_axis.max`, which is the very axis we are resolving (that would recurse);
         #  - each member: logical by inverting its affine on every logical size over the span, capacity
         #    on the buffer sizes there. An unrolled tensor is dense (no padding), so the two agree --
-        #    but we keep them distinct so capacity stays a `_raw` fact.
+        #    but we keep them distinct so capacity stays a fact about the BUFFER.
         for shape_var in self.loop_axis.coeffs:
             def loop_logical( t, axis = self.loop_axis, shape_var = shape_var, list_axis = self ):
-                if t._shape is None:
+                if t.reference_shape is None:
                     return None
-                width = list_axis._structural_width( t, len( t._shape ) )
+                width = list_axis._structural_width( t, len( t.reference_shape ) )
                 if width is None:
                     return None
                 return axis.solve_single( shape_var, numpy.array( width, dtype = int ) )
             def loop_capacity( t, axis = self.loop_axis, shape_var = shape_var, list_axis = self ):
-                if t._raw is None:
+                if t.buffer_rank is None:
                     return None
-                width = list_axis._structural_width( t, t._raw.ndim )
+                width = list_axis._structural_width( t, t.buffer_rank )
                 if width is None:
                     return None
                 return axis.solve_single( shape_var, numpy.array( width, dtype = int ) )
@@ -113,13 +113,13 @@ class AxisList( AbstractAxis ):
 
         for shape_var in self.coeffs:
             def member_logical( t, axis = self, shape_var = shape_var ):
-                if t._shape is None:
+                if t.reference_shape is None:
                     return None
                 span = t._unroll_span( t._dim_index( axis ) )
                 if span is None:
                     return None
                 start, count = span
-                vals = [ axis.solve_single( shape_var, t._shape.sizes( start + k ) ) for k in range( count ) ]
+                vals = [ axis.solve_single( shape_var, t.reference_shape.sizes( start + k ) ) for k in range( count ) ]
                 if any( v is None for v in vals ):
                     return None
                 return numpy.array( vals, dtype = int )

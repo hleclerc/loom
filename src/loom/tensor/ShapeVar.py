@@ -51,10 +51,11 @@ class ShapeVar( Attribute ):
         from .AbstractAxis import AbstractAxis
 
         # (weakref(tensor), logical, capacity): two resolvers per using tensor. `logical(t)` inverts
-        # our affine on the tensor's LOGICAL sizes (`t._shape`, the unpadded truth); `capacity(t)` on
-        # its ALLOCATED buffer (`t._raw.shape`, padded). Either returns None when it cannot yet. Weak
+        # our affine on the tensor's LOGICAL sizes (`t.reference_shape`, the unpadded truth); `capacity(t)`
+        # on its ALLOCATED buffer (padded). Either returns None when it cannot yet. Weak
         # refs so a shared ShapeVar does not keep dropped instances' tensors alive.
         self.usages = []
+        self._compact_usages_at = 8   # see `add_usage`
         self.dep_axes = [ resolve_attribute( d, scope, AbstractAxis ) for d in template_args ]
 
         self.prescribed_value = None
@@ -64,6 +65,13 @@ class ShapeVar( Attribute ):
             self.set( value )
 
     def add_usage( self, tensor, logical, capacity ):
+        # DERIVED tensors register too (see `Tensor._wrap_axes`), and a loop makes a great many of
+        # them -- so dead entries are dropped as they accumulate instead of piling up for every
+        # `_pull` to walk. Amortized: compact only once the list has doubled since the last time.
+        if len( self.usages ) >= self._compact_usages_at:
+            self.usages = [ u for u in self.usages if u[ 0 ]() is not None ]
+            self._compact_usages_at = max( 8, 2 * len( self.usages ) )
+        # appended LAST, so a declared witness is still the first `_pull` consults.
         self.usages.append( ( weakref.ref( tensor ), logical, capacity ) )
 
     def set_count( self, value ):
@@ -84,8 +92,8 @@ class ShapeVar( Attribute ):
 
     def _pull( self, kind ):
         """Solve our count from the tensors that use us: the FIRST usage able to invert one of its
-        sizes, `None` if none can. `kind` picks which sizes -- the `"logical"` ones (`t._shape`, the
-        count) or the `"capacity"` ones (`t._raw.shape`, the allocation a chained call must reuse).
+        sizes, `None` if none can. `kind` picks which sizes -- the `"logical"` ones (`t.reference_shape`,
+        the count) or the `"capacity"` ones (the allocation a chained call must reuse).
         First-that-answers, so a witness carrying the RIGHT rank (a ragged tensor holding per-segment
         counts) is reached the same way as a scalar one -- both invert this ShapeVar's own affine."""
         for tensor_ref, logical, capacity in self.usages:

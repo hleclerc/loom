@@ -775,6 +775,7 @@ if test( "physical_axis_reorder" ):
     import numpy
     from loom.tensor import PhysicalLayout
     from loom.tensor import ReferenceShape
+    from loom.tensor import Storage
     from loom import Axis, ShapeVar, Tensor
 
     code = FfiCode( name = "test_call_phys_reorder", fwd_code = """
@@ -797,9 +798,8 @@ if test( "physical_axis_reorder" ):
     assert L.buffer_shape == [ 2, 2 ] and L.strides == [ 1, 2 ] and not L.is_identity
 
     m = RealTensor[ row, col ]()
-    m._raw   = driver.array( [ [ 1, 3 ], [ 2, 4 ] ] )   # the physical (column-major) buffer
-    m._shape = ReferenceShape.from_dense_shape( [ 2, 2 ] )
-    m._layout = L
+    m.storage = Storage.of( driver.array( [ [ 1, 3 ], [ 2, 4 ] ] ),   # the physical (col-major) buffer
+                            ReferenceShape.from_dense_shape( [ 2, 2 ] ), L )
     assert numpy.asarray( m.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
 
     out = RealTensor[ row, col ]()
@@ -807,3 +807,94 @@ if test( "physical_axis_reorder" ):
 
     # the kernel read the permuted input by name and copied it: the logical value is preserved.
     assert numpy.asarray( out.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
+
+
+if test( "fill_crosses_as_a_storageless_FillTensor" ):
+    # A FILL is a value whose every element reads the same scalar. It crosses the FFI as ONE rank-0
+    # buffer -- not as an [n] array -- and its logical extents are not baked into the source either:
+    # the C++ view reads them off a SIBLING argument that carries the same axis. So one compiled
+    # kernel serves any fill value and any size.
+    from loom.tensor import Fill
+    import numpy
+
+    n   = ShapeVar()
+    num = Axis( n, name = "num" )
+
+    x = RealTensor[ num ]( [ 10.0, 20.0, 30.0, 40.0 ] )
+    f = RealTensor[ num ].filled_with( 2.5 )
+    assert isinstance( f.storage, Fill ) and f.is_fill
+    assert f.raw.shape == ()            # ONE scalar backs it...
+    assert f.capacity == ( 4, )         # ...over four logical elements
+
+    out = RealTensor[ num ]()
+
+    driver.call(
+        FfiCode( name = "test_call_fill", fwd_code = """
+        run_parallel(
+            queue,
+            global_batch_indices,
+            []( auto batch_index, auto x, auto f, auto out ) {
+                // the same scalar whatever the index -- indexing a fill ignores the index
+                out( batch_index, num = 0 ) = x( batch_index, num = 0 ) * f( batch_index, num = 0 );
+                out( batch_index, num = 1 ) = x( batch_index, num = 1 ) * f( batch_index, num = 3 );
+                // its logical extent, filled in from the sibling buffer that carries `num`
+                out( batch_index, num = 2 ) = f.size();
+                // and it is a distinct TYPE, not a TensorView the kernel has to test
+                static_assert( ! std::is_same_v< decltype( f ), decltype( x ) > );
+                out( batch_index, num = 3 ) = 0;
+            },
+            InpList(), x, InpList(), f, OutList(), out
+        );
+        """ ),
+        x = x, f = f, out = out,
+        output_attributes = [ "out" ],
+    )
+
+    assert numpy.asarray( out.tensor ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
+
+
+if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
+    # A count is ONE integer. When the host knows it and the kernel only READS it, sending it
+    # through a device buffer costs an allocation, a transfer and a dereference per read, and buys
+    # nothing -- the value is uniform over the whole call. So it travels as an FFI attribute and
+    # lands in the kernel as a `ScalarValue<SI>`, in registers.
+    #
+    # A buffer is kept exactly where it is unavoidable: a count the KERNEL writes (that is where
+    # the result goes), a RAGGED one (a count per segment), or one the host does not know.
+    import numpy
+
+    class Counter( Aggregate ):
+        out       : RealTensor[ "num" ]
+
+        num       : Axis[ "nb_out" ]
+
+        nb_out    : ShapeVar     # written by the kernel -> a buffer: it is the result
+        nb_wanted : ShapeVar     # prescribed, only read   -> crosses by value
+
+    code = FfiCode( name = "test_call_scalar_count", fwd_code = """
+    run_parallel(
+        queue,
+        global_batch_indices,
+        []( auto batch_index, auto cnt ) {
+            auto c = cnt( batch_index );
+
+            static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
+                           "a host-known, read-only count must cross by value" );
+            static_assert( ! std::is_same_v< std::decay_t< decltype( c.nb_out.view ) >, ScalarValue<SI> >,
+                           "a count the kernel writes needs a real buffer" );
+
+            c.nb_out.set( c.nb_wanted );
+            for ( SI n = 0; n < SI( c.nb_out ); ++n )
+                c.out( num = n ) = 10 * n;
+        },
+        cnt_io, cnt
+    );
+    """ )
+
+    cnt = Counter( nb_wanted = 3 )
+    driver.call( code, cnt = cnt,
+                 output_attributes = [ "cnt.nb_out", "cnt.out" ],
+                 output_capacities = { "cnt.nb_out": 8 } )
+
+    assert cnt.nb_out.value == 3
+    assert numpy.asarray( cnt.out.tensor ).tolist() == [ 0.0, 10.0, 20.0 ]

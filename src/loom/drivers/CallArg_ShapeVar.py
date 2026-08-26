@@ -3,12 +3,20 @@ from .CallArg_Errors import ERRORS_VAR_NAME
 from .CallArg import CallArg
 
 class CallArg_ShapeVar( CallArg ):
-    """A `ShapeVar` crossing the FFI: a buffer of `std::int32_t` COUNTS, plus a `max` bound.
+    """A `ShapeVar` crossing the FFI: its COUNTS, plus a `max` bound.
 
-    The count is a device value -- read by the kernel when the var has one, written by it when
-    the var is an output. It is rank 0 for a plain count, rank > 0 for a ragged one (one count
-    per segment, along its `dep_axes`). A rank-0 count is still bound as a 1-element buffer
-    (xla FFI rank-0 buffers are avoided), viewed as a rank-0 `TensorView` over its pointer.
+    It crosses in one of two ways, and which one is not a detail -- it is the difference between a
+    dereference per read and a value in a register:
+
+    * as a SCALAR (`as_scalar`): an XLA FFI attribute, landing in the kernel as a `ScalarValue<SI>`.
+      This is the common case -- a plain, non-ragged count the host already knows. There is nothing
+      per-element about it, so a buffer would buy nothing and cost an allocation, a transfer and an
+      indirection on every read.
+    * as a BUFFER of `std::int32_t`: what a count must be when it genuinely varies -- one count per
+      segment of a RAGGED structure, or one per item of a batch -- or when the KERNEL is what writes
+      it (an output), or when the host does not know it (a count a previous call wrote, which under
+      a `jit` is a device value Python cannot read). A rank-0 count is then still bound as a
+      1-element buffer (xla FFI rank-0 buffers are avoided), viewed as a rank-0 `TensorView`.
 
     What the count is NOT is a size: what sizes the buffers depending on this var is its
     CAPACITY, a decision made by the CALL (see `CallArgsAnalysis`). It crosses as the `max`
@@ -25,6 +33,10 @@ class CallArg_ShapeVar( CallArg ):
 
         self.inst = inst
         self.path = path
+        # the count Python actually holds, if it holds one -- `None` when it only lives on the
+        # device (a count a kernel wrote, read back under a `jit`). Snapshotted here, like every
+        # other fact this node reads off the attribute: only a count we KNOW can travel by value.
+        self._static_count = inst.static_count()
         # a count is an `int32` buffer, never differentiable -- same role as `dtype` plays for a
         # `CallArg_Tensor`: it is what tells `JaxFfi._call_with_vjp` this is a trace CONSTANT, not
         # a primal to seek a gradient for (`t.dtype.floating_point`, uniform across both).
@@ -48,8 +60,29 @@ class CallArg_ShapeVar( CallArg ):
         # for good if we need none.
         self.error_id = -1
 
+    @property
+    def as_scalar( self ):
+        """Whether this count crosses BY VALUE rather than through a buffer (see the class doc).
+
+        A lazy property, not a field: a `vmap` gives us a batch axis AFTER `__init__`, and one
+        count per batch item is no longer a single value -- deciding in the constructor would
+        freeze the answer before that is known.
+
+        Three conditions, covering the four reasons a buffer is unavoidable: the kernel must not be
+        WRITING it (`is_input`), it must have no dimensions -- neither RAGGED segments nor one cell
+        per batch item (`not self.shape`) -- and the host must actually know the count.
+
+        That last one is `static_count`, deliberately: a count PRESCRIBED in Python, or solved from
+        the shape of a tensor we were given, is a fact that holds whether or not we are tracing. A
+        count a KERNEL wrote is not -- eagerly Python could read it back, but under a `jit` it is a
+        tracer, and an FFI attribute cannot be one. Keying on `static_count` keeps the generated
+        signature identical in both, instead of compiling a second library for the eager case."""
+        return ( self.io_category.is_input
+                 and not self.shape                     # rank 0: not ragged, and no batch axis
+                 and self._static_count is not None )
+
     def is_ffi_buffer( self ):
-        return self.io_category.is_bound
+        return self.io_category.is_bound and not self.as_scalar
 
     def wants_error_id( self ):
         """Whether we need a slot in the error buffer: only a count this call WRITES, and that
@@ -85,7 +118,13 @@ class CallArg_ShapeVar( CallArg ):
     def _cpp_max_bound( self ):
         """The capacity a written count is checked against. A CALL parameter, so it reaches the
         kernel as an FFI attribute -- as a literal it would recompile the kernel for each
-        capacity. Unbound: nothing crosses, so the literal is all there is."""
+        capacity. Unbound: nothing crosses, so the literal is all there is.
+
+        A SCALAR count is read-only (`set` is never reached on a value passed by copy), so there is
+        no capacity to check and nothing to pass: `-1`, the "unbounded" marker, is a constant and
+        therefore costs no recompile either."""
+        if self.as_scalar:
+            return "SI( -1 )"
         if not self.io_category.is_bound:
             return f"SI( { self.max_bound } )"
         return f"SI( { self._jax_attr_name() } )"
@@ -95,6 +134,8 @@ class CallArg_ShapeVar( CallArg ):
 
     def _cpp_counts_type( self ):
         # counts use unnamed axes (they are positional).
+        if self.as_scalar:
+            return "ScalarValue<SI>"          # no pointer, no memory space: the value itself
         if not self.io_category.is_bound:
             return f"NoneTensor<std::int32_t, { self._cpp_shape_type() }, Tuple<>>"
         return f"TensorView<std::int32_t, { self._cpp_shape_type() }, { self.memory_space }>"
@@ -111,6 +152,11 @@ class CallArg_ShapeVar( CallArg ):
         return f"ShapeVarView<{ self._cpp_counts_type() }, NoErrorBuffer>"
 
     def cpp_view( self ):
+        if self.as_scalar:
+            # the count arrives as an FFI attribute (an int64 in the call frame) and is held by
+            # value; nothing here dereferences anything.
+            return ( f"make_shape_var_view( ScalarValue<SI>{{ SI( { self._jax_count_attr_name() } ) }}, "
+                     f"{ self._cpp_max_bound() }, NoErrorBuffer{{}}, SI( -1 ) )" )
         if not self.io_category.is_bound:
             return ( f"{ self.cpp_type() }{{ { self._cpp_counts_type() }{{}}, "
                      f"{ self._cpp_max_bound() }, NoErrorBuffer{{}}, SI( -1 ) }}" )
@@ -149,13 +195,22 @@ class CallArg_ShapeVar( CallArg ):
         # the FFI attributes share one flat namespace, like the buffers: name it after ours.
         return f"max_{ self.ffi_name }"
 
+    def _jax_count_attr_name( self ):
+        # a scalar count has no `ffi_name` (it binds no buffer), so it is named after its PATH --
+        # unique within a call by construction, which is what the flat namespace needs.
+        return "count_" + self.path.replace( ".", "_" )
+
     def jax_attrs( self ):
         """The scalars this node needs at run time, but NOT through a buffer: an XLA FFI
         attribute is baked into the call, not into the kernel, so the same compiled kernel serves
-        every capacity.
+        every capacity -- and every count.
 
-        Only a BOUND var crosses one: an unbound one has no buffer, so its bound is a literal in
-        the source (`_cpp_max_bound`), and it never got an `ffi_name` to build an attr name from."""
+        A SCALAR count is itself one of them (that is how it crosses). A BOUND buffer var passes
+        its capacity bound. An unbound one passes nothing: it has no buffer, so its bound is a
+        literal in the source (`_cpp_max_bound`), and it never got an `ffi_name` to name an attr
+        after."""
+        if self.as_scalar:
+            return [ ( self._jax_count_attr_name(), "int64_t", int( self._static_count ) ) ]
         if not self.io_category.is_bound:
             return []
         return [ ( self._jax_attr_name(), "int64_t", int( self.max_bound ) ) ]

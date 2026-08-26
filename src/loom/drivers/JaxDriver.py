@@ -245,11 +245,9 @@ class JaxDriver:
         from jax.custom_derivatives import SymbolicZero
         return isinstance( x, SymbolicZero )
 
-    # a value bound to a trace that may no longer be the active one -- e.g. a `ComputedAttribute`
-    # cache (`Tensor._computed_cache`, see `Tensor.is_undefined`) populated under one `lax.scan`
-    # retrace and read back under a later one (scan's differentiation rule retraces its body to
-    # linearize/transpose it). A concrete array is never a `Tracer`, so this is a no-op outside
-    # any trace -- only guards the case that actually goes stale.
+    # whether `x` is bound to a trace rather than being a concrete value. What tells a HOST value
+    # from a device one (see `ShapeArray`, which refuses to be built from a tracer): a count Python
+    # can size a buffer with, versus one that only exists inside the trace.
     def is_traced( self, x ):
         return isinstance( x, jax_core.Tracer )
 

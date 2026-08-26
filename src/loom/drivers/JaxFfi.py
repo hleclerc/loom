@@ -154,6 +154,7 @@ _CALL_TEMPLATE = """\
 #include <loom/support/containers/NoneTensor.h>
 #include <loom/support/containers/ZeroTensor.h>
 #include <loom/support/containers/FillTensor.h>
+#include <loom/support/containers/ScalarValue.h>
 #include <cstdint>
 #include <iostream>
 
@@ -399,14 +400,16 @@ def _call_with_vjp( code, ca, device, prefix ):
 def _grad_tensor( inst, array ):
     """A bare tensor holding `array`, shaped like `inst` -- a residual (a forward input/output) or
     a cotangent, entering the backward kernel as an input bound at the size its data has."""
+    from ..tensor.storage import Fill
     from ..tensor.Tensor import Tensor
     res = Tensor.like( inst )
-    res.set_raw( array )
-    # a FILL re-enters the backward as a fill too (its residual is the same scalar): keep it symbolic
-    # so it lowers to a `FillTensor` again, not a scalar-buffer TensorView with a [n] logical shape.
-    if getattr( inst, "is_fill", False ):
-        res._fill  = True
-        res._shape = inst._shape
+    if inst.is_fill:
+        # a FILL re-enters the backward as a fill too (its residual is the same scalar): keep it
+        # symbolic so it lowers to a `FillTensor` again, not a scalar-buffer TensorView with a [n]
+        # logical shape. Being a fill is STATED, never inferred -- one scalar looks like any other.
+        res.storage = Fill( res._as_declared( array ), inst.reference_shape )
+    else:
+        res.set_raw( array )
     return res
 
 

@@ -12,6 +12,7 @@ from .AxisList import AxisList
 from .Dtype import Dtype
 from .ReferenceShape import ReferenceShape
 from .ShapeVar import ShapeVar
+from .storage import Fill, Storage, Unbound
 
 
 class Tensor( Attribute ):
@@ -40,15 +41,18 @@ class Tensor( Attribute ):
     the axis list.
 
     Attributes
-    * device: Device
-    * dtype: Dtype
-    * axes : list[ AbstractAxis ]
-    * _shape: a `ReferenceShape` (or `None` if unknown), the LOGICAL sizes read from `value` ALONE,
-        one `( sizes, dep_dims )` per array dimension of the value -- unpadded, and independent of the
-        declared axes. `_raw` may be padded, so it only serves the CAPACITY; `_shape` serves the
-        COUNT. A `ShapeVar` PULLS from it via the axis layout (see `register_in`).
-    * _raw: the actual tensor (with values, trace, ...)
+    * axes    : list[ AbstractAxis ] -- the LOGICAL contract
+    * dtype   : Dtype -- the ELEMENT contract (its kind is the class, its size a driver policy)
+    * storage : how the value is actually BACKED (`storage.py`) -- nothing, a real buffer, a
+        symbolic zero, a fill. It answers every physical question (`raw`, `tensor`, `capacity`,
+        `buffer_layout`, `allocated_sizes`), so this class holds no kind flags and no separate
+        `_raw` / `_layout` fields to keep in agreement.
+    * device  : Device
 
+    The storage also carries the `reference_shape`: the LOGICAL sizes read from the value ALONE,
+    one entry per array dimension -- unpadded, and independent of the declared axes. The buffer may
+    be padded, so it only serves the CAPACITY; the reference shape serves the COUNT, and a
+    `ShapeVar` PULLS from it via the axis layout (see `AbstractAxis.register_in`).
     """
 
     if TYPE_CHECKING:
@@ -100,17 +104,10 @@ class Tensor( Attribute ):
         self.dtype = _declared_dtype( type( self ), template_kwargs )
         self.axes = self._read_axes( template_args, scope )
 
-        self._shape = None
-        self._raw = None
-        # set by `Aggregate` for a `ComputedAttribute`-declared field (see `Tensor.is_undefined`);
-        # every other tensor (a plain input/output) leaves this `False`.
-        self._computed_cache = False
-        # the PHYSICAL arrangement of `_raw` relative to the logical axes: `None` means the plain
-        # contiguous layout (buffer in logical order, no reorder, padding only from a ragged `_shape`),
-        # which is every tensor today. A construction site (a kernel output, `fill`, ...) may set an
-        # explicit `PhysicalLayout` (flattened/padded/reordered batch) -- ops carry it by reference.
-        # It lives on the TENSOR, not the axes: the same axis sits differently in different buffers.
-        self._layout = None
+        # HOW our value is held (see `storage.py`): one object per way a value can be backed --
+        # nothing, a real buffer (possibly with an explicit physical layout), a symbolic zero, a
+        # fill. It answers every physical question below, so this class carries no kind flags.
+        self.storage = Unbound()
 
         if value is not None:
             self.set( value )
@@ -137,92 +134,114 @@ class Tensor( Attribute ):
         res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
         fill = value.tensor if isinstance( value, Tensor ) else value
         shape = res.shape
-        # NB: a SYMBOLIC-fill path (a storageless C++ `FillTensor`, `res._fill = True` + a scalar
-        # `_raw`) is prototyped (see FillTensor.h and the `is_fill` branches in Tensor / CallArg_Tensor)
-        # but NOT yet wired in: it needs the fill to survive the symbolic algebra it flows through -- the
-        # `target/mass * weights` of a second `normalized_version` (a `c * fill` must stay a fill), and
-        # the backward RESIDUAL rank. Until then `full` MATERIALIZES: `[ n ]` weights are 80MB, already
-        # small (the [nb_angles, n] blow-up is fixed by the shared `[ num_dirac ]` shape upstream).
-        res._raw   = driver.full( shape, fill, dtype = res.dtype )
-        res._shape = ReferenceShape.from_dense_shape( shape )
+        # NB: the SYMBOLIC-fill path (a storageless C++ `FillTensor`, i.e. a `Fill` storage over a
+        # scalar) exists (see FillTensor.h and `storage.Fill`) but is NOT yet wired in: it needs the
+        # fill to survive the symbolic algebra it flows through -- the `target/mass * weights` of a
+        # second `normalized_version` (a `c * fill` must stay a fill), and the backward RESIDUAL rank.
+        # Until then `full` MATERIALIZES: `[ n ]` weights are 80MB, already small (the [nb_angles, n]
+        # blow-up is fixed by the shared `[ num_dirac ]` shape upstream).
+        res.storage = Storage.of( driver.full( shape, fill, dtype = res.dtype ),
+                                  ReferenceShape.from_dense_shape( shape ) )
+        return res
+
+    @classmethod
+    def filled_with( cls, scalar, reference_shape = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        """The SYMBOLIC form of `full`: one scalar backing the whole logical shape, lowered as a
+        storageless `FillTensor`. Being a fill is STATED here, never inferred -- one scalar looks
+        like any other rank-0 buffer.
+
+        `reference_shape` defaults to the extents the axes already give (as in `full`); it is
+        passed explicitly where those are not resolved -- a backward residual, whose logical extents
+        the C++ view reads from a sibling buffer at run time anyway."""
+        res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
+        if reference_shape is None:
+            reference_shape = ReferenceShape.from_dense_shape( res.shape )
+        # the scalar is materialized as a rank-0 BUFFER: that is what the FFI binds (a `FillTensor`
+        # is storageless in its extents, not in its value), and it is what carries our dtype.
+        res.storage = Fill( driver.array( scalar, dtype = res.dtype, device = res.device ), reference_shape )
         return res
 
     def append_axis( self, axis ):
         """A new tensor sharing our buffer, with `axis` appended as one extra TRAILING axis --
         e.g. `SumOfDiracs1d.positions` (rank 1) reused as `SumOfDiracs`'s ( `num_dirac`, `dim` )
         positions once `dim`'s extent is known (see `SumOfDiracs1d.normalized_version`). Unset
-        (`_raw is None`) stays unset: with no buffer yet, there is nothing to reshape."""
+        (unbound) stays unset: with no buffer yet, there is nothing to reshape."""
         res = type( self )( template_args = self.axes + [ axis ], template_kwargs = { "dtype": self.dtype, "device": self.device } )
-        if self._raw is not None:
-            res._raw = self._raw[ ..., None ]
-            res._shape = self._shape.appended_dense( 1 )
+        if self.is_defined:
+            res.storage = Storage.of( self.storage.raw[ ..., None ],
+                                      self.reference_shape.appended_dense( 1 ) )
         return res
 
+    # ---- what our value IS: asked of the storage, never tested for here -------------------------
     @property
     def is_symbolic_zero( self ) -> bool:
-        return self._raw is not None and driver.is_symbolic_zero( self._raw )
+        return self.storage.is_symbolic_zero
 
     @property
     def is_fill( self ) -> bool:
-        """A symbolic constant (`Tensor.full`): its `_raw` is a single scalar, its logical shape lives
-        in the axes, and it lowers to a storageless `FillTensor`. Not a `TensorView` -- CallArg_Tensor
-        binds the scalar buffer and spells the logical shape in the view."""
-        return getattr( self, "_fill", False )
+        """A symbolic constant: one scalar backs the whole logical shape, which lives in the axes,
+        and it lowers to a storageless `FillTensor` (see `storage.Fill`)."""
+        return self.storage.is_fill
+
+    @property
+    def reference_shape( self ):
+        """The LOGICAL (unpadded) sizes read off the value we were built from -- one entry per array
+        dimension, independent of our declared axes. `None` when there is none to read (a kernel
+        output, whose counts live in its ShapeVars instead). This is what a `ShapeVar` PULLS its
+        count from, via the axis layout (see `AbstractAxis.register_in`)."""
+        return self.storage.reference_shape
+
+    @property
+    def buffer_rank( self ):
+        """How many array dimensions our BUFFER has, or `None` while unbound -- the capacity-side
+        analogue of `len( reference_shape )`, used to resolve an unrolled `AxisList`'s width."""
+        buffer = self.storage.buffer
+        return None if buffer is None else buffer.ndim
 
     @property
     def is_undefined( self ) -> bool:
-        if self._raw is None:
-            return True
-        # a `ComputedAttribute` cache (e.g. `Image.cell_cum_mass`) is normally trusted once
-        # populated -- invalidated only when a dependency is reassigned (`FieldDescriptor.__set__`).
-        # That is not enough under `lax.scan`: differentiating through a scan retraces its body in
-        # a SEPARATE trace to linearize/transpose it, and a cached JAX tracer from the ORIGINAL
-        # trace is dead by then -- using it raises (or worse, silently corrupts) rather than just
-        # being stale data. Recomputing costs nothing extra within a trace regardless (XLA's CSE
-        # collapses the duplicate computation at compile time), so never trust a cached tracer.
-        if self._computed_cache and driver.is_traced( self._raw ):
-            return True
-        return False
+        """Nothing to read here yet -- the spelling `Distribution.mass` and `Image.cell_cum_mass`
+        use to decide whether to (re)compute a value they cache."""
+        return not self.is_defined
 
     @property
     def is_defined( self ) -> bool:
-        return self._raw is not None
+        return self.storage.holds_value
 
     def set( self, value ):
         if isinstance( value, Tensor ):
-            # carries the kind along (buffer / symbolic zero / None / FILL), RETYPED to what we
-            # declare: our dtype is a contract the FFI reads (`CallArg_Tensor._cpp_scalar`), so a
-            # buffer that disagrees with it would be reinterpreted, not converted, in C++.
-            self._raw = self._as_declared( value._raw )
-            # adopt the source's reference shape: it describes the SAME buffer we just took, so it is
-            # our logical shape too, whatever our own axes are (a `ShapeVar` reads it via the axis
-            # layout, see `register_in`). `None` when the source has none (a kernel output whose
-            # counts live in its ShapeVars) -- we then pull our capacity off the shared buffer.
-            self._shape = value._shape
-            # a symbolic FILL keeps its kind too: `_raw` is a scalar, `_shape` the logical extents, so
-            # without this flag we would relower the scalar as a rank-0 TensorView (see `is_fill`).
-            self._fill = getattr( value, "_fill", False )
+            # take the source's STORAGE whole: its kind rides along (a fill stays a fill, a symbolic
+            # zero stays one) and so does its reference shape -- it describes the very buffer we just
+            # took, so it is our logical shape too, whatever our own axes are. What does NOT ride
+            # along is the element type: our declared dtype is a contract the FFI reads
+            # (`CallArg_Tensor._cpp_scalar`), so a buffer that disagrees would be reinterpreted, not
+            # converted, in C++ -- hence `retyped`, which enforces it on whatever backs the value.
+            self.storage = value.storage.retyped( self._as_declared )
             return
 
         # The LOGICAL shape is a pure fact about `value` (see `ReferenceShape`), read WITHOUT touching
         # its data. From it every ShapeVar PULLS its count (`register_in`); nothing is pushed. The
         # buffer is then a plain dense array, or -- when the value is jagged -- an ASSEMBLED padded
         # one whose per-dim capacity is (for now) the max size.
-        self._shape = ReferenceShape.from_value( value )
+        reference_shape = ReferenceShape.from_value( value )
         self._check_convertible( _natural_dtype( value ) )
-        if self._shape.is_ragged():
-            self._raw = _assemble( value, self._shape.capacities(), self.dtype, self.device )
+        if reference_shape.is_ragged():
+            raw = _assemble( value, reference_shape.capacities(), self.dtype, self.device )
         else:
-            self._raw = driver.array( value, dtype = self.dtype, device = self.device )
+            raw = driver.array( value, dtype = self.dtype, device = self.device )
+        self.storage = Storage.of( raw, reference_shape )
 
-    def set_raw( self, raw ):
+    def set_raw( self, raw, layout = None ):
         """Bind the buffer a kernel produced (a driver tensor). Sizes stay unobserved: an
         output's extents are the ones we ASKED for (`shape`), and its counts live in the
-        ShapeVars the kernel wrote -- there is nothing to solve from the data.
+        ShapeVars the kernel wrote -- there is nothing to solve from the data, so the reference
+        shape we already had (if any) is kept rather than re-read.
 
-        `raw` may also be a symbolic-zero cotangent handed back by the framework: it lands here the
-        same way, and `is_symbolic_zero` recognizes it -- no special case."""
-        self._raw = self._as_declared( raw )
+        `raw` may also be a symbolic-zero cotangent handed back by the framework, or `None` to
+        unbind: `Storage.of` picks the variant, so there is no kind to test for here. `layout` is
+        the physical arrangement the allocation was given, when it is not the plain contiguous one.
+        """
+        self.storage = Storage.of( self._as_declared( raw ), self.reference_shape, layout )
 
     # ---- the dtype INVARIANT: what we declare is what our buffer holds ---------------------------
     # A `Tensor`'s dtype is a DECLARATION, and `CallArg_Tensor` lowers it as the C++ scalar type of
@@ -255,39 +274,31 @@ class Tensor( Attribute ):
                 f"{ '' if self.name is None else f' ({ self.name })' }: the conversion loses { lost }. "
                 f"Convert explicitly if that is what you mean." )
 
+    # ---- physical questions, all delegated to the storage (see `storage.py`) --------------------
+    # Each variant answers them its own way -- a fill's capacity is its reference shape, an unbound
+    # tensor has no allocation to report -- so none of it is a branch here.
     @property
     def buffer_layout( self ):
-        """The single per-Tensor description of how `_raw` is laid out physically vs the logical axes
-        (see `_layout`): the explicit one if set, else the plain CONTIGUOUS layout derived from the
-        allocated extents -- so today's tensors answer exactly as before. This is where `capacity`,
-        the ShapeVar capacity inversion and the FFI lowering will read the buffer's shape/strides
-        from, in ONE place, unifying padding (ragged / batch) and physical order."""
-        from .PhysicalLayout import PhysicalLayout
-        if self._layout is not None:
-            return self._layout
-        return PhysicalLayout.contiguous( [ 0 ] * self.rank if self.raw is None else list( self.raw.shape ) )
+        """How our buffer is laid out physically vs the logical axes: the explicit layout if the
+        allocation was given one, else the plain CONTIGUOUS one derived from the allocated extents.
+        The single place `capacity`, the ShapeVar capacity inversion and the FFI lowering read the
+        buffer's shape/strides from -- unifying padding (ragged / batch) and physical order."""
+        return self.storage.layout( self.rank )
 
     @property
     def capacity( self ):
         """What our buffer IS: the allocated extents per LOGICAL dimension. An input is bound at THIS
         size -- an output that wants to grow must not force us to inflate the input."""
-        if self.is_fill:
-            # a fill has no [shape] buffer; its logical extents ARE its capacity, and they are read
-            # from its STORED reference shape -- NOT recomputed from the axes, which a backward residual
-            # may not have resolved yet (the C++ view reads the true extent from a sibling at run time).
-            return tuple( self._shape.capacities() )
-        return tuple( self.buffer_layout.caps )
+        return self.storage.capacity( self.rank )
 
     @property
     def allocated_sizes( self ):
         """The allocated capacity per LOGICAL dimension -- what a `ShapeVar` inverts to learn the
-        capacity it was allocated with. Read from `buffer_layout` (NOT `_raw.shape` directly), so a
-        non-contiguous / flattened / padded buffer answers with the per-axis capacity rather than the
-        raw physical extents. `None` while unbound. For the plain layout `caps == _raw.shape`."""
-        if self.raw is None or self.is_fill:
-            return None   # a fill backs no per-axis capacity a ShapeVar could invert (its count comes
-                          # from a real sibling buffer); skip it, do not read the scalar's [] shape
-        return [ numpy.array( c, dtype = int ) for c in self.buffer_layout.caps ]
+        capacity it was allocated with. Read through the layout, so a non-contiguous / flattened /
+        padded buffer answers with the per-axis capacity rather than the raw physical extents.
+        `None` when there is no allocation to invert (unbound, or a fill -- whose extents come FROM
+        real sibling buffers, never the reverse)."""
+        return self.storage.allocated_sizes( self.rank )
 
 
     def _read_axes( self, axes, scope ):
@@ -297,7 +308,9 @@ class Tensor( Attribute ):
                 if entry.endswith( "..." ):
                     entry = entry[ :-3 ]
                 entry = resolve_attribute( entry, scope )
-            elif isinstance( entry, ShapeVar ):
+            elif isinstance( entry, ( ShapeVar, int ) ):
+                # a `ShapeVar` (or a literal extent, `RealTensor[ 3, 4 ]`) names no axis of its
+                # own: wrap it in an anonymous one, which is all a standalone tensor needs.
                 entry = Axis( entry )
 
             assert isinstance( entry, AbstractAxis )
@@ -346,7 +359,7 @@ class Tensor( Attribute ):
         # (a standalone `Tensor( [ 1, 2 ] )`, or a derived tensor with no named axis), and it has
         # none while unvalued. `_raw.shape` also serves a symbolic zero (it carries its shape).
         if not self.axes:
-            return list( self._raw.shape ) if self._raw is not None else []
+            return list( self.storage.raw.shape ) if self.is_defined else []
 
         # each member contributes a LIST of extents (one for an `Axis`, `nb_dims`
         # for an unrolled `AxisList`); concatenation gives the tensor's extents.
@@ -358,15 +371,15 @@ class Tensor( Attribute ):
     @property
     def rank( self ):
         if not self.axes:
-            return self._raw.ndim if self._raw is not None else 0
+            return self.storage.raw.ndim if self.is_defined else 0
         return len( self.axes )
 
     @property
     def raw( self ):
         """The MATERIALIZED buffer, or `None` when there is nothing to bind -- a symbolic zero has
         no storage, so it reads as `None` here (that is how `is_bound` stays false for it), while
-        `_raw` still holds the framework's zero object for `is_symbolic_zero` to recognize."""
-        return None if self.is_symbolic_zero else self._raw
+        the storage still holds the framework's zero object for `is_symbolic_zero` to recognize."""
+        return self.storage.buffer
 
     @property
     def tensor( self ):
@@ -381,29 +394,10 @@ class Tensor( Attribute ):
         holds eagerly -- a kernel-written count is a device value under a trace, where Python cannot
         slice by it (`shape` raises there). A symbolic zero has no buffer to view -> `None`.
 
-        With an explicit non-contiguous `_layout` (flattened / padded / reordered buffer) the plain
-        slice does not apply: the LOGICAL view is GATHERED from the physical buffer via the layout's
-        strides (a differentiable gather). This is the one physical->logical boundary; everything else
-        reads `tensor`, so ops and results stay logical whatever the storage."""
-        if self.raw is None:
-            return None
-        if self._layout is not None and not self._layout.is_identity:
-            return self._gather_logical()
-        return self.raw[ tuple( slice( 0, s ) for s in self.shape ) ]
-
-    def _gather_logical( self ):
-        """The logical dense view of a non-contiguously laid-out buffer: `flat[ offsets ]` where
-        `offsets[ i0, ..., ik ] = sum_d i_d * stride_d` (element strides from `_layout`), so a
-        flattened/padded/reordered buffer is read back in logical order. `offsets` is a static index
-        grid; the gather rides the backend (differentiable)."""
-        extents = self.shape
-        strides = self._layout.strides
-        offsets = numpy.zeros( tuple( extents ), dtype = int )
-        for i, ( e, s ) in enumerate( zip( extents, strides ) ):
-            shape = [ 1 ] * len( extents )
-            shape[ i ] = e
-            offsets = offsets + numpy.arange( e, dtype = int ).reshape( shape ) * int( s )
-        return self._raw.reshape( -1 )[ offsets ]
+        How the crop is actually done depends on how the value is BACKED (a plain slice, a gather
+        through a non-contiguous layout, ...), so it is the storage that answers -- this property is
+        just the name everything else reads."""
+        return self.storage.view( self )
 
     # @property
     # def value( self ):
@@ -441,7 +435,7 @@ class Tensor( Attribute ):
         # An explicit `dtype` is then a claim about that buffer, checked rather than believed.
         dt  = _wrapped_dtype( raw, dtype ) or cls.default_dtype()
         res = Tensor.class_for( dt )( template_kwargs = { "dtype": dt, "device": device } )
-        res._raw = raw
+        res.storage = Storage.of( raw )
         if names is not None:
             axes = []
             for index, name in enumerate( names ):
@@ -453,15 +447,21 @@ class Tensor( Attribute ):
                 axis.register_in( res )
         # a wrapped buffer is dense: its LOGICAL sizes ARE its shape (no padding). Record them so the
         # fresh ShapeVars pull their counts, AND so an axis-less result (no names, e.g. a `matmul`)
-        # still has a `_shape` to reshape from (`append_axis`). A symbolic zero carries no readable one.
-        if raw is not None and not driver.is_symbolic_zero( raw ):
-            res._shape = ReferenceShape.from_dense_shape( raw.shape )
+        # still has a reference shape to reshape from (`append_axis`). A symbolic zero carries none.
+        if res.storage.buffer is not None:
+            res.storage = res.storage.with_reference_shape( ReferenceShape.from_dense_shape( raw.shape ) )
         return res
 
     def _dim_names( self ):
         """One axis name (or `None`) per ARRAY dimension, read uniformly off the axes (an unrolled
-        AxisList spreads its name over its spanned dimensions)."""
+        AxisList spreads its name over its spanned dimensions). The plain NAME, so a window into a
+        dimension is still found by it -- `_dim_labels` is the form that shows the offset."""
         return self._dim_attr( lambda axis: axis.name )
+
+    def _dim_labels( self ):
+        """One display label per array dimension: the name, plus the offset when this is a WINDOW
+        into a dimension rather than the whole of it (`num_vertex+10`)."""
+        return self._dim_attr( lambda axis: axis.display_name )
 
     def _dim_batch( self ):
         """One `is_batch` flag per ARRAY dimension (same layout as `_dim_names`)."""
@@ -484,11 +484,11 @@ class Tensor( Attribute ):
         return res
 
     def _axis_pos( self, key ):
-        """A dimension index, from an axis OBJECT (matched by identity -- the robust key), an int
-        (returned as is), or an axis NAME (looked up in `_dim_names`)."""
+        """A dimension index, from an axis OBJECT (matched by IDENTITY -- so a sliced dimension is
+        still found by the axis it means), an int (returned as is), or an axis NAME."""
         if isinstance( key, AbstractAxis ):
             for i, a in enumerate( self._dim_axes() ):
-                if a is key:
+                if a.identity is key.identity:
                     return i
             raise ValueError( "axis object not among this tensor's dimensions" )
         if isinstance( key, str ):
@@ -557,32 +557,71 @@ class Tensor( Attribute ):
         return self._wrap( op( self.tensor, b ), names if len( names ) == self.rank else None )
 
     def _ref_layout( self ):
-        """One axis OBJECT per array dimension when each dim maps to a DISTINCT axis (so a map by
+        """One axis OBJECT per array dimension when each dim means a DISTINCT axis (so a map by
         reference is unambiguous), else `None`. A rank-0 tensor qualifies with an empty list."""
         axes = self._dim_axes()
         if len( axes ) != self.rank:
             return None
         for i, a in enumerate( axes ):
-            if any( a is b for b in axes[ :i ] ):
+            if any( a.coordinate == b.coordinate for b in axes[ :i ] ):
                 return None
         return axes
 
     def _ref_binary( self, other, la, lb, op ):
-        # canonical order (by IDENTITY): batch axes first, then first-seen (self, then other).
+        return self._ref_apply( [ other ], op, layouts = [ la, lb ] )
+
+    def _ref_apply( self, others, op, layouts = None ):
+        """Apply `op` to us and `others`, all aligned onto ONE canonical axis order -- the n-ary
+        form of a reference-mapped op (`_binary` is the binary case, `where` the ternary one).
+
+        The order is canonical BY IDENTITY: batch axes first, then first-seen (us, then each other
+        in turn), so the result does not depend on the order the operands were written in. A
+        non-`Tensor` operand becomes a rank-0 tensor, which carries no axis and therefore broadcasts
+        over all of them. `None` when an operand cannot be mapped by reference (a bare array with
+        several dimensions and no distinct axis per dimension) -- the caller then falls back to
+        positional broadcasting."""
+        operands = [ self ] + [ o if isinstance( o, Tensor ) else Tensor.wrap( driver.array( o ) )
+                                for o in others ]
+        if layouts is None:
+            layouts = [ t._ref_layout() for t in operands ]
+            if any( l is None for l in layouts ):
+                return None
+
         order = []
         for want_batch in ( True, False ):
-            for dims in ( la, lb ):
+            for dims in layouts:
                 for ax in dims:
-                    if bool( getattr( ax, "is_batch", False ) ) == want_batch and not any( ax is o for o in order ):
-                        order.append( ax )
-        raw = op( _aligned_to( self.tensor, la, order ), _aligned_to( other.tensor, lb, order ) )
+                    if bool( getattr( ax, "is_batch", False ) ) != want_batch:
+                        continue
+                    if any( ax.coordinate == o.coordinate for o in order ):
+                        continue
+                    _refuse_mismatched_window( ax, order )
+                    order.append( ax )
+        raw = op( *[ _aligned_to( t.tensor, l, order ) for t, l in zip( operands, layouts ) ] )
         return self._wrap_axes( raw, order )
+
+    def where( self, a, b ):
+        """`a` where we are true, `b` elsewhere -- what a mask (`t > 0`, a `BoolTensor`) is FOR.
+
+        The three operands are aligned by axis IDENTITY like any elementwise op, so a per-row
+        condition selects across a full matrix with no reshaping. Either branch may be a plain
+        scalar, which broadcasts."""
+        res = self._ref_apply( [ a, b ], driver.where )
+        if res is not None:
+            return res
+        unwrap = lambda v: v.tensor if isinstance( v, Tensor ) else v
+        return self._wrap( driver.where( self.tensor, unwrap( a ), unwrap( b ) ), self._dim_names() )
 
     def _wrap_axes( self, raw, dim_axes ):
         """A detached tensor around `raw` whose dimensions ARE `dim_axes` -- the very axis OBJECTS, so
         identity (hence names and `is_batch`) rides along into the next op. Consecutive repeats (an
-        `AxisList` over several dims) collapse to one entry. The axes are NOT re-registered: their
-        ShapeVars are already sized, and `shape` reads the sizes straight off them."""
+        `AxisList` over several dims) collapse to one entry.
+
+        The result REGISTERS as a usage of those axes. Without it an axis reads its extent only off
+        the tensors that DECLARED it, and those are held weakly -- so chaining off a temporary
+        (`( a * b ).shape`) could find the extent gone once the temporary was collected. Registering
+        is only sound because every op reaching here preserves its axes' extents; one that narrows a
+        dimension (a partial slice) hands over a fresh axis instead (see `__getitem__`)."""
         axes = []
         for ax in dim_axes:
             if not axes or axes[ -1 ] is not ax:
@@ -591,9 +630,11 @@ class Tensor( Attribute ):
         dt  = _result_dtype( raw, self.dtype )
         res = Tensor.class_for( dt )( template_kwargs = { "dtype": dt, "device": self.device } )
         res.axes = axes
-        res._raw = raw
-        if raw is not None and not driver.is_symbolic_zero( raw ):
-            res._shape = ReferenceShape.from_dense_shape( raw.shape )
+        res.storage = Storage.of( raw )
+        if res.storage.buffer is not None:
+            res.storage = res.storage.with_reference_shape( ReferenceShape.from_dense_shape( raw.shape ) )
+            for axis in axes:
+                axis.register_in( res )
         return res
 
     def __add__     ( self, o ): return self._binary( o, lambda a, b: a +  b )
@@ -745,11 +786,34 @@ class Tensor( Attribute ):
         # dimensions (an int index drops its dimension; a slice / array keeps it).
         key = key + ( slice( None ), ) * ( self.rank - len( key ) )
         result = self.tensor[ key ]
-        survivors = [ dims[ d ] for d, k in enumerate( key ) if not isinstance( k, int ) and d < len( dims ) ]
+
+        # An axis OBJECT survives only where the slice left its dimension INTACT. An axis is SHARED,
+        # and its extent is solved from the tensors that use it (see `_wrap_axes`, which registers
+        # this result as one), so handing it a NARROWED dimension would teach it a wrong count --
+        # and through it, every other tensor built on the same axis. A narrowed dimension therefore
+        # gets a fresh axis, carrying the name so the result still reads the same.
+        extents   = self.shape
+        survivors = []
+        for d, k in enumerate( key ):
+            if isinstance( k, int ):
+                continue                                    # an int index drops its dimension
+            axis = dims[ d ] if d < len( dims ) else None
+            window = axis.windowed( k, extents[ d ] ) if isinstance( k, slice ) and axis is not None else None
+            if window is None:
+                # not an affine window (a boolean mask, an index array): the result's positions
+                # bear no fixed relation to the original's, so it is a dimension of its own.
+                survivors.append( Axis( ShapeVar() ) )
+            elif window.coordinate == axis.coordinate and window.hi == axis.hi:
+                survivors.append( axis )                     # the whole of it: the axis itself
+            else:
+                survivors.append( window )
+
+        if len( survivors ) != len( result.shape ):
+            return self._wrap( result, None )               # fancy indexing changed the rank
         return self._wrap_axes( result, survivors )
 
     def __repr__( self ):
-        names  = self._dim_names()
+        names  = self._dim_labels()
         axes   = "" if all( n is None for n in names ) else f", axes={ names }"
         kind   = ", symbolic_zero" if self.is_symbolic_zero else ""
         header = f"{ type( self ).__name__ }( shape={ self.shape }{ axes }, dtype={ self.dtype.name }, device={ self.device }{ kind } )"
@@ -777,6 +841,23 @@ def _declared_dtype( cls, template_kwargs ):
         raise TypeError( f"{ cls.__name__ } cannot be declared { dtype.cpp_name }: "
                          f"use { Tensor.class_for( dtype ).__name__ } instead" )
     return dtype
+
+
+def _refuse_mismatched_window( axis, order ):
+    """Refuse two DIFFERENT windows of the SAME dimension in one elementwise op.
+
+    They are not independent axes to outer-product (they index the same thing), and they are not
+    aligned either (position 0 of `num_vertex+2` is not position 0 of `num_vertex`). Broadcasting
+    them would silently pair items that do not correspond, so the op stops instead. Rebuild the
+    axis (or take the same window on both sides) to say what was meant."""
+    for other in order:
+        if other.identity is axis.identity and other.coordinate != axis.coordinate:
+            raise ValueError(
+                f"cannot combine '{ other.display_name }' with '{ axis.display_name }': two "
+                f"different windows of the same dimension. They index the same thing, so they are "
+                f"not independent axes to broadcast -- and they start at different places, so they "
+                f"do not line up either. Slice both sides the same way, or give the result an axis "
+                f"of its own." )
 
 
 # ---- reading a dtype OFF a value, rather than believing a declaration --------------------------
@@ -827,10 +908,10 @@ def _aligned_to( arr, dims, order ):
     `order` and a size-1 axis inserted wherever `order` holds an axis `arr` does not have. After this
     both operands of an elementwise op share the SAME axis order, so a plain broadcast is a map by
     reference (a missing -- hence size-1 -- axis broadcasts). Matched by IDENTITY (`dims` distinct)."""
-    pos = { id( ax ): i for i, ax in enumerate( dims ) }
-    present = [ ax for ax in order if id( ax ) in pos ]
-    arr = driver.transpose( arr, [ pos[ id( ax ) ] for ax in present ] )
-    return arr[ tuple( slice( None ) if id( ax ) in pos else None for ax in order ) ]
+    pos = { ax.coordinate: i for i, ax in enumerate( dims ) }
+    present = [ ax for ax in order if ax.coordinate in pos ]
+    arr = driver.transpose( arr, [ pos[ ax.coordinate ] for ax in present ] )
+    return arr[ tuple( slice( None ) if ax.coordinate in pos else None for ax in order ) ]
 
 
 # containers recursed into by `_assemble` (a whitelist: anything else is a leaf)
@@ -913,10 +994,9 @@ def _cell_valid( axes, idx ):
     unresolved `ShapeVar`) is treated as fully valid -- with no known extent there
     is no padding to detect, so displaying the raw buffer as is beats crashing."""
     for d, axis in enumerate( axes ):
-        values = [ _shape_var_at( shape_var, axes, idx ) for shape_var in axis.coeffs ]
-        if any( v is None for v in values ):
-            continue
-        extent = axis.offset + sum( coeff * v for coeff, v in zip( axis.coeffs.values(), values ) )
+        extent = axis.numeric_extent( lambda sv: _shape_var_at( sv, axes, idx ) )
+        if extent is None:
+            continue          # no known extent -> no padding to detect: show the buffer as it is
         if idx[ d ] >= extent:
             return False
     return True

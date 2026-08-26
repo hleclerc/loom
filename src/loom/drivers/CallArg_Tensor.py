@@ -24,20 +24,18 @@ class CallArg_Tensor( CallArg ):
         self.inst = inst
         self.dtype = inst.dtype
         # LAST line of defense on the dtype invariant (`Tensor._as_declared` is the first): below,
-        # `_cpp_scalar` spells this dtype as the element type of the buffer we are about to bind, so
+        # `cpp_scalar` spells this dtype as the element type of the buffer we are about to bind, so
         # a buffer that disagrees is REINTERPRETED by the kernel -- silent garbage, not a type error.
         if inst.raw is not None and not inst.is_fill:
             from ..tensor.Dtype import Dtype
             have = Dtype.of( inst.raw )
             assert self.dtype.same_as( have ), \
                 f"tensor '{ name }' is declared { self.dtype.cpp_name } but its buffer holds { have.cpp_name }"
-        # a symbolic-zero cotangent: it IS there (reads as 0), but no storage backs it -- so it
-        # is unbound like a `NoneTensor`, only it lowers to a `ZeroTensor` (see `cpp_type`).
-        self.symbolic_zero = getattr( inst, "is_symbolic_zero", False )
-        # a symbolic FILL (`Tensor.full`): a single scalar backs the value; it BINDS a rank-0 buffer
-        # but its C++ view is a storageless `FillTensor` over the LOGICAL shape (its extents read from
-        # a sibling real buffer at emit time -- hence the back-ref to the analysis).
-        self.is_fill = getattr( inst, "is_fill", False )
+        # HOW the value is backed -- snapshotted here, like every other fact this node reads off the
+        # tensor, so a later rebinding (this call's own write-back) cannot change what we emit. It is
+        # what decides our C++ form: `cpp_type` / `cpp_view` / `_jax_buffer_shape` all ask IT, and
+        # this class only supplies the spelling primitives (see `loom/tensor/storage.py`).
+        self.storage = inst.storage
         self._caa = call_args_analysis
         self.memory_space = call_args_analysis.cpp_memory_space
 
@@ -120,82 +118,65 @@ class CallArg_Tensor( CallArg ):
         self._has_vmap = True   # the framework owns this leading dim -> stay contiguous (see `layout`)
 
     def batch_dim_expr( self, name ):
-        # a fill has only a scalar buffer -- it cannot answer a real extent, so it never resolves an
-        # axis size for anyone (a fill's OWN extents are read FROM the real buffers, not the reverse).
-        if self.is_fill or name not in self.axis_names:
-            return None
-        return self.jax_dim( self.axis_names.index( name ) )
+        # whether we can serve an extent at all depends on what backs us (a fill cannot: it has only
+        # a scalar buffer), so the storage answers.
+        return self.storage.batch_dim_expr( self, name )
 
-    # -- driver-agnostic C++ (the same for every driver) --
-    def _cpp_scalar( self ):
+    # -- driver-agnostic C++ (the same for every driver). Everything below the `cpp_*` helpers is
+    # a SPELLING primitive: how one fragment is written. WHICH form this member takes is the
+    # storage's call (`storage.cpp_type` / `cpp_view`), so a new way of being backed is a new
+    # variant there, not another branch here. --
+    def cpp_scalar( self ):
         import numpy
         dt = numpy.dtype( self.dtype.driver_version )
         return { ( "f", 4 ): "float", ( "f", 8 ): "double",
                  ( "i", 4 ): "std::int32_t", ( "i", 8 ): "std::int64_t",
                  ( "u", 4 ): "std::uint32_t", ( "u", 8 ): "std::uint64_t" }[ ( dt.kind, dt.itemsize ) ]
 
-    def _cpp_shape_tuple( self ):
+    def cpp_shape_tuple( self ):
         # the extents come from the BUFFER, not from `self.shape`: see `CallArg.jax_dim`.
         return "tuple( " + ", ".join( self.jax_dim( d ) for d in range( len( self.shape ) ) ) + " )"
 
-    def _cpp_logical_shape_tuple( self ):
+    def cpp_logical_shape_tuple( self ):
         # the LOGICAL extents as literals -- used with a NON-contiguous layout, where the buffer's
         # physical dims (flattened/reordered) no longer match the logical axes, so `jax_dim` (which
         # reads the buffer) cannot serve them. Batch extents are prescribed and the rest are the
         # capacities this call allocates: all known at trace time.
         return "tuple( " + ", ".join( f"SI( { int( e ) } )" for e in self.shape ) + " )"
 
-    def _cpp_strides_tuple( self ):
+    def cpp_strides_tuple( self ):
         # the per-LOGICAL-axis BYTE strides of the physical layout (what `tensor_view`'s 4th arg wants).
         return "tuple( " + ", ".join( f"SI( { s } )" for s in self.layout.strides_bytes( self.itemsize ) ) + " )"
 
-    def _cpp_axis_tuple( self ):
+    def cpp_axis_tuple( self ):
         return "tuple( " + ", ".join( self.axis_names ) + " )"
 
-    def _cpp_shape_type( self ):
+    def cpp_shape_type( self ):
         # the *type* of the shape tuple: only the rank (extents are runtime `SI`s) -- a
         # statically known extent would show up here as a `Ct<SI,n>`.
         return "Tuple<" + ", ".join( "SI" for _ in self.shape ) + ">"
 
-    def _cpp_axis_names_type( self ):
+    def cpp_axis_names_type( self ):
         # `DEFINE_AXIS( num_vertex )` declares the type `_num_vertex` (and the value `num_vertex`).
         return "Tuple<" + ", ".join( "_" + n for n in self.axis_names ) + ">"
 
     def cpp_type( self ):
-        """This member's C++ type. An unbound attribute is not a degenerate view: it is a
-        `NoneTensor` (absent -- a compile-time fact) or a `ZeroTensor` (a symbolic zero, read as
-        0). Where the data lives is in the type too (`memory_space`): on a GPU, XLA already put
-        this buffer in device memory."""
-        if self.is_fill:
-            # storageless constant over the logical shape; every element reads one scalar (see FillTensor.h).
-            return ( f"FillTensor<{ self._cpp_scalar() }, { self._cpp_shape_type() }, "
-                     f"{ self._cpp_axis_names_type() }>" )
-        if not self.io_category.is_bound:
-            kind = "ZeroTensor" if self.symbolic_zero else "NoneTensor"
-            return ( f"{ kind }<{ self._cpp_scalar() }, { self._cpp_shape_type() }, "
-                     f"{ self._cpp_axis_names_type() }>" )
-        # a NON-contiguous layout spells its Strides in the type too (a runtime `Tuple<SI,...>`);
-        # the contiguous default leaves the template's default Strides (so today's type is unchanged).
-        strides = "" if self.layout.is_identity else f", { self._cpp_shape_type() }"
-        return ( f"TensorView<{ self._cpp_scalar() }, { self._cpp_shape_type() }, "
-                 f"{ self.memory_space }, { self._cpp_axis_names_type() }{ strides }>" )
+        """This member's C++ type -- asked of the STORAGE, since that is what it depends on: a real
+        buffer is a `TensorView`, an absent value a `NoneTensor` (a compile-time fact, not a
+        degenerate view to test at run time), a symbolic zero a `ZeroTensor`, a fill a
+        `FillTensor`. Where the data lives is in the type too (`memory_space`): on a GPU, XLA has
+        already put this buffer in device memory."""
+        return self.storage.cpp_type( self )
 
     def cpp_view( self ):
-        # a `NoneTensor` has nothing to view: it value-initializes.
-        if not self.io_category.is_bound:
-            return f"{ self.cpp_type() }{{}}"
-        if self.is_fill:
-            # the scalar data ptr + the LOGICAL extents, each read from a sibling REAL buffer that
-            # carries the axis (the analysis finds it, like a batch extent) -- so no extent is baked.
-            extents = ", ".join( self._caa.batch_dim_expr( a ) for a in self.axis_names )
-            return f"{ self.cpp_type() }{{ { self.jax_data_ptr() }, tuple( { extents } ) }}"
-        ptr = self.jax_data_ptr()
-        if self.layout.is_identity:
-            return ( f"tensor_view<{ self.memory_space }>( { ptr }, { self._cpp_shape_tuple() }, "
-                     f"{ self._cpp_axis_tuple() } )" )
-        # non-contiguous: LOGICAL extents (literals) + physical BYTE strides -> the 4-arg overload.
-        return ( f"tensor_view<{ self.memory_space }>( { ptr }, { self._cpp_logical_shape_tuple() }, "
-                 f"{ self._cpp_axis_tuple() }, { self._cpp_strides_tuple() } )" )
+        """How that type is initialized -- the storage's call for the same reason."""
+        return self.storage.cpp_view( self )
+
+    def sibling_dim_expr( self, name ):
+        """Where the extent of axis `name` can be read at run time, off ANOTHER argument of this
+        call that carries it. What a value with no extents of its own (a fill) builds its logical
+        shape from -- so no extent is baked into the generated source."""
+        return self._caa.batch_dim_expr( name )
 
     # -- seeding: what an output must hold before the body runs --
     def cpp_seed_member( self, owner_name ):
@@ -236,11 +217,9 @@ class CallArg_Tensor( CallArg ):
         return f"ffi::BufferR{ len( self._jax_buffer_shape() ) }<{ self._jax_ffi_elem() }>"
 
     def _jax_buffer_shape( self ):
-        # the PHYSICAL buffer XLA allocates / binds: the layout's `buffer_shape` (flattened+padded
-        # batch when non-contiguous, else `self.shape`). The C++ view reinterprets it logically.
-        if self.is_fill:
-            return []   # a single scalar backs the whole (logical) fill -- a rank-0 buffer
-        return self.layout.buffer_shape
+        # the PHYSICAL buffer XLA allocates / binds -- a fill's is a single scalar, a laid-out one
+        # is flattened + padded, the ordinary one is `self.shape`. The storage knows which it is.
+        return self.storage.jax_buffer_shape( self )
 
     def jax_cpp_init( self ):
         return self.cpp_view()
@@ -253,8 +232,6 @@ class CallArg_Tensor( CallArg ):
         return jax.ShapeDtypeStruct( tuple( int( s ) for s in self._jax_buffer_shape() ), self.dtype.driver_version )
 
     def jax_write_back( self, array ):
-        self.inst.set_raw( array )
-        # hand the result tensor its physical layout so downstream ops read it back logically (via
-        # `Tensor.tensor`'s gather). Identity stays `None` -> the plain contiguous default.
-        if not self.layout.is_identity:
-            self.inst._layout = self.layout
+        # hand the result tensor its physical layout too, so downstream ops read it back logically
+        # (via the storage's gather). Identity passes `None` -> the plain contiguous default.
+        self.inst.set_raw( array, layout = None if self.layout.is_identity else self.layout )

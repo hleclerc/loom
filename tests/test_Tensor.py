@@ -334,7 +334,7 @@ if test( "tensor_physical_layout_view" ):
     # back its LOGICAL values: `.tensor` gathers them through the layout (the physical<->logical
     # boundary). Everything else reads `.tensor`, so ops/results stay logical whatever the storage.
     from loom.tensor import PhysicalLayout
-    from loom.tensor import ReferenceShape
+    from loom.tensor import ReferenceShape, Storage
     from loom import driver
 
     logical = numpy.array( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ], dtype = float )   # logical [2,3]
@@ -345,9 +345,9 @@ if test( "tensor_physical_layout_view" ):
     b = Axis( ShapeVar( 2 ), name = "b" )
     c = Axis( ShapeVar( 3 ), name = "c" )
     t = RealTensor[ b, c ]()
-    t._raw   = driver.array( raw )
-    t._shape = ReferenceShape.from_dense_shape( [ 2, 3 ] )
-    t._layout = L
+    # ONE statement says how this value is backed: the buffer, the logical sizes it was read from,
+    # and the physical layout relating the two -- rather than three fields that must agree.
+    t.storage = Storage.of( driver.array( raw ), ReferenceShape.from_dense_shape( [ 2, 3 ] ), L )
 
     assert list( t.shape ) == [ 2, 3 ]
     assert t.capacity == ( 2, 3 )                     # per LOGICAL dim: the padding lives in the flat phys dim
@@ -639,3 +639,338 @@ if test( "a_count_that_lives_on_the_device_is_refused_on_the_host" ):
     # outside any trace the very same count reads back on the host, no ceremony
     n.set_count( driver.array( 3, dtype = int ) )
     assert int( n.value ) == 3
+
+
+if test( "storage_is_a_kind_not_a_flag" ):
+    # HOW a value is backed is an object, one variant per way it can be (see `tensor/storage.py`),
+    # and each answers the physical questions its own way. Nothing tests for a kind.
+    from loom.tensor import Storage, Unbound, Buffer, SymbolicZero, Fill
+    from loom.tensor import ReferenceShape
+
+    n = ShapeVar()
+    t = RealTensor[ Axis( n ) ]()
+    assert isinstance( t.storage, Unbound )          # declared, holds nothing -> a NoneTensor
+    assert not t.is_defined and t.raw is None and t.tensor is None
+    assert t.allocated_sizes is None
+
+    t.set( [ 1.0, 2.0, 3.0 ] )
+    assert isinstance( t.storage, Buffer )
+    assert t.is_defined and t.capacity == ( 3, )
+    assert numpy.asarray( t.tensor ).tolist() == [ 1.0, 2.0, 3.0 ]
+
+    # a symbolic zero HOLDS a value (it reads as 0) yet backs no buffer -- which is exactly why it
+    # binds nothing across the FFI. One variant, no flag, no special case at the call sites.
+    z = RealTensor[ Axis( ShapeVar( 3 ) ) ]()
+    z.set_raw( driver.symbolic_zero( [ 3 ] ) )
+    assert isinstance( z.storage, SymbolicZero )
+    assert z.is_defined and z.is_symbolic_zero
+    assert z.raw is None                              # nothing to bind...
+    assert z.storage.raw is not None                  # ...though the framework's object is held
+
+    # a fill is STATED, never inferred: one scalar looks like any other rank-0 buffer
+    f = RealTensor[ Axis( ShapeVar( 4 ) ) ].filled_with( 2.5, ReferenceShape.from_dense_shape( [ 4 ] ) )
+    assert isinstance( f.storage, Fill ) and f.is_fill
+    assert f.capacity == ( 4, )                       # its logical extents ARE its capacity
+    assert f.allocated_sizes is None                  # ... and back no capacity a ShapeVar inverts
+    assert numpy.asarray( f.tensor ).tolist() == [ 2.5 ] * 4
+
+    # binding a value to another tensor carries its KIND along, and retypes what backs it
+    holder = RealTensor[ Axis( ShapeVar( 4 ) ) ]()
+    holder.set( f )
+    assert isinstance( holder.storage, Fill )         # a fill stays a fill
+    holder.set( z )
+    assert isinstance( holder.storage, SymbolicZero ) # a symbolic zero stays one
+
+    # and `Storage.of` is the ONE place a kind is decided from a value
+    assert isinstance( Storage.of( None ), Unbound )
+    assert isinstance( Storage.of( driver.array( 1.0 ) ), Buffer )
+
+
+if test( "a_literal_extent_is_enough_standalone" ):
+    # Outside an aggregate there is no scope to resolve a name through, so an axis has to be
+    # handed over as an object. It should not also cost a `ShapeVar` to spell: an integer IS an
+    # extent, and it mints its own count behind the scenes -- the short form is a shortcut, not a
+    # second kind of axis.
+    t = RealTensor[ 2, 3 ]( [ [ 1.0, 2.0, 3.0 ], [ 4.0, 5.0, 6.0 ] ] )
+    assert t.shape == [ 2, 3 ] and t.capacity == ( 2, 3 )
+
+    i = Axis( 3, name = "i" )
+    x = RealTensor[ i ]( [ 1.0, 2.0, 3.0 ] )
+    y = RealTensor[ i ]( [ 4.0, 5.0, 6.0 ] )
+
+    # the axis OBJECT is shared, so the two line up by identity and contract by name
+    assert float( x.dot( y, "i" ) ) == 32.0
+    assert ( x + y )._dim_names() == [ "i" ]
+
+    # an axis the other side does not have is broadcast -> an outer product, both names kept
+    j = Axis( 2, name = "j" )
+    assert ( x * RealTensor[ j ]( [ 1.0, 10.0 ] ) ).shape == [ 3, 2 ]
+
+    # the long spelling still means exactly the same thing
+    assert RealTensor[ Axis( ShapeVar( 4 ) ) ]().shape == [ 4 ]
+
+
+if test( "an_axis_can_be_given_just_a_name" ):
+    # Standalone there is no scope a name could be RESOLVED in -- so a bare name is not a reference
+    # to a count, it IS the axis's name, and the count is minted for it. That is the whole ceremony
+    # gone: what one wants standalone is an axis to match ops by, not a count to declare.
+    i = Axis( "i" )
+    x = RealTensor[ i ]( [ 1.0, 2.0, 3.0 ] )
+    y = RealTensor[ i ]( [ 4.0, 5.0, 6.0 ] )
+
+    assert i.name == "i"
+    assert x.shape == [ 3 ]                          # the extent is solved from the value
+    assert float( x.dot( y, "i" ) ) == 32.0
+
+    # the minted count is named after the axis, mechanically: `nb_<thing>`, a leading `num_`
+    # dropped. No pluralization -- an irregular plural would make the name unguessable.
+    ( count, ) = i.coeffs
+    assert count.name == "nb_i" and int( count.value ) == 3
+    ( cell_count, ) = Axis( "num_cell" ).coeffs
+    assert cell_count.name == "nb_cell"
+
+    # two axes are still distinct OBJECTS, so they outer-product rather than collapse
+    j = Axis( "j" )
+    z = RealTensor[ j ]( [ 1.0, 10.0 ] )
+    assert ( x * z ).shape == [ 3, 2 ]
+
+    # inside a scope a string keeps its usual meaning (a count declared as a field), and an
+    # EXPRESSION standalone is still refused -- it genuinely needs a scope
+    try:
+        Axis( "2 * n + 1" )
+        assert False, "an affine expression cannot be resolved without a scope"
+    except TypeError:
+        pass
+
+
+if test( "where_selects_by_axis_identity" ):
+    import loom
+
+    i, j = Axis( "i" ), Axis( "j" )
+    x = RealTensor[ i ]( [ -1.0, 2.0, -3.0 ] )
+    y = RealTensor[ i ]( [ 10.0, 20.0, 30.0 ] )
+
+    mask = x > 0
+    assert type( mask ) is BoolTensor
+
+    # either branch may be a plain scalar, or another tensor
+    assert numpy.asarray( mask.where( x, 0.0 ) ).tolist() == [ 0.0, 2.0, 0.0 ]
+    assert numpy.asarray( mask.where( x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
+
+    # and the three operands align BY AXIS, like any elementwise op: a per-row condition selects
+    # across a whole matrix with no reshaping.
+    m = RealTensor[ i, j ]( [ [ 1.0, 2.0 ], [ 3.0, 4.0 ], [ 5.0, 6.0 ] ] )
+    r = mask.where( m, 0.0 )
+    assert r.shape == [ 3, 2 ] and r._dim_names() == [ "i", "j" ]
+    assert numpy.asarray( r ).tolist() == [ [ 0.0, 0.0 ], [ 3.0, 4.0 ], [ 0.0, 0.0 ] ]
+
+    assert numpy.asarray( loom.where( mask, x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
+
+
+if test( "every_operation_has_both_forms" ):
+    # a method and a free function are the same operation, kept in step on purpose: some
+    # expressions read better chained, others called.
+    import loom
+
+    i, j = Axis( "i" ), Axis( "j" )
+    m = RealTensor[ i, j ]( [ [ 1.0, 4.0 ], [ 9.0, 16.0 ] ] )
+    v = RealTensor[ i ]( [ -1.0, 2.0 ] )
+    w = RealTensor[ i ]( [ 10.0, 20.0 ] )
+
+    same = lambda a, b: numpy.asarray( a ).tolist() == numpy.asarray( b ).tolist()
+
+    assert same( loom.dot( v, w, "i" ), v.dot( w, "i" ) )
+    assert same( loom.sum ( m, "i" ), m.sum ( "i" ) )
+    assert same( loom.prod( m, "i" ), m.prod( "i" ) )
+    assert same( loom.min ( m, "i" ), m.min ( "i" ) )
+    assert same( loom.max ( m, "i" ), m.max ( "i" ) )
+    assert same( loom.mean( m, "i" ), m.mean( "i" ) )
+    assert same( loom.all ( m > 2, "i" ), ( m > 2 ).all( "i" ) )
+    assert same( loom.any ( m > 2, "i" ), ( m > 2 ).any( "i" ) )
+    assert same( loom.sqrt( m ), m.sqrt() )
+    assert same( loom.abs ( v ), abs( v ) )
+    assert same( loom.clip( v, -0.5, 1.0 ), v.clip( -0.5, 1.0 ) )
+    assert same( loom.stop_gradient( v ), v.stop_gradient() )
+    assert same( loom.transpose( m ), m.transpose() )
+    assert same( loom.arcsin( RealTensor[ i ]( [ 0.0, 0.5 ] ) ),
+                 RealTensor[ i ]( [ 0.0, 0.5 ] ).arcsin() )
+
+
+if test( "a_result_keeps_its_extents_after_its_operand_is_gone" ):
+    import gc
+
+    i, j = Axis( "i" ), Axis( "j" )
+    x = RealTensor[ i ]( [ 1.0, 2.0, 3.0 ] )
+
+    # the right operand is a TEMPORARY: an axis reads its extent off the tensors that use it, and
+    # those are held weakly, so without the result registering itself the extent would vanish with
+    # the temporary.
+    r = x * RealTensor[ j ]( [ 1.0, 10.0 ] )
+    gc.collect()
+    assert r.shape == [ 3, 2 ] and r._dim_names() == [ "i", "j" ]
+
+    # registering is only sound because an op preserves its axes' extents. A partial slice does
+    # NOT, so it hands over a DERIVED axis: the same axis MEANT, over a count of its own.
+    s = x[ 0:2 ]
+    assert numpy.asarray( s ).tolist() == [ 1.0, 2.0 ]
+    assert s.shape == [ 2 ]                    # the SLICED size, not the axis's
+    assert s._dim_names() == [ "i" ]           # ... still readable as `i`
+    assert int( i.max ) == 3                   # ... and the shared axis is untouched
+    assert RealTensor[ i ]( [ 7.0, 8.0, 9.0 ] ).shape == [ 3 ]
+
+    # a FULL slice changes nothing, so the axis object survives it
+    assert x[ : ]._dim_axes()[ 0 ] is i
+
+    # the usage list does not grow without bound: dead entries are compacted away
+    ( count, ) = i.coeffs
+    for _ in range( 500 ):
+        x + x
+    gc.collect()
+    x + x
+    assert len( count.usages ) < 32, len( count.usages )
+
+
+if test( "a_window_into_a_dimension_remembers_where_it_starts" ):
+    # A slice is not a fresh dimension, and it is not the original one either: `v[ 10:20 ]` is
+    # `num_vertex + 10` -- the SAME dimension, read from another origin. Keeping the offset is what
+    # separates the two questions an axis answers:
+    #   * which dimension is this?      -> selection stays by name, wherever the window starts
+    #   * do our positions correspond?  -> only the same window of the same dimension maps
+    num_vertex = Axis( "num_vertex" )
+    v = RealTensor[ num_vertex ]( [ 0.0, 1.0, 2.0, 3.0, 4.0, 5.0 ] )
+    w = RealTensor[ num_vertex ]( [ 0.0, 10.0, 20.0, 30.0, 40.0, 50.0 ] )
+
+    # the same window of the same dimension: elementwise
+    assert numpy.asarray( v[ 2:4 ] * w[ 2:4 ] ).tolist() == [ 40.0, 90.0 ]
+    assert ( v[ 2:4 ] * w[ 2:4 ] ).shape == [ 2 ]
+
+    # DIFFERENT windows of the same dimension are REFUSED. They index the same thing, so they are
+    # not independent axes to broadcast -- and they start at different places, so they do not line
+    # up either. Silently pairing item 2 with item 0 is the one outcome that must not happen.
+    for bad in ( lambda: v[ 2:4 ] * w[ 0:2 ], lambda: v[ 2:4 ] * w, lambda: v[ 2:4 ] + w[ 1:3 ] ):
+        try:
+            bad()
+            assert False, "two different windows of one dimension must not combine"
+        except ValueError:
+            pass
+
+    # genuinely distinct axes still broadcast, exactly as before
+    assert ( v * RealTensor[ Axis( "j" ) ]( [ 1.0, 2.0 ] ) ).shape == [ 6, 2 ]
+
+    # the offset composes through a second slice, into the ORIGINAL dimension
+    assert "num_vertex+3" in repr( v[ 2:6 ][ 1:3 ] )
+    assert "num_vertex*2" in repr( v[ ::2 ] )
+
+    # ... and a window is still the `num_vertex` dimension for selection, by name or by object
+    assert float( v[ 2:4 ].sum( "num_vertex" ) ) == 5.0
+    assert float( v[ 2:4 ].sum(  num_vertex  ) ) == 5.0
+
+    # an index ARRAY is not an affine window -- its positions bear no fixed relation to the
+    # original's, so it becomes a dimension of its own rather than a mislabelled window
+    assert v[ numpy.array( [ 4, 1 ] ) ]._dim_names() == [ None ]
+
+    assert int( num_vertex.max ) == 6            # the dimension itself is never touched
+
+
+if test( "slicing_keeps_the_meaning_and_drops_the_size" ):
+    # An axis has two lifetimes, and slicing is where they part: `x[ 0:2 ]` is still the `i`
+    # dimension (so two independent slices must still multiply ELEMENTWISE), but it is no longer
+    # 3 long -- and the shared `i` must not be taught otherwise. Hence a DERIVED axis: same
+    # identity, own count.
+    i, j = Axis( "i" ), Axis( "j" )
+    a = RealTensor[ i ]( [ 1.0, 2.0, 3.0 ] )
+    b = RealTensor[ i ]( [ 10.0, 20.0, 30.0 ] )
+
+    sa, sb = a[ 0:2 ], b[ 0:2 ]
+    assert sa.shape == [ 2 ] and sb.shape == [ 2 ]
+    assert sa._dim_axes()[ 0 ] is not sb._dim_axes()[ 0 ]            # different objects...
+    assert sa._dim_axes()[ 0 ].identity is i.identity                # ... in the same dimension
+    assert sa._dim_axes()[ 0 ].coordinate == sb._dim_axes()[ 0 ].coordinate   # ... same window
+
+    # so they map by reference, elementwise -- NOT as an outer product
+    assert numpy.asarray( sa * sb ).tolist() == [ 10.0, 40.0 ]
+    assert ( sa * sb ).shape == [ 2 ]
+
+    # and a sliced matrix still lines its rows up with a sliced vector
+    m = RealTensor[ i, j ]( [ [ 1.0, 2.0 ], [ 3.0, 4.0 ], [ 5.0, 6.0 ] ] )
+    r = m[ 0:2 ] * sa
+    assert r.shape == [ 2, 2 ] and r._dim_names() == [ "i", "j" ]
+
+    # a narrowed dimension is still selectable by name AND by the original axis object
+    assert numpy.asarray( m[ 0:2 ].sum( "i" ) ).tolist() == [ 4.0, 6.0 ]
+    assert numpy.asarray( m[ 0:2 ].sum(  i  ) ).tolist() == [ 4.0, 6.0 ]
+
+    assert int( i.max ) == 3                                        # never poisoned
+
+
+if test( "a_window_keeps_its_bounds_as_expressions" ):
+    # A window is `( lo, hi, step )`, both bounds AFFINE positions in the dimension's own space, and
+    # the extent is derived from them rather than stored. That is what lets an open-ended slice say
+    # "ends where the dimension ends" instead of freezing the size it happened to have.
+    nb_vertex = ShapeVar(); nb_vertex.name = "nb_vertex"
+    num_vertex = Axis( nb_vertex ); num_vertex.name = "num_vertex"
+    v = RealTensor[ num_vertex ]( [ 0.0, 1.0, 2.0, 3.0, 4.0, 5.0 ] )
+
+    def window_of( t ):
+        ax = t._dim_axes()[ 0 ]
+        return repr( ax.lo ), repr( ax.hi ), ax.step
+
+    assert window_of( v[ 2:4 ] ) == ( "2", "4", 1 )                    # both bounds literal
+    assert window_of( v[ 2:  ] ) == ( "2", "nb_vertex", 1 )            # ends where the dimension does
+    assert window_of( v[  :-1] ) == ( "0", "nb_vertex - 1", 1 )        # one short of its end
+    assert window_of( v[ ::2 ] ) == ( "0", "nb_vertex", 2 )
+    assert v[ : ]._dim_axes()[ 0 ] is num_vertex                       # the whole of it IS the axis
+
+    # a stepped window's size is a ceiling division -- a partial last stride still holds an item
+    assert v[ ::2 ].shape == [ 3 ] and v[ ::4 ].shape == [ 2 ]
+    # ... and an empty slice holds nothing, not a negative amount
+    assert v[ 4:2 ].shape == [ 0 ]
+
+
+if test( "a_window_can_teach_its_dimension_the_count" ):
+    # Because the relation to the dimension is KEPT, inference flows back through a window: four
+    # items starting at 2 means the dimension holds six. Nothing had to be told twice.
+    nb_vertex = ShapeVar(); nb_vertex.name = "nb_vertex"
+    num_vertex = Axis( nb_vertex ); num_vertex.name = "num_vertex"
+
+    assert nb_vertex.value is None
+    tail = RealTensor[ num_vertex.windowed( slice( 2, None ) ) ]( [ 9.0, 9.0, 9.0, 9.0 ] )
+    assert int( nb_vertex.value ) == 6                    # extent = nb_vertex - 2 = 4
+
+    # a window with LITERAL bounds says nothing about the dimension, and must not pretend to:
+    # its extent is the constant 2, which constrains nothing.
+    nb_m = ShapeVar(); nb_m.name = "nb_m"
+    num_m = Axis( nb_m ); num_m.name = "num_m"
+    RealTensor[ num_m.windowed( slice( 2, 4 ) ) ]( [ 1.0, 2.0 ] )
+    assert nb_m.value is None
+
+    # neither does a STEPPED one: a sampled view genuinely does not determine what it sampled.
+    nb_k = ShapeVar(); nb_k.name = "nb_k"
+    num_k = Axis( nb_k ); num_k.name = "num_k"
+    stepped = num_k.windowed( slice( None, None, 2 ) )
+    assert stepped.extent is None                          # not an affine expression at all
+    assert stepped.solve_single( nb_k, 3 ) is None
+
+
+if test( "a_dimension_is_an_identity_with_no_size" ):
+    # `AxisId` is WHICH dimension, and nothing else. Sizeless on purpose: a size belongs to a
+    # WINDOW on a dimension, and a dimension has no privileged window -- `num_vertex` and
+    # `num_vertex+2` are two views of one thing, neither of them "the" one.
+    from loom.tensor import AxisId
+
+    num_vertex = Axis( "num_vertex" )
+    assert isinstance( num_vertex.identity, AxisId )
+    assert not hasattr( num_vertex.identity, "lo" )          # no bounds, no extent, no count
+
+    # every window into it shares that identity...
+    v = RealTensor[ num_vertex ]( [ 0.0, 1.0, 2.0, 3.0 ] )
+    assert v[ 1:3 ]._dim_axes()[ 0 ].identity is num_vertex.identity
+    assert v[ 1:3 ][ 1: ]._dim_axes()[ 0 ].identity is num_vertex.identity
+
+    # ... and the name lives there too, so a window is not a second thing to name
+    assert v[ 1:3 ]._dim_names() == [ "num_vertex" ]
+    num_vertex.name = "renamed"
+    assert v[ 1:3 ]._dim_names() == [ "renamed" ]
+
+    # identity is by REFERENCE, never by name: two dimensions both called `i` are two dimensions
+    assert Axis( "i" ).identity is not Axis( "i" ).identity

@@ -27,7 +27,7 @@ class Attribute:
       `resolve_attribute`) -- an `@aggregate` instance, or `None` outside of one;
     * the POSITIONALS are the concrete type's own business (a value for `Tensor`,
       an affine expression for `Axis`, ...), which is what lets each type be built
-      on its own: `Tensor( 17 )`, `Axis( nb_dims )`, `Tensor[ x, y ]( [ ... ] )`.
+      on its own: `RealTensor( 17 )`, `Axis( nb_dims )`, `RealTensor[ x, y ]( [ ... ] )`.
 
     `name` is the declared field name, stamped by `get_attribute`. An `Attribute`
     that outlives its aggregate keeps it (a `Tensor` built on a borrowed `Axis`

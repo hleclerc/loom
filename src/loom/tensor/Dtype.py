@@ -1,17 +1,43 @@
+import numpy
+
+# The KINDS a `Dtype` can have. Semantic, per-field, machine-independent -- unlike the size.
+REAL = "real"       # floating point
+SINT = "sint"       # signed integer
+UINT = "uint"       # unsigned integer
+BOOL = "bool"       # boolean (what a comparison produces)
+
+
 class Dtype:
-    """
+    """The ELEMENT contract of a tensor: a KIND (real / signed int / unsigned int / bool)
+    and a SIZE in bits.
+
+    The two are not the same kind of decision, which is why they live in one object but are
+    read separately:
+
+    * the KIND is semantic and per-field -- an index tensor is integer whatever the machine.
+    * the SIZE is a global policy (`driver.ftype` / `driver.itype`, `SDOT_FTYPE` / `SDOT_ITYPE`).
+      `None` means "whatever the driver runs with", resolved LATE (see `driver_version`), so a
+      declaration written at import time does not freeze a size the user has not chosen yet.
+
+    A `Dtype` is a DECLARATION. `__eq__` compares declarations (an unresolved size is not 64);
+    `same_as` compares what they DENOTE, sizes resolved through the driver -- which is what a
+    check against a real buffer needs.
     """
 
-    def __init__( self, floating_point: bool = True, size: int | None = None, signed = True, driver_version = None ) -> None:
+    def __init__( self, kind: str = REAL, size: int | None = None, driver_version = None ) -> None:
+        assert kind in ( REAL, SINT, UINT, BOOL ), f"unknown dtype kind: { kind }"
+        # a bool has no size to choose: it is what the framework spells `bool`.
+        assert not ( kind == BOOL and size is not None ), "a boolean dtype has no size"
         self._driver_version = driver_version # updated during driver instantiation is some cases
-        self.floating_point = floating_point
-        self.signed = signed
+        self.kind = kind
         self.size = size
 
     @staticmethod
     def factory( value ) -> 'Dtype':
         if isinstance( value, Dtype ):
-            return Dtype( value.floating_point, value.size, value.signed, value.driver_version )
+            # `_driver_version`, NOT the property: resolving it here would instantiate the driver
+            # merely to COPY a declaration (a `Tensor` field is built long before any kernel runs).
+            return Dtype( value.kind, value.size, value._driver_version )
 
         if value is float or value is None:
             return Dtype.fp()
@@ -19,8 +45,20 @@ class Dtype:
         if value is int:
             return Dtype.si()
 
+        if value is bool:
+            return Dtype.bo()
+
+        # -------------- numpy / framework dtype objects --------------
+        # a `numpy.dtype`, or anything numpy can read as one (`jnp.float32`, an array's `.dtype`).
+        # Tried BEFORE the string parsing below, which would otherwise mis-read `str( dtype )`.
+        if isinstance( value, numpy.dtype ) or ( isinstance( value, type ) and issubclass( value, numpy.generic ) ):
+            return Dtype.from_numpy( value )
+
         # -------------- str --------------
         sv = str( value ).lower()
+
+        if sv == "bool":
+            return Dtype.bo()
 
         if sv == "int":
             return Dtype.si()
@@ -43,49 +81,73 @@ class Dtype:
         if sv.startswith( "unsigned" ):
             return Dtype.pi( size = int( sv[ 8: ] ) )
 
-        # -------------- numpy --------------
-        import numpy
-        if value is numpy.float16:
-            return Dtype.fp( size = 16 )
-        if value is numpy.float32:
-            return Dtype.fp( size = 32 )
-        if value is numpy.float64:
-            return Dtype.fp( size = 64 )
-
-        if value is numpy.uint8:
-            return Dtype.pi( size = 8 )
-        if value is numpy.uint16:
-            return Dtype.pi( size = 16 )
-        if value is numpy.uint32:
-            return Dtype.pi( size = 32 )
-        if value is numpy.uint64:
-            return Dtype.pi( size = 64 )
-
-        if value is numpy.int8:
-            return Dtype.si( size = 8 )
-        if value is numpy.int16:
-            return Dtype.si( size = 16 )
-        if value is numpy.int32:
-            return Dtype.si( size = 32 )
-        if value is numpy.int64:
-            return Dtype.si( size = 64 )
-
         raise ValueError( f"unsupported type name: { str( value ) }" )
+
+    @staticmethod
+    def from_numpy( value ) -> 'Dtype':
+        """The `Dtype` a numpy (or numpy-readable) dtype denotes -- how a real BUFFER answers what
+        it actually is. Sizes are CONCRETE here: this describes storage, not a declaration."""
+        dt = numpy.dtype( value )
+        if dt.kind == "b":
+            return Dtype.bo()
+        if dt.kind == "f":
+            return Dtype.fp( size = 8 * dt.itemsize )
+        if dt.kind == "i":
+            return Dtype.si( size = 8 * dt.itemsize )
+        if dt.kind == "u":
+            return Dtype.pi( size = 8 * dt.itemsize )
+        raise ValueError( f"unsupported numpy dtype: { dt }" )
+
+    @staticmethod
+    def of( raw ) -> 'Dtype':
+        """The dtype a backend buffer ACTUALLY has (via the driver, so Jax and Torch answer the
+        same way). This is the truthful direction: a buffer knows its type, a declaration only
+        claims one."""
+        from ..drivers.driver import driver
+        return driver.dtype_of( raw )
 
     @staticmethod
     def fp( size: int | None = None ):
         """ make a floating point type """
-        return Dtype( floating_point = True, size = size )
+        return Dtype( REAL, size )
 
     @staticmethod
     def si( size: int | None = None ):
         """ make a signed integer type """
-        return Dtype( floating_point = False, size = size, signed = True )
+        return Dtype( SINT, size )
 
     @staticmethod
     def pi( size: int | None = None ):
-        """ make a signed integer type """
-        return Dtype( floating_point = False, size = size, signed = False )
+        """ make an unsigned integer type """
+        return Dtype( UINT, size )
+
+    @staticmethod
+    def bo():
+        """ make a boolean type (what a comparison produces) """
+        return Dtype( BOOL )
+
+    # ---- kind predicates: what the rest of the code actually asks ----
+    @property
+    def floating_point( self ) -> bool:
+        return self.kind == REAL
+
+    @property
+    def integer( self ) -> bool:
+        return self.kind in ( SINT, UINT )
+
+    @property
+    def boolean( self ) -> bool:
+        return self.kind == BOOL
+
+    @property
+    def signed( self ) -> bool:
+        return self.kind in ( REAL, SINT )
+
+    @property
+    def differentiable( self ) -> bool:
+        """Whether a gradient can flow through a value of this type: only a real one can. This is
+        the predicate the FFI uses to decide what is a primal (see `JaxFfi`)."""
+        return self.kind == REAL
 
     @property
     def name( self ):
@@ -97,46 +159,39 @@ class Dtype:
 
     @property
     def cpp_name( self ):
-        if self.floating_point:
-            if self.size is None:
-                return "TF"
-            return f"FP{ self.size }"
-
+        """The C++ spelling (see `support/common_types.h`): `FP64`, `SI32`, `PI32`, `bool` -- or
+        the driver-resolved aliases `TF` / `TI` when the size is left to the driver."""
+        if self.kind == BOOL:
+            return "bool"
         if self.size is None:
-            return "TI"
-        return f"SI{ self.size }"
+            return { REAL: "TF", SINT: "TI", UINT: "TU" }[ self.kind ]
+        return { REAL: "FP", SINT: "SI", UINT: "PI" }[ self.kind ] + str( self.size )
 
     @property
     def driver_version( self ):
         if self._driver_version:
             return self._driver_version
         from ..drivers.driver import driver
-        return driver.driver_dtype_version( self.floating_point, self.signed, self.size )
+        return driver.driver_dtype_version( self.kind, self.size )
+
+    def resolved( self ) -> 'Dtype':
+        """This dtype with its size FILLED IN from the driver -- what it will really be on the
+        machine. A declaration left open (`size is None`) only becomes concrete here."""
+        return Dtype.from_numpy( numpy.dtype( self.driver_version ) )
+
+    def same_as( self, other ) -> bool:
+        """Whether both denote the same MACHINE type, sizes resolved through the driver -- so a
+        declared `fp` (size left open) matches a concrete FP64 when that is what the driver runs.
+        This is what a check against a real buffer must use, not `__eq__`."""
+        return numpy.dtype( self.driver_version ) == numpy.dtype( Dtype.factory( other ).driver_version )
 
     def __eq__( self, value, / ) -> bool:
         if not isinstance( value, Dtype ):
             value = Dtype.factory( value )
-        assert isinstance( value, Dtype )
-        return self.floating_point == value.floating_point and self.size == value.size
+        return self.kind == value.kind and self.size == value.size
 
-    def __neq__( self, value, / ) -> bool:
-        return not self.__eq__( value )
+    def __hash__( self ) -> int:
+        return hash( ( self.kind, self.size ) )
 
-    def jax_ffi_tensor_type( self ) -> str:
-        from .driver import driver
-        if self.floating_point:
-            return f"xla::ffi::F{ self.size or driver.ftype.size }"
-        if self.signed:
-            return f"xla::ffi::S{ self.size or driver.itype.size }"
-        return f"xla::ffi::U{ self.size or driver.itype.size }"
-
-    def msl_name( self ) -> str:
-        """Metal Shading Language scalar type for this dtype (size resolved via the driver)."""
-        from .driver import driver
-        size = self.size or ( driver.ftype.size if self.floating_point else driver.itype.size )
-        if self.floating_point:
-            # MSL has no `double`; the Metal binding runs in FP32 anyway.
-            return { 16: "half", 32: "float", 64: "float" }[ size ]
-        if self.signed:
-            return { 8: "char", 16: "short", 32: "int", 64: "long" }[ size ]
-        return { 8: "uchar", 16: "ushort", 32: "uint", 64: "ulong" }[ size ]
+    def __repr__( self ) -> str:
+        return f"Dtype( { self.cpp_name } )"

@@ -2,9 +2,9 @@
 
 Usage in an Aggregate:
     class MyBox(Aggregate):
-        width : Tensor
-        height : Tensor
-        area : ComputedAttribute[ Tensor, ("width", "height") ]
+        width : RealTensor
+        height : RealTensor
+        area : ComputedAttribute[ RealTensor, ("width", "height") ]
 
 The first argument to ComputedAttribute is the actual type to instantiate (Tensor, ShapeVar, etc.);
 the remaining arguments are the dependency names. When any dependency is modified,
@@ -25,7 +25,7 @@ class ComputedAttribute( Attribute ):
     @property on the class).
 
     Example:
-        area : ComputedAttribute[ Tensor, ("width", "height") ]
+        area : ComputedAttribute[ RealTensor, ("width", "height") ]
 
     The Aggregate creates a ComputedAttribute in __dict__, tracks that it depends
     on width and height, and invalidates it when either changes. The actual compute

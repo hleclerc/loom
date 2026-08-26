@@ -2,7 +2,7 @@
 
 from loom.util import Aggregate
 from loom.util import ComputedAttribute
-from loom.tensor import Tensor
+from loom.tensor import RealTensor
 
 
 class SimpleBox( Aggregate ):
@@ -11,9 +11,9 @@ class SimpleBox( Aggregate ):
     The area field depends on width and height; when either changes, area is invalidated.
     """
 
-    width  : Tensor
-    height : Tensor
-    area   : ComputedAttribute[ Tensor, ("width", "height") ]
+    width  : RealTensor
+    height : RealTensor
+    area   : ComputedAttribute[ RealTensor, ("width", "height") ]
 
 
 def test_computed_attribute_invalidation():

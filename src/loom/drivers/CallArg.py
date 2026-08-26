@@ -16,6 +16,13 @@ class CallArg:
         self.io_category = io_category
         self.name = name
 
+    @property
+    def is_differentiable( self ) -> bool:
+        """Whether a gradient can flow through this argument -- what tells `JaxFfi._call_with_vjp`
+        a trace CONSTANT (a count, an index buffer) from a primal to seek a gradient for. Answered
+        by the element type, so nothing here enumerates which kinds those are."""
+        return self.dtype.differentiable
+
     def _clone( self, mapping ):
         """A copy of this node, for a lowering of the SAME objects under different conditions (a
         `vmap` derives one that carries a batch axis). The Python objects are shared, not copied:

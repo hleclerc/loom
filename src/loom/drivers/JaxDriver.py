@@ -56,8 +56,8 @@ class JaxDriver:
         self.itype  = itype
 
         # fill device_type for ftype and itype
-        itype._driver_version = self.driver_dtype_version( itype.floating_point, itype.signed, itype.size )
-        ftype._driver_version = self.driver_dtype_version( ftype.floating_point, ftype.signed, ftype.size )
+        itype._driver_version = self.driver_dtype_version( itype.kind, itype.size )
+        ftype._driver_version = self.driver_dtype_version( ftype.kind, ftype.size )
         assert itype.floating_point == False
         assert ftype.floating_point == True
         if itype.size == 64:
@@ -66,41 +66,46 @@ class JaxDriver:
         #
         device.driver_version = device.driver_version_for_jax( jax.devices )
 
-    def driver_dtype_version( self, floating_point, signed, size ):
-        if floating_point:
-            if size == 16:
-                return jnp.float16
-            if size == 32:
-                return jnp.float32
-            if size == 64:
-                return jnp.float64
+    def driver_dtype_version( self, kind, size ):
+        """The jax dtype a `( kind, size )` denotes. `size is None` means "the driver's own",
+        which is exactly what `TF` / `TI` are -- resolved here, once the driver exists."""
+        from ..tensor.Dtype import REAL, SINT, UINT, BOOL
+
+        if kind == BOOL:
+            return jnp.bool_
+
+        if kind == REAL:
             if size is None:
                 return self.ftype._driver_version
-            raise ValueError( f"unsupported ftype size: { size }" )
+            try:
+                return { 16: jnp.float16, 32: jnp.float32, 64: jnp.float64 }[ size ]
+            except KeyError:
+                raise ValueError( f"unsupported ftype size: { size }" )
 
-        if signed:
-            if size == 8:
-                return jnp.int8
-            if size == 16:
-                return jnp.int16
-            if size == 32:
-                return jnp.int32
-            if size == 64:
-                return jnp.int64
+        if kind == SINT:
             if size is None:
                 return self.itype._driver_version
-            raise ValueError( f"unsupported itype size: { size }" )
+            try:
+                return { 8: jnp.int8, 16: jnp.int16, 32: jnp.int32, 64: jnp.int64 }[ size ]
+            except KeyError:
+                raise ValueError( f"unsupported itype size: { size }" )
 
-        if size == 8:
-            return jnp.uint8
-        if size == 16:
-            return jnp.uint16
-        if size == 32:
-            return jnp.uint32
-        if size == 64:
-            return jnp.uint64
+        assert kind == UINT
+        try:
+            return { 8: jnp.uint8, 16: jnp.uint16, 32: jnp.uint32, 64: jnp.uint64 }[ size ]
+        except KeyError:
+            raise ValueError( f"unsupported unsigned itype size: { size }" )
 
-        raise ValueError( f"unsupported itype size: { size }" )
+    def dtype_of( self, x ):
+        """The `Dtype` a jax buffer ACTUALLY has -- what a declaration is checked against."""
+        from ..tensor.Dtype import Dtype
+        aval = getattr( x, "aval", None )          # a SymbolicZero carries its type in its aval
+        return Dtype.from_numpy( ( aval if aval is not None else x ).dtype )
+
+    def astype( self, x, dtype ):
+        """`x` re-typed as `dtype` (a `Dtype`). Tracer-safe, and a no-op when it already is."""
+        from ..tensor.Dtype import Dtype
+        return jnp.asarray( x, dtype = Dtype.factory( dtype ).driver_version )
 
     @staticmethod
     def default_device_for( ftype ):

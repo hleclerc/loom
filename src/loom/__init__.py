@@ -16,7 +16,11 @@ def __getattr__(name: str):
         "CtShapeVar":      (".tensor.CtShapeVar",     "CtShapeVar"),
         "FfiCode":         (".compilation.FfiCode",   "FfiCode"),
         "ShapeVar":        (".tensor.ShapeVar",       "ShapeVar"),
+        "ShapeArray":      (".tensor.ShapeArray",     "ShapeArray"),
         "Tensor":          (".tensor.Tensor",         "Tensor"),
+        "RealTensor":      (".tensor.RealTensor",     "RealTensor"),
+        "IntTensor":       (".tensor.IntTensor",      "IntTensor"),
+        "BoolTensor":      (".tensor.BoolTensor",     "BoolTensor"),
         "driver":          (".drivers.driver",        "driver"),
         "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
     }

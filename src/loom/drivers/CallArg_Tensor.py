@@ -23,6 +23,14 @@ class CallArg_Tensor( CallArg ):
 
         self.inst = inst
         self.dtype = inst.dtype
+        # LAST line of defense on the dtype invariant (`Tensor._as_declared` is the first): below,
+        # `_cpp_scalar` spells this dtype as the element type of the buffer we are about to bind, so
+        # a buffer that disagrees is REINTERPRETED by the kernel -- silent garbage, not a type error.
+        if inst.raw is not None and not inst.is_fill:
+            from ..tensor.Dtype import Dtype
+            have = Dtype.of( inst.raw )
+            assert self.dtype.same_as( have ), \
+                f"tensor '{ name }' is declared { self.dtype.cpp_name } but its buffer holds { have.cpp_name }"
         # a symbolic-zero cotangent: it IS there (reads as 0), but no storage backs it -- so it
         # is unbound like a `NoneTensor`, only it lowers to a `ZeroTensor` (see `cpp_type`).
         self.symbolic_zero = getattr( inst, "is_symbolic_zero", False )
@@ -90,6 +98,12 @@ class CallArg_Tensor( CallArg ):
     # answers them either way, and the analysis folds those in for their `DEFINE_AXIS`.
     def is_ffi_buffer( self ):
         return self.io_category.is_bound
+
+    @property
+    def is_differentiable( self ) -> bool:
+        # deferred to the TENSOR: differentiability is a property of what the tensor is made of
+        # (`IntTensor.is_differentiable`), not something re-derived from its dtype at each site.
+        return self.inst.is_differentiable
 
     # -- the axes our type spells (see `CallArg.cpp_axis_names`) --
     def cpp_axis_names( self ):

@@ -22,6 +22,9 @@ class ShapeVar( Attribute ):
     they then reference the same object, so the value is solved from the union of
     their tensors.
 
+    `value` reads the count back on the HOST (a `ShapeArray`), because sizing is what a count
+    is for; `as_tensor()` is the way to ask for it as a device value instead.
+
     The value a `ShapeVar` holds is a COUNT: how many items are used. A kernel
     reads it and/or writes it, so after a call it lives in a DEVICE buffer -- under
     `jit`, Python does not know it, and it can therefore never size anything.
@@ -101,8 +104,9 @@ class ShapeVar( Attribute ):
         being the freshest truth (and it is then a DEVICE value, never size a buffer with it); then
         a user prescription; then what the LOGICAL sizes of a using tensor solve to (`_pull`).
 
-        Users read `value` (a `Tensor`); `raw` is the escape hatch to the backend array (what the
-        shape math and the FFI read, without wrapping) -- `sv.value.raw` gives the same thing."""
+        Users read `value` (a host `ShapeArray`); `raw` is the escape hatch to the backend array
+        (what the shape math and the FFI read, without wrapping) -- and it is where a count that
+        only lives on the device is still reachable, `as_tensor()` being its tidy form."""
         if self._count is not None:
             return self._count
 
@@ -113,19 +117,38 @@ class ShapeVar( Attribute ):
 
     @property
     def value( self ):
-        """The count as a `Tensor` -- rank 0 for a plain scalar count, rank > 0 for a ragged one
-        (its `dep_axes` name the dimensions). `None` while unresolved. Being a `Tensor`, it converts
-        to `int` when rank 0, reduces (`.max`), iterates, and hands its backend array back as `.raw`,
-        like any other (see `Tensor`)."""
+        """The count on the HOST, as a `ShapeArray` -- rank 0 for a plain scalar count, rank > 0
+        for a ragged one (its `dep_axes` name the dimensions). `None` while unresolved.
+
+        Host, not device, and that is the point: a count is what SIZES things (an allocation, a
+        `range`, an XLA shape), and only a value Python actually holds can do that. Reading one
+        that lives on the device is refused HERE, with a message saying so, rather than handed
+        back as a tracer that fails much later in whatever tried to size something with it.
+
+        When the device value IS what you want -- to compute with it in a kernel or in backend
+        algebra -- ask for it: `as_tensor()`."""
         raw = self.raw
         if raw is None:
             return None
-        from .Tensor import Tensor
-        return Tensor.wrap( raw, names = [ ax.name for ax in self.dep_axes ], dtype = int )
+        from .ShapeArray import ShapeArray
+        return ShapeArray( raw, names = [ ax.name for ax in self.dep_axes ] )
 
     @value.setter
     def value( self, value ):
         self.set( value )
+
+    def as_tensor( self ):
+        """The count as a DEVICE value (an `IntTensor`), for the cases that genuinely compute with
+        it on the backend rather than size something with it. `None` while unresolved.
+
+        No dtype is claimed: a count buffer knows what it is, and it is NOT uniformly the driver's
+        itype -- a kernel-written one is `int32` by design (see `CallArg_ShapeVar`), a prescribed
+        one is numpy's int. `wrap` reads it off the buffer instead of labelling it."""
+        raw = self.raw
+        if raw is None:
+            return None
+        from .Tensor import Tensor
+        return Tensor.wrap( raw, names = [ ax.name for ax in self.dep_axes ] )
 
     @property
     def max( self ) -> int:

@@ -23,26 +23,59 @@ class TorchDriver:
         self.ftype  = ftype
         self.itype  = itype
 
-        # fill device_type for ftype
+        # resolve the driver spelling of both policy types. `_driver_version` (the FIELD), not
+        # `driver_version` (a read-only property whose fallback asks the driver -- which is us,
+        # and which is not built yet).
         assert ftype.floating_point == True
-        match ftype.size:
-            case 32:
-                ftype.driver_version = torch.float32
-            case 64:
-                # jax.config.update( "jax_enable_x64", True )
-                ftype.driver_version = torch.float64
-            case _:
-                raise ValueError( f"unsupported ftype size: { ftype.size }" )
-
-        # fill device_type for itype
         assert itype.floating_point == False
-        match itype.size:
-            case 32:
-                itype.driver_version = torch.int32
-            case 64:
-                itype.driver_version = torch.int64
-            case _:
-                raise ValueError( f"unsupported itype size: { itype.size }" )
+        ftype._driver_version = self.driver_dtype_version( ftype.kind, ftype.size )
+        itype._driver_version = self.driver_dtype_version( itype.kind, itype.size )
+
+    def driver_dtype_version( self, kind, size ):
+        """The torch dtype a `( kind, size )` denotes -- the Torch twin of `JaxDriver
+        .driver_dtype_version`. `size is None` means "the driver's own" (`TF` / `TI`)."""
+        from ..tensor.Dtype import REAL, SINT, UINT, BOOL
+
+        if kind == BOOL:
+            return torch.bool
+
+        if kind == REAL:
+            if size is None:
+                return self.ftype._driver_version
+            try:
+                return { 16: torch.float16, 32: torch.float32, 64: torch.float64 }[ size ]
+            except KeyError:
+                raise ValueError( f"unsupported ftype size: { size }" )
+
+        if kind == SINT:
+            if size is None:
+                return self.itype._driver_version
+            try:
+                return { 8: torch.int8, 16: torch.int16, 32: torch.int32, 64: torch.int64 }[ size ]
+            except KeyError:
+                raise ValueError( f"unsupported itype size: { size }" )
+
+        assert kind == UINT
+        try:
+            return { 8: torch.uint8, 16: torch.uint16, 32: torch.uint32, 64: torch.uint64 }[ size ]
+        except KeyError:
+            raise ValueError( f"unsupported unsigned itype size: { size }" )
+
+    def dtype_of( self, x ):
+        """The `Dtype` a torch buffer ACTUALLY has -- what a declaration is checked against.
+        Read from torch's own flags, so no host sync and no numpy round-trip."""
+        from ..tensor.Dtype import Dtype
+        dt = x.dtype
+        if dt == torch.bool:
+            return Dtype.bo()
+        if dt.is_floating_point:
+            return Dtype.fp( size = 8 * dt.itemsize )
+        return ( Dtype.si if dt.is_signed else Dtype.pi )( size = 8 * dt.itemsize )
+
+    def astype( self, x, dtype ):
+        """`x` re-typed as `dtype` (a `Dtype`); a no-op when it already is."""
+        from ..tensor.Dtype import Dtype
+        return x.to( Dtype.factory( dtype ).driver_version )
 
 
     @staticmethod

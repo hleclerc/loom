@@ -65,7 +65,7 @@ class Aggregate:
     """
 
     # convention: every aggregate carries `batch_axes`, the (possibly empty) list of axes it is
-    # batched over -- read uniformly by the methods (an auxiliary output is `Tensor[ *batch_axes ]`)
+    # batched over -- read uniformly by the methods (an auxiliary output is `RealTensor[ *batch_axes ]`)
     # and by `CallArgsAnalysis` (which folds them into `global_batch_indices`). A plain aggregate has
     # none; `apply_batch_axes` sets them. Left UNANNOTATED so it is not a field (no descriptor, and
     # `annotations()` -- hence the C++ lowering -- never sees it). The class-level `[]` is a mere
@@ -117,7 +117,7 @@ class Aggregate:
         # injections: share the passed `Attribute` (same object) rather than assign it. Stored
         # straight into `__dict__` (a raw write, past the set-only descriptor which would else
         # `.set()` it) -- the same slot every read then hands back. A `Tensor` is excluded: its
-        # axes are OUR schema's (`Tensor[ "num_vertex", "dim" ]`, resolved in OUR scope), never
+        # axes are OUR schema's (`RealTensor[ "num_vertex", "dim" ]`, resolved in OUR scope), never
         # the ones the caller's tensor happened to carry (e.g. from another aggregate's fields, or
         # an anonymous axis from `append_axis`) -- so it always goes through the schema-built path
         # below and adopts the value via `.set()` (buffer + `_shape` only) instead of by identity.
@@ -235,7 +235,7 @@ class Aggregate:
         return attr
 
     # the scope protocol (see `resolve_attribute`): what turns the NAME an attribute reads in a
-    # declaration (`Tensor[ "num_vertex" ]`) into the very object this instance holds.
+    # declaration (`RealTensor[ "num_vertex" ]`) into the very object this instance holds.
     def get_attribute( self, name ):
         return get_attribute( name, self )
 
@@ -315,12 +315,14 @@ def _carries_batch_dims( value, batch_axes, batched_attr ):
 
 def _batched_schema( type_attr, axes ):
     """`type_attr` (a Tensor field schema) with `axes` prepended to its declared axes. A bare
-    `Tensor` becomes `Tensor[ *axes ]`; a `Tensor[ "num_vertex", "dim" ]` becomes
-    `Tensor[ *axes, "num_vertex", "dim" ]`, its dtype/device kwargs preserved."""
-    from ..tensor.Tensor import Tensor
+    `RealTensor` becomes `RealTensor[ *axes ]`; a `RealTensor[ "num_vertex", "dim" ]` becomes
+    `RealTensor[ *axes, "num_vertex", "dim" ]`, its dtype/device kwargs preserved.
+
+    The declared CLASS rides along: batching adds leading axes, it does not change what the
+    tensor is made of -- prepending an axis to an `IntTensor` field must not hand back a real one."""
     if isinstance( type_attr, Parametrized ):
-        return Parametrized( Tensor, *axes, *type_attr.args, dict( type_attr.kwargs ) )
-    return Parametrized( Tensor, *axes )
+        return Parametrized( type_attr.cls, *axes, *type_attr.args, dict( type_attr.kwargs ) )
+    return Parametrized( type_attr, *axes )
 
 
 def get_attribute( name, parent_inst, type_attr=None ):

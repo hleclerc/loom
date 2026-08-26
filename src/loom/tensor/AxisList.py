@@ -11,7 +11,7 @@ class AxisList( AbstractAxis ):
     (e.g. `dim`), `expr` the affine extent of each member (e.g. `extent`, with
     `extent : ShapeVar[ "dim" ]` holding one count per loop index).
 
-    Used in a `Tensor` declaration with a trailing `...` (`Tensor[ "img_pos..." ]`)
+    Used in a `Tensor` declaration with a trailing `...` (`RealTensor[ "img_pos..." ]`)
     it expands into `nb_dims` separate static axes, giving the tensor a DYNAMIC
     rank. The count `nb_dims` is unknown at declaration time -- hence the split
     from `Axis` (a single, ragged-or-not, dimension needs no unrolling)."""

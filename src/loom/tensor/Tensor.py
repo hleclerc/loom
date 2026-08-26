@@ -1,18 +1,17 @@
-from typing_extensions import overload
-from numpy.typing import ArrayLike
 from typing import TYPE_CHECKING
+
 import numpy
+from numpy.typing import ArrayLike
 
-from ..util.Attribute import Attribute, resolve_attribute
-from ..drivers.driver import driver
 from ..devices.Device import Device
-
-from .ReferenceShape import ReferenceShape
+from ..drivers.driver import driver
+from ..util.Attribute import Attribute, resolve_attribute
 from .AbstractAxis import AbstractAxis
-from .AxisList import AxisList
-from .ShapeVar import ShapeVar
-from .Dtype import Dtype
 from .Axis import Axis
+from .AxisList import AxisList
+from .Dtype import Dtype
+from .ReferenceShape import ReferenceShape
+from .ShapeVar import ShapeVar
 
 
 class Tensor( Attribute ):
@@ -20,9 +19,18 @@ class Tensor( Attribute ):
     Tensor declaration: a thin wrapper around the backend tensor of the chosen
     library (Jax, Torch, ...).
 
-        t = Tensor( 17 )                        # rank 0, no declared axis
-        t = Tensor[ { "dtype": int } ]( [ 1, 2 ] )
-        t = Tensor[ x, y ]( [ [ 1, 2 ] ] )      # x, y being `Axis` objects
+        t = RealTensor( 17 )                    # rank 0, no declared axis
+        t = IntTensor( [ 1, 2 ] )
+        t = RealTensor[ x, y ]( [ [ 1, 2 ] ] )  # x, y being `Axis` objects
+
+    `Tensor` itself is the ABSTRACT base: what it declares (the axes, the storage, the ops) is
+    common to every element type. What the element type decides -- whether a gradient flows
+    through it, which C++ scalar it lowers to, what an op promotes to -- belongs to the concrete
+    subclasses `RealTensor` / `IntTensor` / `BoolTensor`, one per `Dtype` kind.
+
+    Building a `Tensor` directly still works and yields the class its declared dtype calls for
+    (`Tensor[ { "dtype": int } ]` is an `IntTensor`), so the two spellings coexist during the
+    migration -- but `Tensor` is meant to hold no instances of its own.
 
     The logical contract is the axis list; axis extents may depend on other axes
     (RAGGED axes), in which case the varying sizes live in the `ShapeVar`s of
@@ -46,10 +54,50 @@ class Tensor( Attribute ):
     if TYPE_CHECKING:
         def __set__( self, obj, value: ArrayLike | None ) -> None: ...
 
+    # ---- the ELEMENT contract, carried by the CLASS -------------------------------------------
+    # `dtype_kinds` is what a subclass accepts (`None` on the abstract base); `is_differentiable`
+    # is whether a gradient can flow through it -- the predicate the FFI asks to know what is a
+    # primal. Both are answered by the type, not tested for on the dtype at each site.
+    dtype_kinds: tuple | None = None
+    is_differentiable = True
+
+    # kind -> concrete class, filled by `__init_subclass__`. A dtype is all it takes to know which
+    # tensor class a buffer calls for, so nothing anywhere has to enumerate them.
+    _by_kind: dict = {}
+
+    def __init_subclass__( cls, **kwargs ):
+        super().__init_subclass__( **kwargs )
+        for kind in cls.dtype_kinds or ():
+            Tensor._by_kind[ kind ] = cls
+
+    @staticmethod
+    def class_for( dtype ) -> type:
+        """The concrete tensor class a `Dtype` calls for. Used wherever a tensor is built around a
+        buffer that already exists (`wrap`, an op result): the buffer's type picks the class, so a
+        comparison on a `RealTensor` comes back a `BoolTensor` without anyone saying so."""
+        kind = Dtype.factory( dtype ).kind
+        if kind not in Tensor._by_kind:
+            from . import BoolTensor, IntTensor, RealTensor   # registers them (see __init_subclass__)
+        return Tensor._by_kind[ kind ]
+
+    @classmethod
+    def default_dtype( cls, size = None ) -> Dtype:
+        """The dtype this class means when a declaration names none. The abstract base has no
+        element type of its own, so it defers to the real one -- the historical default."""
+        from .RealTensor import RealTensor
+        return RealTensor.default_dtype( size )
+
+    def __new__( cls, *args, **kwargs ):
+        # `Tensor( ... )` builds the concrete class its declared dtype calls for -- so the old
+        # spelling keeps working while declarations migrate to `RealTensor` / `IntTensor`. A
+        # concrete class builds itself (this is not a dispatcher its subclasses go through).
+        if cls is not Tensor:
+            return object.__new__( cls )
+        return object.__new__( Tensor.class_for( _declared_dtype( cls, kwargs.get( "template_kwargs", {} ) ) ) )
 
     def __init__( self, value = None, /, *, template_args = (), template_kwargs = {}, scope = None ) -> None:
         self.device = Device.factory( template_kwargs.get( "device", None ) )
-        self.dtype = Dtype.factory( template_kwargs.get( "dtype", None ) )
+        self.dtype = _declared_dtype( type( self ), template_kwargs )
         self.axes = self._read_axes( template_args, scope )
 
         self._shape = None
@@ -78,7 +126,8 @@ class Tensor( Attribute ):
         builds to carry a gradient (same logical shape as the value it is the gradient of). What
         goes INTO it then decides its kind: a real cotangent buffer (`set_raw`) makes it a
         `TensorView`, a symbolic-zero cotangent a `ZeroTensor`, nothing at all a `NoneTensor`."""
-        return cls( template_args = other.axes, template_kwargs = { "dtype": other.dtype, "device": other.device } )
+        return Tensor.class_for( other.dtype )( template_args = other.axes,
+                                                 template_kwargs = { "dtype": other.dtype, "device": other.device } )
 
     @classmethod
     def full( cls, value, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
@@ -141,7 +190,10 @@ class Tensor( Attribute ):
 
     def set( self, value ):
         if isinstance( value, Tensor ):
-            self._raw = value._raw           # carries the kind along (buffer / symbolic zero / None / FILL)
+            # carries the kind along (buffer / symbolic zero / None / FILL), RETYPED to what we
+            # declare: our dtype is a contract the FFI reads (`CallArg_Tensor._cpp_scalar`), so a
+            # buffer that disagrees with it would be reinterpreted, not converted, in C++.
+            self._raw = self._as_declared( value._raw )
             # adopt the source's reference shape: it describes the SAME buffer we just took, so it is
             # our logical shape too, whatever our own axes are (a `ShapeVar` reads it via the axis
             # layout, see `register_in`). `None` when the source has none (a kernel output whose
@@ -157,6 +209,7 @@ class Tensor( Attribute ):
         # buffer is then a plain dense array, or -- when the value is jagged -- an ASSEMBLED padded
         # one whose per-dim capacity is (for now) the max size.
         self._shape = ReferenceShape.from_value( value )
+        self._check_convertible( _natural_dtype( value ) )
         if self._shape.is_ragged():
             self._raw = _assemble( value, self._shape.capacities(), self.dtype, self.device )
         else:
@@ -169,7 +222,38 @@ class Tensor( Attribute ):
 
         `raw` may also be a symbolic-zero cotangent handed back by the framework: it lands here the
         same way, and `is_symbolic_zero` recognizes it -- no special case."""
-        self._raw = raw
+        self._raw = self._as_declared( raw )
+
+    # ---- the dtype INVARIANT: what we declare is what our buffer holds ---------------------------
+    # A `Tensor`'s dtype is a DECLARATION, and `CallArg_Tensor` lowers it as the C++ scalar type of
+    # the buffer it binds. So a buffer whose element type disagrees is not merely mislabelled: the
+    # kernel reinterprets its bytes. The declaration is therefore enforced at every point where a
+    # buffer becomes ours (`set`, `set_raw`), and a DERIVED tensor -- which declares nothing -- reads
+    # its dtype off the buffer instead (`wrap` / `_wrap_axes`).
+    def _as_declared( self, raw ):
+        """`raw` retyped to our declared dtype. A widening conversion (bool/int -> real, a size
+        change) is silent; a LOSING one is refused rather than performed behind the user's back."""
+        if raw is None or driver.is_symbolic_zero( raw ):
+            return raw                        # no storage to retype (a symbolic zero carries its own)
+        have = Dtype.of( raw )
+        if self.dtype.same_as( have ):
+            return raw
+        self._check_convertible( have )
+        return driver.astype( raw, self.dtype )
+
+    def _check_convertible( self, have ):
+        """Raise if a value of dtype `have` cannot become our declared dtype without losing what it
+        means. `have` is `None` when the value has no dtype of its own to read (a python list, a
+        ragged nesting) -- there is then nothing to contradict."""
+        if have is None or self.dtype.same_as( have ):
+            return
+        lost = ( "a fractional part" if have.floating_point and not self.dtype.floating_point else
+                 "every value but 0 and 1" if self.dtype.boolean and not have.boolean else None )
+        if lost is not None:
+            raise TypeError(
+                f"cannot bind a { have.cpp_name } value to a { self.dtype.cpp_name } tensor"
+                f"{ '' if self.name is None else f' ({ self.name })' }: the conversion loses { lost }. "
+                f"Convert explicitly if that is what you mean." )
 
     @property
     def buffer_layout( self ):
@@ -342,7 +426,9 @@ class Tensor( Attribute ):
     # correct (the fresh axis holds the sliced size, not the original's stale one).
 
     def _wrap( self, raw, names ):
-        return type( self ).wrap( raw, names, dtype = self.dtype, device = self.device )
+        # no dtype passed on purpose: `raw` is the result of an OP, and the op decides the type
+        # (a comparison yields booleans, an integer division reals). `wrap` reads it off the buffer.
+        return type( self ).wrap( raw, names, device = self.device )
 
     @classmethod
     def wrap( cls, raw, names = None, dtype = None, device = None ):
@@ -351,7 +437,10 @@ class Tensor( Attribute ):
         is how a `ShapeVar` hands its count back as a `Tensor`, and the FRESH-axis path for an op
         result that keeps no axis identity (`matmul`) -- the buffer is the whole contract, the axes
         just carry the names. An op that DOES preserve identity uses `_wrap_axes` instead."""
-        res = cls( template_kwargs = { "dtype": dtype, "device": device } )
+        # a wrapped buffer DECLARES nothing -- it already exists -- so its dtype is READ off it.
+        # An explicit `dtype` is then a claim about that buffer, checked rather than believed.
+        dt  = _wrapped_dtype( raw, dtype ) or cls.default_dtype()
+        res = Tensor.class_for( dt )( template_kwargs = { "dtype": dt, "device": device } )
         res._raw = raw
         if names is not None:
             axes = []
@@ -445,8 +534,13 @@ class Tensor( Attribute ):
         # a raw (non-`Tensor`) operand carries its OWN dtype (e.g. a numpy float64 constant computed
         # host-side), which would otherwise promote the op's result away from `self.dtype` (jax's
         # numpy-style promotion, notably FP32 + F64 -> F64 once x64 is enabled) -- coerced upfront so
-        # the result always stays in `self.dtype`, like `set()` already guarantees for a fresh value.
-        if not isinstance( other, Tensor ) and not driver.is_symbolic_zero( other ):
+        # a REAL tensor stays in its own precision whatever a python constant is spelled as.
+        #
+        # Only a real one: coercing on an INTEGER (or boolean) tensor changes what the op MEANS
+        # rather than merely its precision -- `idx == 0.5` would compare against 0, and `idx / 2`
+        # would be asked to answer in integers. There the backend's own promotion is the right
+        # answer, and the result's dtype is read off the buffer it produces (see `_result_dtype`).
+        if self.dtype.floating_point and not isinstance( other, Tensor ) and not driver.is_symbolic_zero( other ):
             other = driver.array( other, dtype = self.dtype, device = self.device )
         la = self._ref_layout()
         if la is not None:
@@ -493,7 +587,9 @@ class Tensor( Attribute ):
         for ax in dim_axes:
             if not axes or axes[ -1 ] is not ax:
                 axes.append( ax )
-        res = type( self )( template_kwargs = { "dtype": self.dtype, "device": self.device } )
+        # dtype read off `raw` for the same reason as in `wrap`: this is a result, not a declaration.
+        dt  = _result_dtype( raw, self.dtype )
+        res = Tensor.class_for( dt )( template_kwargs = { "dtype": dt, "device": self.device } )
         res.axes = axes
         res._raw = raw
         if raw is not None and not driver.is_symbolic_zero( raw ):
@@ -656,7 +752,7 @@ class Tensor( Attribute ):
         names  = self._dim_names()
         axes   = "" if all( n is None for n in names ) else f", axes={ names }"
         kind   = ", symbolic_zero" if self.is_symbolic_zero else ""
-        header = f"Tensor( shape={ self.shape }{ axes }, dtype={ self.dtype.name }, device={ self.device }{ kind } )"
+        header = f"{ type( self ).__name__ }( shape={ self.shape }{ axes }, dtype={ self.dtype.name }, device={ self.device }{ kind } )"
         if self.raw is None:
             return header
 
@@ -666,6 +762,58 @@ class Tensor( Attribute ):
         tree = raw.tolist() if self._has_unroll() else _display_tree( raw, self.axes )
         width = max( ( len( _fmt_scalar( v ) ) for v in _leaves( tree ) if v is not _BLANK ), default = 0 )
         return header + "\n" + _render_tree( tree, width, raw.ndim )
+
+
+def _declared_dtype( cls, template_kwargs ):
+    """The dtype a DECLARATION means, given the class it is written on: the explicit `dtype` kwarg
+    if there is one, else the class's own default at the declared `size` (`RealTensor` -> the
+    driver's ftype, `IntTensor` -> its itype). A dtype that contradicts the class is refused --
+    `IntTensor[ { "dtype": float } ]` is not a narrower declaration, it is two of them."""
+    declared = template_kwargs.get( "dtype", None )
+    if declared is None:
+        return cls.default_dtype( template_kwargs.get( "size", None ) )
+    dtype = Dtype.factory( declared )
+    if cls.dtype_kinds is not None and dtype.kind not in cls.dtype_kinds:
+        raise TypeError( f"{ cls.__name__ } cannot be declared { dtype.cpp_name }: "
+                         f"use { Tensor.class_for( dtype ).__name__ } instead" )
+    return dtype
+
+
+# ---- reading a dtype OFF a value, rather than believing a declaration --------------------------
+def _natural_dtype( value ):
+    """The dtype `value` ALREADY has, or `None` when it has none to read -- a python list of ints
+    (whose type is a conversion decision, not a fact) or a ragged nesting (which is not an array at
+    all). Never touches a driver buffer's data, and never forces one to the host."""
+    if hasattr( value, "dtype" ):
+        return Dtype.of( value )
+    if isinstance( value, _containers + ( int, float, bool, numpy.generic ) ):
+        try:
+            return Dtype.from_numpy( numpy.asarray( value ).dtype )
+        except ( ValueError, TypeError ):
+            return None       # ragged nesting: numpy refuses to make one array of it
+    return None
+
+
+def _wrapped_dtype( raw, claimed = None ):
+    """The dtype to give a tensor built AROUND an existing buffer: the buffer's own. `claimed` (a
+    dtype the caller passed anyway) is CHECKED against it, not believed -- wrapping is where a
+    mislabelling used to enter silently. With no buffer there is nothing to read, so `claimed` (or
+    the default) stands."""
+    if raw is None:
+        return claimed
+    have = Dtype.of( raw )
+    if claimed is not None and not Dtype.factory( claimed ).same_as( have ):
+        raise TypeError( f"Tensor.wrap: buffer holds { have.cpp_name }, "
+                         f"but { Dtype.factory( claimed ).cpp_name } was claimed" )
+    return have
+
+
+def _result_dtype( raw, fallback ):
+    """The dtype of an OP's result: the one its buffer came out with. An op decides its own type (a
+    comparison yields booleans, an integer division reals), so nothing is inherited from the operand
+    -- inheriting is precisely what used to label a bool buffer `TF`. `fallback` covers the case
+    with no buffer to read (an unbound result)."""
+    return fallback if raw is None else Dtype.of( raw )
 
 
 # an axis is unrolled (spans several array dimensions) iff it is an `AxisList` -- the fact lives in

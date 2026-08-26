@@ -29,7 +29,7 @@ class Parametrized:
     def __getattr__( self, name ):
         # any other attribute is a FACTORY on the wrapped type (`Tensor.full`, ...), given this
         # schema's template args/kwargs the same way a plain instantiation would get them -- so
-        # `Tensor[ axis ].full( v )` builds straight from the axis, with no size to repeat.
+        # `RealTensor[ axis ].full( v )` builds straight from the axis, with no size to repeat.
         attr = getattr( self.cls, name )
         if not callable( attr ):
             return attr

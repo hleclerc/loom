@@ -378,7 +378,7 @@ def _call_with_vjp( code, ca, device, prefix ):
 
     def op_fwd( values ):
         # symbolic_zeros wraps each primal in `CustomVJPPrimal( value, perturbed )`.
-        perturbed = tuple( getattr( v, "perturbed", True ) and t.dtype.floating_point
+        perturbed = tuple( getattr( v, "perturbed", True ) and t.is_differentiable
                            for v, t in zip( values, inputs ) )
         full_in = tuple( getattr( v, "value", v ) for v in values )
         outs = tuple( fwd_op( *full_in ) )
@@ -519,12 +519,12 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
         residual = _grad_tensor( inst, arr ) if arr is not None else Tensor.like( inst )
 
         io = io_of.get( id( inst ) )
-        if io == "output" and inst.dtype.floating_point:
+        if io == "output" and inst.is_differentiable:
             # the cotangent enters as a backward INPUT -- a real buffer (a `TensorView`) or the
             # framework's symbolic zero (a `ZeroTensor`): both just get stored, `_grad_tensor` /
             # `is_symbolic_zero` tell them apart, no special case here.
             grad = _grad_tensor( inst, cotangent_of.get( id( inst ) ) )
-        elif io == "input" and inst.dtype.floating_point and perturbed_of.get( id( inst ), False ):
+        elif io == "input" and inst.is_differentiable and perturbed_of.get( id( inst ), False ):
             grad = Tensor.like( inst )
             output_paths.append( path )
             grad_obj_of[ id( inst ) ] = grad

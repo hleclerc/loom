@@ -1,11 +1,11 @@
-from loom import ShapeVar, Axis, AxisList, Tensor, Aggregate, driver
+from loom import ShapeVar, ShapeArray, Axis, AxisList, Tensor, Aggregate, driver, RealTensor, IntTensor, BoolTensor
 from loom.testing import test
 import numpy
 
 if test( "basic" ):
     class Cell( Aggregate ):
-        vertex_positions : Tensor[ "num_vertex", "dim" ]
-        vertex_indices   : Tensor[ "num_vertex", "dim", { "dtype": int } ]
+        vertex_positions : RealTensor[ "num_vertex", "dim" ]
+        vertex_indices   : IntTensor[ "num_vertex", "dim" ]
 
         num_vertex       : Axis[ "nb_vertices" ]
         dim              : Axis[ "nb_dims" ]
@@ -31,7 +31,7 @@ if test( "basic" ):
 
 if test( "ragged" ):
     class Mesh( Aggregate ):
-        cell_vertices   : Tensor[ "cell", "vtx" ]
+        cell_vertices   : RealTensor[ "cell", "vtx" ]
 
         cell            : Axis[ "nb_cells" ]
         vtx             : Axis[ "nb_vtx_per_cell" ]      # ragged: depends on `cell`
@@ -59,8 +59,8 @@ if test( "ragged" ):
 
 if test( "AxisList" ):
     class Image( Aggregate ):
-        values  : Tensor[ "img_pos..." ]
-        knots   : Tensor[ "dim", "num_knot" ]
+        values  : RealTensor[ "img_pos..." ]
+        knots   : RealTensor[ "dim", "num_knot" ]
 
         num_knot: Axis[ "extent + 1" ]          # ragged over `dim` via `extent`
         img_pos : AxisList[ "dim", "extent" ]    # unrolled into `nb_dims` static axes
@@ -120,7 +120,7 @@ if test( "axis_parsing" ):
 #         num     = Axis( nb_dims + 1 )
 #         dim     = Axis( nb_dims )
 
-#         frame   = Tensor( num, dim )
+#         frame   = RealTensor( num, dim )
 
 #         def __init__( self ) -> None:
 #             self.pouet = 32
@@ -142,7 +142,7 @@ if test( "axis_parsing" ):
 #         nb_dims = ShapeVar()
 #         num     = Axis( nb_dims + 1 )
 #         dim     = Axis( nb_dims )
-#         frame   = Tensor( num, dim )
+#         frame   = RealTensor( num, dim )
 
 #     n = ShapeVar()
 #     a = Celm( nb_dims = n )        # a and b share the same nb_dims cell
@@ -168,10 +168,10 @@ if test( "axis_parsing" ):
 #     a : MonTypeTemplate[ 132, a = 2 ]
 
 if test( "indep" ):
-    inp = Tensor( 17 ) # rank 0
-    out = Tensor()
+    inp = RealTensor( 17 ) # rank 0
+    out = RealTensor()
 
-    yo = Tensor[ dict( dtype = int ) ]( [ 17, 18 ] ) # rank 1
+    yo = IntTensor( [ 17, 18 ] ) # rank 1
     assert yo.shape == [ 2 ]
     assert out.shape == []
 
@@ -179,7 +179,7 @@ if test( "indep" ):
     ny = ShapeVar()
     x  = Axis( nx )   # outside an aggregate, an Axis takes the ShapeVar itself (no name to resolve)
     y  = Axis( ny )
-    ya = Tensor[ x, y, dict( dtype = int ) ]( [ [ 17, 18 ] ] ) # rank 2 with named Axes
+    ya = IntTensor[ x, y ]( [ [ 17, 18 ] ] ) # rank 2 with named Axes
 
     # the ShapeVars are solved from the tensor, exactly as they would be in an aggregate
     assert nx.value == 1
@@ -203,12 +203,12 @@ def _named_2x3():
     """A rank-2 int tensor with named axes `row` (2) and `col` (3), value 1..6."""
     x = Axis( ShapeVar(), name = "row" )
     y = Axis( ShapeVar(), name = "col" )
-    return Tensor[ x, y, dict( dtype = int ) ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )
+    return IntTensor[ x, y ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )
 
 
 if test( "tensor_ops" ):
-    a = Tensor[ dict( dtype = int ) ]( [ 1, 2, 3 ] )
-    b = Tensor[ dict( dtype = int ) ]( [ 10, 20, 30 ] )
+    a = IntTensor( [ 1, 2, 3 ] )
+    b = IntTensor( [ 10, 20, 30 ] )
 
     # scalar / tensor operands, left and right
     assert numpy.asarray( a + b ).tolist() == [ 11, 22, 33 ]
@@ -282,8 +282,8 @@ if test( "tensor_ref_broadcast" ):
 
     row = Axis( ShapeVar(), name = "row" )
     col = Axis( ShapeVar(), name = "col" )
-    m = Tensor[ row, col, dict( dtype = int ) ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )   # row(2) x col(3)
-    v = Tensor[ col, dict( dtype = int ) ]( [ 10, 20, 30 ] )                       # shares the `col` OBJECT
+    m = IntTensor[ row, col ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )   # row(2) x col(3)
+    v = IntTensor[ col ]( [ 10, 20, 30 ] )                       # shares the `col` OBJECT
 
     # an elementwise op MAPS by axis REFERENCE: the shared `col` object lines up, `row` (only in `m`)
     # broadcasts. Operand order sets the order of the NON-batch axes (first-seen), so `v * m` lists
@@ -296,7 +296,7 @@ if test( "tensor_ref_broadcast" ):
     # a DIFFERENT axis object does NOT align, even with the SAME name (reference, not name): the two
     # `col`s are distinct axes, so the op is their outer product over two separate dimensions.
     col2 = Axis( ShapeVar(), name = "col" )
-    w = Tensor[ col2, dict( dtype = int ) ]( [ 1, 2, 3 ] )
+    w = IntTensor[ col2 ]( [ 1, 2, 3 ] )
     ow = v * w
     assert numpy.asarray( ow ).shape == ( 3, 3 )
     assert ow._dim_names() == [ "col", "col" ]
@@ -304,7 +304,7 @@ if test( "tensor_ref_broadcast" ):
     # a BATCH axis sorts FIRST in the result layout, whichever operand carries it (and however the
     # non-batch axes are arranged). No manual reshape: a per-batch value spreads over the rest.
     b = new_batch_axis( 2 )
-    bt = Tensor[ b, dict( dtype = int ) ]( [ 100, 200 ] )                          # batch(2)
+    bt = IntTensor[ b ]( [ 100, 200 ] )                          # batch(2)
     r = m * bt
     assert r._dim_names() == [ b.name, "row", "col" ]                              # batch leading
     assert ( bt * m )._dim_names() == [ b.name, "row", "col" ]
@@ -318,8 +318,8 @@ if test( "tensor_dot" ):
     xy = Axis( ShapeVar(), name = "xy" )
     a  = Axis( ShapeVar(), name = "a" )
     b  = Axis( ShapeVar(), name = "b" )
-    left  = Tensor[ a, xy, dict( dtype = int ) ]( [ [ 1, 0 ], [ 0, 2 ] ] )          # a(2) x xy(2)
-    right = Tensor[ b, xy, dict( dtype = int ) ]( [ [ 1, 1 ], [ 2, 0 ], [ 0, 3 ] ] )  # b(3) x xy(2)
+    left  = IntTensor[ a, xy ]( [ [ 1, 0 ], [ 0, 2 ] ] )          # a(2) x xy(2)
+    right = IntTensor[ b, xy ]( [ [ 1, 1 ], [ 2, 0 ], [ 0, 3 ] ] )  # b(3) x xy(2)
 
     out = left.dot( right, over = xy )                                              # contracts xy
     assert out._dim_names() == [ "a", "b" ]                                         # free axes survive
@@ -344,7 +344,7 @@ if test( "tensor_physical_layout_view" ):
 
     b = Axis( ShapeVar( 2 ), name = "b" )
     c = Axis( ShapeVar( 3 ), name = "c" )
-    t = Tensor[ b, c ]()
+    t = RealTensor[ b, c ]()
     t._raw   = driver.array( raw )
     t._shape = ReferenceShape.from_dense_shape( [ 2, 3 ] )
     t._layout = L
@@ -358,11 +358,11 @@ if test( "tensor_physical_layout_view" ):
 
 
 if test( "tensor_protocol" ):
-    s = Tensor( 17 )                               # rank 0
+    s = RealTensor( 17 )                               # rank 0
     assert int( s ) == 17
     assert float( s ) == 17.0
 
-    v = Tensor[ dict( dtype = int ) ]( [ 5, 6, 7 ] )
+    v = IntTensor( [ 5, 6, 7 ] )
     assert len( v ) == 3
     assert [ int( x ) for x in v ] == [ 5, 6, 7 ]  # iteration yields sub-tensors
     assert numpy.asarray( v ).tolist() == [ 5, 6, 7 ]
@@ -384,7 +384,7 @@ if test( "tensor_symbolic_zero" ):
     assert driver.is_symbolic_zero( z )
     assert not driver.is_symbolic_zero( driver.array( [ 1.0, 2.0 ] ) )
 
-    t = Tensor()
+    t = RealTensor()
     t.set_raw( z )
     assert t.is_symbolic_zero
     assert t.raw is None                          # nothing to bind -> a ZeroTensor, unbound
@@ -402,7 +402,7 @@ if test( "tensor_symbolic_zero" ):
 
 if test( "set_list_reassign" ):
     ni = ShapeVar()
-    t  = Tensor[ Axis( ni ), dict( dtype = int ) ]()   # no value yet
+    t  = IntTensor[ Axis( ni ) ]()   # no value yet
     assert t.shape == [ None ]                          # one axis, extent still unresolved
 
     t.set( [ 1, 2, 3 ] )                               # observe from a python list
@@ -416,8 +416,11 @@ if test( "set_list_reassign" ):
 
 if test( "set_backend_array" ):
     ni, nj = ShapeVar(), ShapeVar()
-    t = Tensor[ Axis( ni ), Axis( nj ), dict( dtype = int ) ]()
-    t.set( driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] ) )   # a backend array, not a list
+    t = IntTensor[ Axis( ni ), Axis( nj ) ]()
+    # a backend array, not a list -- and an INT one: `driver.array` defaults to the driver's
+    # ftype, and binding a real buffer to a tensor declared `int` is refused (it would be
+    # reinterpreted, not converted, once the FFI spells its element type in C++).
+    t.set( driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ], dtype = int ) )
     assert ni.value == 3 and nj.value == 2
     assert t.shape == [ 3, 2 ]
     assert numpy.asarray( t ).tolist() == [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ]
@@ -425,7 +428,7 @@ if test( "set_backend_array" ):
 
 if test( "set_ragged_reassign" ):
     class Mesh( Aggregate ):
-        cell_vertices   : Tensor[ "cell", "vtx" ]
+        cell_vertices   : RealTensor[ "cell", "vtx" ]
         cell            : Axis[ "nb_cells" ]
         vtx             : Axis[ "nb_vtx_per_cell" ]
         nb_cells        : ShapeVar
@@ -445,9 +448,9 @@ if test( "set_ragged_reassign" ):
 if test( "set_from_tensor" ):
     # a dense source, and a DESTINATION with its OWN (independent) axes: setting from the tensor
     # adopts its buffer AND re-observes the destination's axes, so its shape resolves.
-    src = Tensor[ Axis( ShapeVar() ), Axis( ShapeVar() ), dict( dtype = int ) ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )
+    src = IntTensor[ Axis( ShapeVar() ), Axis( ShapeVar() ) ]( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ] )
     mi, mj = ShapeVar(), ShapeVar()
-    dst = Tensor[ Axis( mi ), Axis( mj ), dict( dtype = int ) ]()
+    dst = IntTensor[ Axis( mi ), Axis( mj ) ]()
     dst.set( src )
     assert numpy.asarray( dst ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]
     assert dst.shape == [ 2, 3 ] and mi.value == 2 and mj.value == 3
@@ -460,26 +463,32 @@ if test( "set_from_tensor" ):
     assert holder.is_symbolic_zero and holder.raw is None
 
 
-# ---- `ShapeVar.value` is a `Tensor` (int-able at rank 0, reduces, iterates); `.raw` is the array --
+# ---- `ShapeVar.value` is a HOST count (`ShapeArray`); `as_tensor()` is the device one ----------
 
-if test( "shapevar_value_is_tensor" ):
+if test( "shapevar_value_is_a_host_count" ):
     n = ShapeVar()
-    t = Tensor[ Axis( n ), dict( dtype = int ) ]( [ 5, 6, 7 ] )
+    t = IntTensor[ Axis( n ) ]( [ 5, 6, 7 ] )
 
     v = n.value
-    assert isinstance( v, Tensor )
-    assert v.shape == []                 # a plain count -> a rank-0 Tensor
+    assert isinstance( v, ShapeArray )
+    assert v.shape == ()                 # a plain count -> rank 0
     assert int( v ) == 3                 # ... convertible to int
-    assert n.value == 3                  # ... comparable through the array protocol
+    assert n.value == 3                  # ... and comparable
+    assert [ 0 ] * n.value == [ 0, 0, 0 ] # ... and usable as a SIZE, which is the whole point
     assert n.max == 3                    # ShapeVar.max still works (reads `raw`)
     assert n.raw is not None             # the backend-array escape hatch stays available
 
-    assert ShapeVar().value is None      # unresolved -> no Tensor yet
+    assert ShapeVar().value is None      # unresolved -> no count yet
+
+    # the device form is asked for explicitly, and it is an `IntTensor` like any other
+    assert isinstance( n.as_tensor(), IntTensor )
+    assert int( n.as_tensor() ) == 3
+    assert ShapeVar().as_tensor() is None
 
 
 if test( "shapevar_ragged_value_is_tensor" ):
     class Mesh( Aggregate ):
-        cell_vertices   : Tensor[ "cell", "vtx" ]
+        cell_vertices   : RealTensor[ "cell", "vtx" ]
         cell            : Axis[ "nb_cells" ]
         vtx             : Axis[ "nb_vtx_per_cell" ]
         nb_cells        : ShapeVar
@@ -488,21 +497,26 @@ if test( "shapevar_ragged_value_is_tensor" ):
     m = Mesh()
     m.cell_vertices = [ [ 10, 11 ], [ 12 ] ]
 
-    per_cell = m.nb_vtx_per_cell.value   # a ragged count -> a rank-1 Tensor, dim named after `cell`
-    assert isinstance( per_cell, Tensor )
-    assert per_cell._dim_names() == [ "cell" ]
-    assert numpy.asarray( per_cell ).tolist() == [ 2, 1 ]
+    per_cell = m.nb_vtx_per_cell.value   # a ragged count -> rank 1, dim named after `cell`
+    assert isinstance( per_cell, ShapeArray )
+    assert per_cell.names == [ "cell" ]
+    assert per_cell.tolist() == [ 2, 1 ]
     assert int( per_cell.max() ) == 2
     assert [ int( x ) for x in per_cell ] == [ 2, 1 ]   # iterates into per-segment counts
 
-    # `.raw` is the escape hatch to the backend array (parallels `Tensor.raw`)
+    # a count stays a count under count arithmetic, and stops being one under a ratio
+    assert ( per_cell + 1 ).tolist() == [ 3, 2 ]
+    assert isinstance( per_cell + 1, ShapeArray )
+    assert not isinstance( per_cell / 2, ShapeArray )
+
+    # `.raw` is the escape hatch to the backend array; `as_tensor()` its tidy device form
     assert numpy.asarray( m.nb_vtx_per_cell.raw ).tolist() == [ 2, 1 ]
-    assert m.nb_vtx_per_cell.value.raw is not None
+    assert m.nb_vtx_per_cell.as_tensor()._dim_names() == [ "cell" ]
 
 
 if test( "tensor_reduce_ragged" ):
     class Mesh( Aggregate ):
-        cell_vertices   : Tensor[ "cell", "vtx" ]
+        cell_vertices   : RealTensor[ "cell", "vtx" ]
         cell            : Axis[ "nb_cells" ]
         vtx             : Axis[ "nb_vtx_per_cell" ]
         nb_cells        : ShapeVar
@@ -518,3 +532,110 @@ if test( "tensor_reduce_ragged" ):
     assert numpy.asarray( t.mean( "vtx" ) ).tolist() == [ 1.5, 3.0 ]   # masked; unmasked -> [1.5, 1.5]
     assert numpy.asarray( t.sum( "vtx" ) ).tolist()  == [ 3.0, 3.0 ]
     assert int( t.min() ) == 1                                          # global min over real cells
+
+
+if test( "dtype_is_a_contract_not_a_label" ):
+    # A `Tensor`'s dtype is not decoration: `CallArg_Tensor` spells it as the C++ element type of
+    # the buffer it binds, so a buffer of another type is REINTERPRETED by the kernel rather than
+    # converted. Every route by which a buffer becomes a tensor's therefore enforces it.
+    ni = ShapeVar()
+    idx = IntTensor[ Axis( ni ) ]()
+
+    # widening is silent (that is a conversion, and it loses nothing)
+    idx.set( [ True, False, True ] )
+    assert numpy.asarray( idx ).tolist() == [ 1, 0, 1 ]
+
+    # losing the fractional part is NOT: it is refused, from a list...
+    try:
+        idx.set( [ 1.5, 2.5 ] )
+        assert False, "binding a real value to an int tensor must be refused"
+    except TypeError:
+        pass
+
+    # ...and from another Tensor (the route that used to bind a float64 buffer under an `int`
+    # declaration, leaving the kernel to read those bytes as int64).
+    try:
+        idx.set( RealTensor( [ 1.5, 2.5 ] ) )
+        assert False, "binding a real buffer to an int tensor must be refused"
+    except TypeError:
+        pass
+
+    # a claim made on `wrap` is CHECKED against the buffer, never believed
+    try:
+        Tensor.wrap( RealTensor( [ 1.0, 2.0 ] ).raw, dtype = int )
+        assert False, "wrap must not label a real buffer as int"
+    except TypeError:
+        pass
+
+
+if test( "op_result_dtype_follows_the_op" ):
+    # A derived tensor DECLARES nothing -- it is a result -- so its dtype is the one its buffer
+    # actually came out with. Inheriting the operand's is what used to label a bool buffer `TF`.
+    t = RealTensor( [ 1.0, 2.0, 3.0 ] )
+    assert t.dtype.floating_point
+
+    mask = t > 1.5
+    assert mask.dtype.boolean                                   # a comparison yields booleans
+    assert numpy.asarray( mask ).tolist() == [ False, True, True ]
+
+    idx = IntTensor( [ 1, 2, 3 ] )
+    assert ( idx * 2 ).dtype.integer                            # int stays int
+    assert ( idx / 2 ).dtype.floating_point                     # a true division does not
+
+    # an integer tensor is compared against the value it is GIVEN, not against that value cast
+    # down to its own type (`> 1.5` used to be answered as `> 1`).
+    assert numpy.asarray( idx > 1.5 ).tolist() == [ False, True, True ]
+
+
+if test( "element_type_is_the_class" ):
+    # What a tensor is MADE OF is its class, not a kwarg: `RealTensor` / `IntTensor` /
+    # `BoolTensor`, one per dtype kind. The class is what answers the questions that depend on
+    # the element type -- differentiability first among them.
+    assert isinstance( RealTensor( [ 1.0 ] ), Tensor )   # `Tensor` stays the abstract base
+    assert RealTensor( [ 1.0 ] ).is_differentiable
+    assert not IntTensor( [ 1 ] ).is_differentiable
+
+    # a size is a driver POLICY, not part of the declaration -- unless pinned
+    assert RealTensor( [ 1.0 ] ).dtype.name == "TF"
+    assert RealTensor[ dict( size = 32 ) ]( [ 1.0 ] ).dtype.name == "FP32"
+
+    # a dtype that contradicts the class is two declarations, not a narrower one
+    try:
+        IntTensor[ dict( dtype = float ) ]()
+        assert False, "an IntTensor cannot be declared real"
+    except TypeError:
+        pass
+
+    # the old spelling still lands on the right class (so declarations can migrate gradually)
+    assert type( Tensor( [ 1.0 ] ) ) is RealTensor
+    assert type( Tensor[ dict( dtype = int ) ]( [ 1 ] ) ) is IntTensor
+
+    # a tensor built AROUND a buffer takes the class its buffer calls for -- nothing is inherited
+    # from the operand, which is how `>` comes back a `BoolTensor` without anyone saying so.
+    assert type( RealTensor( [ 1.0, 2.0 ] ) > 1.5 ) is BoolTensor
+    assert type( IntTensor( [ 1, 2 ] ) / 2 ) is RealTensor
+    assert type( Tensor.wrap( IntTensor( [ 1, 2 ] ).raw ) ) is IntTensor
+
+
+if test( "a_count_that_lives_on_the_device_is_refused_on_the_host" ):
+    # The case the host/device split exists for: a kernel WRITES a count, so under a `jit` that
+    # count is a tracer. Nothing can un-trace it, so `value` refuses it right there -- instead of
+    # handing back something that fails later in whatever tried to size a buffer with it.
+    n = ShapeVar()
+
+    def probe( x ):
+        n.set_count( x )                    # what a kernel does with a count it produced
+        try:
+            n.value
+            refused = 0.0
+        except TypeError:
+            refused = 1.0
+        # the DEVICE form stays available -- it is the right answer here, just not a host one
+        assert n.as_tensor() is not None
+        return driver.array( refused )
+
+    assert float( driver.jit( probe )( driver.array( 3, dtype = int ) ) ) == 1.0
+
+    # outside any trace the very same count reads back on the host, no ceremony
+    n.set_count( driver.array( 3, dtype = int ) )
+    assert int( n.value ) == 3

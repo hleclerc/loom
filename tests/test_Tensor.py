@@ -974,3 +974,51 @@ if test( "a_dimension_is_an_identity_with_no_size" ):
 
     # identity is by REFERENCE, never by name: two dimensions both called `i` are two dimensions
     assert Axis( "i" ).identity is not Axis( "i" ).identity
+
+
+if test( "a_dimension_can_be_shared_across_aggregates" ):
+    # Two aggregates of the same kind mint their own dimension, so they do NOT line up -- which is
+    # right by default: two unrelated meshes both have vertices, and vertex 3 of one is not vertex 3
+    # of the other. When they ARE the same dimension, say so by passing the `AxisId`.
+    #
+    # That is the difference with injecting an `Axis`: an axis is a WINDOW, so sharing one shares
+    # the size too. An `AxisId` is only WHICH dimension, so each instance keeps a count of its own.
+    from loom.tensor import AxisId
+
+    class Cell( Aggregate ):
+        positions   : RealTensor[ "num_vertex" ]
+        num_vertex  : Axis[ "nb_vertices" ]
+        nb_vertices : ShapeVar
+
+    plain_a, plain_b = Cell(), Cell()
+    plain_a.positions = [ 1.0, 2.0, 3.0 ]
+    plain_b.positions = [ 10.0, 20.0 ]
+    assert plain_a.num_vertex.identity is not plain_b.num_vertex.identity
+    assert ( plain_a.positions * plain_b.positions ).shape == [ 3, 2 ]      # distinct -> outer
+
+    vertex = AxisId( "num_vertex" )
+    a = Cell( num_vertex = vertex ); a.positions = [ 1.0, 2.0, 3.0 ]
+    b = Cell( num_vertex = vertex ); b.positions = [ 10.0, 20.0, 30.0 ]
+
+    assert a.num_vertex.identity is b.num_vertex.identity is vertex
+    assert numpy.asarray( a.positions * b.positions ).tolist() == [ 10.0, 40.0, 90.0 ]
+
+    # each keeps its OWN count -- the dimension carries no size to impose
+    assert int( a.nb_vertices.value ) == 3
+    c = Cell( num_vertex = vertex ); c.positions = [ 1.0, 2.0 ]
+    assert int( c.nb_vertices.value ) == 2 and int( a.nb_vertices.value ) == 3
+
+    # same dimension, different extents: they align, and then the shapes disagree -- which is the
+    # honest error, not a silent broadcast
+    try:
+        a.positions * c.positions
+        assert False, "3 items and 2 items of one dimension cannot combine"
+    except TypeError:
+        pass
+
+    # an AxisId is about a dimension, so it is refused on a field that is not an axis
+    try:
+        Cell( nb_vertices = AxisId( "x" ) )
+        assert False, "an AxisId is not a count"
+    except TypeError:
+        pass

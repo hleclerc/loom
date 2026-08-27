@@ -1,3 +1,4 @@
+from ..tensor.AbstractAxis import AbstractAxis, AxisId
 from .Parametrized import Parametrized
 from .annotations import annotations
 from .Attribute import Attribute
@@ -165,9 +166,23 @@ class Aggregate:
         if batch_axes:
             self.apply_batch_axes( batch_axes )
 
+        # dimension SHARING: an `AxisId` names WHICH dimension, with no size of its own, so passing
+        # one (`Cell( num_vertex = shared_dim )`) makes this instance's axis a window on THAT
+        # dimension while it keeps an extent of its own. That is the difference with injecting an
+        # `Axis` object, which shares the window too -- and so the size with it.
+        for key, value in shared.items():
+            if isinstance( value, AxisId ) and key in anns:
+                axis = get_attribute( key, self )
+                if not isinstance( axis, AbstractAxis ):
+                    raise TypeError( f"'{ key }' is not an axis: an AxisId says WHICH dimension a "
+                                     f"field indexes, and only an axis has one" )
+                axis.axis_id = value
+
         # prescriptions
         for key, value in shared.items():
             if key in anns:
+                if isinstance( value, AxisId ):
+                    continue                            # a dimension, already shared just above
                 if self.__dict__[ key ] is not value:   # an injection is already in place
                     # a prescribed INPUT tensor whose leading dims do NOT match the batch extents is
                     # SHARED across the batch (e.g. `target_mass`, or a detector `origin`/`frame` that

@@ -437,6 +437,15 @@ def _run_entries(kind, entries, file_modules, env_name):
     from loom import testing as tm
     if not entries:
         return []
+
+    # The kernel build cache keys on the GENERATED .cpp alone -- the hand-written headers it
+    # includes (sdot/include, loom/include) are not part of the hash (see
+    # `compilation.adaptive_cpp.make_library`). So editing a kernel BODY and re-running the tests
+    # would silently reuse the previous .dylib, and the run would say nothing about the new code.
+    # Tests are where that matters most, so they force a rebuild -- unless the caller said
+    # otherwise, which is what makes a fast re-run still possible (`SDOT_FORCE_BUILD=0 ./run test`).
+    os.environ.setdefault("SDOT_FORCE_BUILD", "1")
+
     print(f"\n{'='*12} [{kind}] {len(entries)} entrie(s) {'='*12}", flush=True)
     tm.test_phase = tm.PHASE_RUN
     failures = []

@@ -57,6 +57,12 @@ class ShapeVar( Attribute ):
         self.usages = []
         self._compact_usages_at = 8   # see `add_usage`
         self.dep_axes = [ resolve_attribute( d, scope, AbstractAxis ) for d in template_args ]
+        # the axes the AGGREGATE we belong to is batched over (`Aggregate.apply_batch_axes`), and
+        # nothing to do with `dep_axes`: those are the segments of a ragged structure, these are
+        # items co-iterated by the kernel. They matter only for a count a KERNEL WRITES, which is
+        # then one count PER ITEM -- a host-known count is uniform over the batch by construction,
+        # and stays the single value it is (see `CallArg_ShapeVar`).
+        self.batch_axes = []
 
         self.prescribed_value = None
         self._count = None     # count produced by a kernel: a driver tensor, possibly traced
@@ -78,6 +84,22 @@ class ShapeVar( Attribute ):
         """Rebind the count to what a kernel produced (a driver tensor). Nothing else moves:
         the buffers keep the size they were allocated with."""
         self._count = value
+
+    def accept_batch_axes( self, batch_axes ):
+        """Told which axes the aggregate holding us is batched over. See `batch_axes`."""
+        self.batch_axes = list( batch_axes )
+
+    def is_kernel_written( self ):
+        """Whether a kernel is what put the count there -- as opposed to the host prescribing it
+        or solving it off a tensor's shape. This is what decides whether the count is PER BATCH
+        ITEM: only a kernel can make two items disagree."""
+        return self._count is not None
+
+    def _axis_names_for( self, raw ):
+        """The names of the dimensions `raw` actually has: the ragged ones (`dep_axes`), preceded
+        by the batch ones when the count really did materialize one per item."""
+        names = [ ax.name for ax in self.batch_axes ] + [ ax.name for ax in self.dep_axes ]
+        return names[ len( names ) - numpy.ndim( raw ) : ]
 
     def accept_capacity( self, capacity ):
         """Called when a call is given a capacity for us: our chance to refuse one that would
@@ -139,7 +161,7 @@ class ShapeVar( Attribute ):
         if raw is None:
             return None
         from .ShapeArray import ShapeArray
-        return ShapeArray( raw, names = [ ax.name for ax in self.dep_axes ] )
+        return ShapeArray( raw, names = self._axis_names_for( raw ) )
 
     @value.setter
     def value( self, value ):
@@ -156,7 +178,7 @@ class ShapeVar( Attribute ):
         if raw is None:
             return None
         from .Tensor import Tensor
-        return Tensor.wrap( raw, names = [ ax.name for ax in self.dep_axes ] )
+        return Tensor.wrap( raw, names = self._axis_names_for( raw ) )
 
     @property
     def max( self ) -> int:

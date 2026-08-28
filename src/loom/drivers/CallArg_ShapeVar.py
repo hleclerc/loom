@@ -45,9 +45,23 @@ class CallArg_ShapeVar( CallArg ):
         # one count per cell of the ragged structure this var varies along (none -> a scalar).
         self.shape = [ int( s ) for axis in inst.dep_axes
                        for s in axis.capacity_list( lambda sv: call_args_analysis.capacity_of( sv, path ) ) ]
-        # the batch axes a `vmap` gave us, leading and NAMED (a count is per batch item too); the
-        # counts' own axes stay positional -- they are cells of a ragged structure, not names.
+        # the batch axes, leading and NAMED (a count is per batch item too); the counts' own axes
+        # stay positional -- they are cells of a ragged structure, not names. Two sources: the
+        # aggregate we belong to (`Aggregate.apply_batch_axes`), taken here, and a `vmap`, which
+        # prepends its own later (`add_batch_axis`).
         self.batch_axes = []
+
+        # ... but only for a count a KERNEL WRITES. That is the whole criterion: two items can only
+        # disagree about a count if a kernel is what put it there. A host-known count -- prescribed,
+        # or solved off the shape of a tensor we were given (`nb_diracs`) -- is the same number for
+        # every item of the batch, and giving it one slot per item would cost a buffer, a transfer
+        # and an indirection to hold the value n times (it would also lose `as_scalar`, which is
+        # exactly what such a count is for). `is_output` covers the count this call is about to
+        # write; `is_kernel_written` the one an earlier call already did, which we are now READING
+        # back -- both sides have to agree on the rank, being the same buffer.
+        if self.io_category.is_output or inst.is_kernel_written():
+            for axis in reversed( list( getattr( inst, "batch_axes", () ) ) ):
+                self.add_batch_axis( axis.name, int( axis.max ) )
 
         # the bound a written count is checked against; -1 marks "unbounded" (nothing sizes
         # itself on this var, so this call had no reason to be given a capacity for it).

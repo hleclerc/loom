@@ -69,7 +69,7 @@ def build_env_vars(args) -> dict[str, str]:
 def arg_overrides_to_env(args, params: dict) -> dict[str, str]:
     """Convert CLI --arg=value overrides to SDOT_ARG_* env vars for the harness.
 
-    `params` is the dict of Param descriptors from the experiment/benchmark registry.
+    `params` is the dict of Param descriptors declared by the entries (loom.testing).
     """
     env = {}
     for pname, p in params.items():

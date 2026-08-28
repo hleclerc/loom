@@ -27,6 +27,7 @@ import urllib.request
 import subprocess
 import platform
 import tarfile
+import hashlib
 import shutil
 import sys
 import os
@@ -584,16 +585,63 @@ def ensure_boost( *, force: bool = False ) -> Path:
 # ─────────────────────────────────── build ───────────────────────────────────
 
 
-def _env_flag( name: str ) -> bool:
-    """Boolean env var, treating "0"/"false"/"no"/"off"/"" (any case) as False.
+def _force_build_level() -> int:
+    """`SDOT_FORCE_BUILD` as a level, not a bool -- see `make_library`.
 
-    Plain `os.getenv(name)` truthiness is wrong here: the string "0" is truthy in Python, so
-    `SDOT_FORCE_BUILD=0` would still read as "force". This parses the value instead.
+    0 : unset / "0" / "false" / "no" / "off" -- plain disk cache, reuse the .dylib as-is.
+    1 : "1" (or any other truthy value) -- hash-checked rebuild: compare the hand-written C++
+        sources against the stamp left next to the .dylib, rebuild only on a mismatch. The
+        default for test runs (`cli/main.py`), since it is what makes "the header changed"
+        distinguishable from "nothing changed" without paying for a full rebuild every time.
+    2 : "2" -- unconditional rebuild, ignoring both the .dylib and the stamp (the old
+        SDOT_FORCE_BUILD=1 behaviour). For when the hash itself is under suspicion, or the
+        toolchain/flags changed in a way the hash can't see.
     """
-    v = os.getenv( name )
+    v = os.getenv( "SDOT_FORCE_BUILD" )
     if v is None:
-        return False
-    return v.strip().lower() not in ( "", "0", "false", "no", "off" )
+        return 0
+    v = v.strip().lower()
+    if v in ( "", "0", "false", "no", "off" ):
+        return 0
+    return 2 if v == "2" else 1
+
+
+# Memoized per include-root set (mirrors `_resolved_targets`): the hand-written sources don't
+# change mid-process, but the hash is requested once per kernel build within a test run.
+_source_hash_cache = {}
+
+
+def _cpp_sources_hash() -> str:
+    """SHA-256 over every hand-written `.h`/`.hpp`/`.cxx`/`.cpp` under the C++ include roots.
+
+    `make_library`'s disk cache is keyed on the *generated* .cpp text alone (see its docstring):
+    a kernel's fwd/bwd body is in there, but the hand-written headers/sources it `#include`s
+    (`sdot/include`, `loom/include`) are not, so editing one of those does not change the key.
+    This hash covers exactly that gap. Walking + reading the whole include tree costs real time,
+    so it is computed once per (include roots) and memoized -- fine since nothing under those
+    roots changes while a `sdot-toolchain`/test process is running.
+    """
+    from . import cpp_include_root, additional_include_dirs
+
+    roots = tuple( sorted( { str( cpp_include_root() ), *( str( d ) for d in additional_include_dirs() ) } ) )
+    cached = _source_hash_cache.get( roots )
+    if cached is not None:
+        return cached
+
+    files = []
+    for root in roots:
+        root_path = Path( root )
+        if root_path.is_dir():
+            files += ( p for p in root_path.rglob( "*" ) if p.suffix in ( ".h", ".hpp", ".cxx", ".cpp" ) )
+
+    h = hashlib.sha256()
+    for p in sorted( files ):
+        h.update( str( p ).encode() )
+        h.update( p.read_bytes() )
+
+    digest = h.hexdigest()
+    _source_hash_cache[ roots ] = digest
+    return digest
 
 
 def _run( cmd, **kw ):
@@ -776,8 +824,11 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
     — typically a content hash of the sources + options (see `encode_base_62`).
 
     Disk cache: if the target already exists it is returned as-is, unless `SDOT_FORCE_BUILD`
-    is set (the dev/test override, also used by `.private/Makefile`). Since the file name is
-    a hash of the inputs, a changed source naturally produces a new name and a rebuild.
+    says otherwise (the dev/test override, also used by `.private/Makefile`) -- see
+    `_force_build_level`. Since the file name is a hash of the *generated* source, a changed
+    kernel body naturally produces a new name and a rebuild on its own; `SDOT_FORCE_BUILD`
+    only matters for the hand-written headers/sources that name can't see (level 1: rebuild
+    only if their content hash moved since the last build of *this* name; level 2: always).
     Returns the path to the built library.
     """
     from . import build_dir, cpp_include_root, additional_include_dirs
@@ -787,9 +838,16 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
     out_dir = build_dir()
     out_dir.mkdir( parents = True, exist_ok = True )
     lib = out_dir / lib_name
+    stamp = lib.with_name( lib.name + ".srchash" )
 
-    if lib.exists() and not _env_flag( "SDOT_FORCE_BUILD" ):
-        return lib
+    level = _force_build_level()
+    if lib.exists() and level != 2:
+        if level == 0:
+            return lib
+        # level == 1: reuse only if the hand-written sources haven't moved since this exact
+        # .dylib was built (an older lib, or one built at level 0/2, has no stamp -> rebuild).
+        if stamp.is_file() and stamp.read_text().strip() == _cpp_sources_hash():
+            return lib
 
     profile = profile or resolved_profile
     acpp = ensure_acpp( profile, backends )
@@ -813,4 +871,8 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
         *src_paths,
     ]
     _run( cmd )
+    if level == 1:
+        stamp.write_text( _cpp_sources_hash() )
+    elif stamp.exists():
+        stamp.unlink()
     return lib

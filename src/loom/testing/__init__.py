@@ -2,7 +2,7 @@
 
 Un fichier ressemble à :
 
-    from loom.testing import test, bench, Param     # ( + check_grad si besoin )
+    from loom.testing import test, bench, experiment, Param   # ( + check_grad si besoin )
 
     if test( "my test", [ "[fast]" ] ):
         assert 0 == 0
@@ -11,9 +11,22 @@ Un fichier ressemble à :
         p.results[ "cost" ] = run_bench( p.nb_diracs )   # -> result.yaml, systematically
         # p.out_dir / "plot.png"  -- write ad hoc files there too if useful
 
-`test`/`bench` fonctionnent en deux phases, pilotées par le runner (loom.cli.main) :
+    if p := experiment( "my picture" ):
+        viz.write_html( p.out_dir / "scene.html" )       # une SORTIE à regarder, pas une assertion
 
-* phase de collecte -> enregistre l'entrée (test OU bench, avec ses éventuels
+Les trois `kind` partagent tout -- enregistrement, params, `p.out_dir`, `result.yaml` -- et ne
+different que par ce qu'on en ATTEND, donc par la commande qui les lance :
+
+* `test`       -- ça doit passer. Lancé en masse, jugé PASS/FAIL.
+* `bench`      -- ça doit être rapide. On en garde des CHIFFRES (`p.results`) datés, comparables.
+* `experiment` -- ça doit être REGARDÉ. La sortie est un fichier (html, vtu/pvd, png) qu'un humain
+                  ouvre ; rien à comparer d'une date à l'autre, donc pas de répertoire de date :
+                  le chemin est STABLE, et c'est ce qui permet de garder l'onglet ouvert et de
+                  recharger (voir `_entry_dirs` dans loom.cli.main).
+
+`test`/`bench`/`experiment` fonctionnent en deux phases, pilotées par le runner (loom.cli.main) :
+
+* phase de collecte -> enregistre l'entrée (test, bench OU experiment, avec ses éventuels
   `Param`), retourne une valeur fausse (le corps est sauté)
 * phase d'exécution -> retourne un `Args` (vrai, avec les params résolus) pour
   l'entrée en cours, une valeur fausse pour toutes les autres
@@ -74,7 +87,7 @@ class Args:
 
 class Entry:
     def __init__( self, kind, name, tags, params, file, line, module ):
-        self.kind   = kind             # "test" | "bench"
+        self.kind   = kind             # "test" | "bench" | "experiment"
         self.name   = name
         self.tags   = tags             # list[ str ]
         self.params = params           # dict[ str, Param ]
@@ -109,11 +122,11 @@ def out_dir() -> Path:
 def _arg_overrides() -> dict[ str, str ]:
     """Param overrides from env vars (injected by the CLI runner via SDOT_ARG_*).
 
-    Read fresh on every call, NOT a module-load-time snapshot: test/bench run
-    in-process (unlike experiment/benchmark, which get a fresh subprocess per
-    run), so os.environ can still be gaining SDOT_ARG_* entries after this
-    module was first imported -- e.g. once discovery has resolved which
-    --params exist to parse in the first place.
+    Read fresh on every call, NOT a module-load-time snapshot: entries run in
+    the runner's own process, so os.environ can still be gaining SDOT_ARG_*
+    entries after this module was first imported -- once discovery has
+    resolved which --params exist to parse in the first place, and again from
+    one combination to the next of a `--nb-diracs=1000,2000` sweep.
     """
     return { k[ 9: ]: v for k, v in os.environ.items() if k.startswith( "SDOT_ARG_" ) }
 
@@ -126,14 +139,28 @@ def _normalize_tags( tags ):
     return list( tags )
 
 
-def test( name, tags = None, **params: Param ):
-    """Register a test (collect) or return its parsed Args if selected (run)."""
+def test( name, tags = None, /, **params: Param ):
+    """Register a test (collect) or return its parsed Args if selected (run).
+
+    `name`/`tags` sont POSITIONNELS-SEULEMENT : tout le reste des mots-clés appartient à
+    l'entrée, donc un `Param` peut s'appeler `name` sans entrer en collision (exp_hc en a un).
+    """
     return _register( "test", name, tags, params )
 
 
-def bench( name, tags = None, **params: Param ):
+def bench( name, tags = None, /, **params: Param ):
     """Register a benchmark (collect) or return its parsed Args if selected (run)."""
     return _register( "bench", name, tags, params )
+
+
+def experiment( name, tags = None, /, **params: Param ):
+    """Register an experiment (collect) or return its parsed Args if selected (run).
+
+    Même mécanique que `test`/`bench` (site d'appel, params, `p.out_dir`) : ce qui change est
+    l'intention -- une sortie à REGARDER plutôt qu'une assertion ou un chiffre -- et donc le fait
+    qu'elle ne soit pas embarquée dans les lancements en masse de `./run test`.
+    """
+    return _register( "experiment", name, tags, params )
 
 
 def resolve_params( params: dict ) -> dict:

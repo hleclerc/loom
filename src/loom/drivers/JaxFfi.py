@@ -428,7 +428,12 @@ def _grad_shapevar( inst, raw ):
     from ..tensor.ShapeVar import ShapeVar
     res = ShapeVar.__new__( ShapeVar )
     res.usages = []
+    res._compact_usages_at = 8
     res.dep_axes = inst.dep_axes
+    # the batch axes come along: they decide the RANK the count crosses at (one per item, see
+    # `CallArg_ShapeVar`), and `raw` is the forward's buffer -- dropping them here would bind a
+    # per-item count as a single slot.
+    res.batch_axes = list( inst.batch_axes )
     res.prescribed_value = None
     res._count = raw
     return res
@@ -555,7 +560,19 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
     # so a `FfiCodeParallel` scaffolds it over the residual+gradient arguments just as it did the
     # forward over the primal ones.
     bwd_code = code.for_backward()
-    bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths )
+    # the forward's `input_exceptions` hold for the backward too: they say what THIS KERNEL has no
+    # business touching (`Cell.measure` never reads the H-representation), and the adjoint of a body
+    # that does not read something does not read it either. Passing them on is not an optimization
+    # -- an excluded member is not a residual, so nothing threaded its value through the transform,
+    # and binding it anyway means reading whatever the live attribute happens to hold, which under
+    # a `linearize` is a tracer of the forward's own trace (see `_grad_shapevar` on the same hazard).
+    # ... under BOTH names: a forward argument `X` becomes the pair `X` (the residual) and
+    # `grad_for_X`, and for a member with nothing to differentiate the two are the SAME object at
+    # two paths. Excluding only one of them would bind the other.
+    bwd_input_exceptions = [ p for e in ca.input_exceptions
+                               for p in ( e, "grad_for_" + e ) ]
+    bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
+                               input_exceptions = bwd_input_exceptions )
     bwd_outputs, bwd_results = _run( bwd_code, bwd_ca, device, prefix + "bwd_" )
 
     result_of = { id( o.inst ): r for o, r in zip( bwd_outputs, bwd_results ) if hasattr( o, "inst" ) }

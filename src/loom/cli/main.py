@@ -61,14 +61,29 @@ def run_in_env(seq, argv, env_vars=None, pull=None):
 # ── per-entry output directories ────────────────────────────────────────────────
 #
 # tmp/{kind}/{file}__{name}/[param_hash]/{env}/{date}/ -- one leaf directory
-# per (test/bench case, resolved param set, env, date). `param_hash` is only
+# per (case, resolved param set, env, date). `param_hash` is only
 # present when the entry has params (a short hash rather than a stringified
 # param set, to keep paths short). Only the leaf is cleared+recreated before
 # each run -- its ancestors accumulate history across envs/dates, which is
 # exactly what the two rollup levels below summarize.
 #
+# ... EXCEPT for an experiment, which stops at {env}/: no date level. What a
+# date buys is a HISTORY to compare (yesterday's timing against today's), and
+# an experiment produces nothing comparable -- its output is a file a human
+# opens. What it costs, there, is the one thing that matters: a path that
+# changes under you, so the tab you left open on tmp/.../scene.html points at
+# yesterday's run. Stable path, reload, done. One rollup level instead of two
+# follows from that (see `_refresh_rollups`).
+#
 # Pulled back from a remote host as a single deterministic `tmp/{kind}`
 # rsync (see cmd_test/cmd_bench) -- no runtime-declared marker mechanism.
+
+_DATED_KINDS = ( "test", "bench" )
+
+
+def _date_for(kind):
+    """The `{date}` path component for `kind`, or None when it has none."""
+    return _today_utc() if kind in _DATED_KINDS else None
 
 def _slug(s):
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in str(s)).strip("_") or "_"
@@ -84,12 +99,16 @@ def _param_hash(resolved_params):
 def _entry_dirs(env_name, date_str, kind, entry, resolved_params):
     """Returns (leaf_dir, hash_dir): leaf_dir is where result.yaml/output.txt
     land for this run; hash_dir is its .../[param_hash]/ ancestor -- the root
-    the two rollup levels are computed under (.../[hash]/{env}/ and .../[hash]/)."""
+    the rollup levels are computed under (.../[hash]/{env}/ and .../[hash]/).
+
+    `date_str` None (an experiment, see above) makes .../[hash]/{env}/ itself
+    the leaf."""
     label = f"{_slug(Path(entry.file).stem)}__{_slug(entry.name)}"
     hash_dir = ROOT / "tmp" / kind / label
     h = _param_hash(resolved_params)
     if h: hash_dir = hash_dir / h
-    return hash_dir / _slug(env_name) / date_str, hash_dir
+    leaf = hash_dir / _slug(env_name)
+    return (leaf / date_str if date_str else leaf), hash_dir
 
 
 def _clear_dir(path):
@@ -124,7 +143,7 @@ def _pull_dirs_for(kind, entries, env_name, overrides_env):
     will write to. tmp/ isn't touched by the repo push/--delete, so a remote
     host can carry old, unrelated runs -- pulling this precise set instead of
     the whole tmp/{kind} avoids dragging that back."""
-    date_str = _today_utc()
+    date_str = _date_for(kind)
     dirs = set()
     for e in entries:
         resolved = _resolve_for_path(e.params, overrides_env)
@@ -226,18 +245,28 @@ def _write_rollup(dir_path, rows_by_label):
         yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
 
-def _refresh_rollups(hash_dir, env_name):
-    """Recompute the two ancestor summaries after a result.yaml changed under
+def _refresh_rollups(hash_dir, env_name, dated=True):
+    """Recompute the ancestor summaries after a result.yaml changed under
     `hash_dir` (re-scanning the filesystem, not an in-memory ledger -- self-
     healing, and correct however many separate invocations contributed):
 
     hash_dir/{env}/summary.yaml   rows = dates, this env only ("sans la date")
     hash_dir/summary.yaml         rows = "env/date", across all envs ("sans l'env")
+
+    `dated=False` (an experiment: {env} IS the leaf, see `_entry_dirs`) leaves
+    only the second level, its rows being the envs themselves -- there is no
+    per-env history to summarize when each env holds exactly one run.
     """
     import yaml
 
     def _load(rf):
         return yaml.safe_load(rf.read_text()) if rf.exists() else None
+
+    if not dated:
+        by_env = {p.name: _load(p / "result.yaml")
+                  for p in sorted(hash_dir.iterdir()) if p.is_dir()}
+        _write_rollup(hash_dir, {k: v for k, v in by_env.items() if v})
+        return
 
     env_dir = hash_dir / env_name
     by_date = {p.name: _load(p / "result.yaml") for p in sorted(env_dir.iterdir()) if p.is_dir()}
@@ -275,36 +304,38 @@ def _iter_py_files(root):
                 yield Path(dirpath) / f
 
 
-# Marker substring identifying a file as declaring an entry of this kind --
-# test/bench via `loom.testing.test()`/`bench()`, experiment via
-# `loom.cli.experiment()` (see harness.py). Same repo-wide discovery for all
-# three (see `_candidates_for`): no directory restricted to one kind.
-_KIND_MARKERS = {"test": "loom.testing", "bench": "loom.testing", "experiment": "from loom.cli import"}
+# Marker substrings identifying a file as plausibly declaring an entry. All
+# three kinds register through `loom.testing` (test/bench/experiment), so one
+# marker would do -- `loom.cli` is the second spelling only because the
+# existing exp_*.py files import `experiment` from there (loom/cli/__init__.py
+# re-exports it). Same repo-wide discovery for all three (see
+# `_candidates_for`): no directory restricted to one kind.
+_ENTRY_MARKERS = ("loom.testing", "from loom.cli import")
 
 
-def _looks_like_kind_file(path, marker):
+def _looks_like_entry_file(path):
     """Cheap text check (no import): does this file plausibly declare an
-    entry of this kind? Without this, searching the whole repo makes any
+    entry? Without this, searching the whole repo makes any
     source file that happens to share its test/experiment's name (Cell.py
     vs. test_Cell.py -- the common case) a false ambiguity, or a wrong
     match, for what should be an unambiguous lookup."""
     try:
-        return marker in path.read_text(errors="ignore")
+        text = path.read_text(errors="ignore")
     except OSError:
         return False
+    return any(m in text for m in _ENTRY_MARKERS)
 
 
 _CLI_DIR = Path(__file__).resolve().parent  # loom/src/loom/cli itself -- excluded below: its own
-                                             # source necessarily contains _KIND_MARKERS' literal
+                                             # source necessarily contains _ENTRY_MARKERS' literal
                                              # strings (and usage-example mentions of them), so it
-                                             # would otherwise self-match every kind's marker check
+                                             # would otherwise self-match the marker check
 
 
-def _candidates_for(kind, project_filter=None):
-    marker = _KIND_MARKERS[kind]
+def _candidates_for(project_filter=None):
     candidates = sorted(
         p for p in _iter_py_files(ROOT)
-        if _CLI_DIR not in p.parents and _looks_like_kind_file(p, marker)
+        if _CLI_DIR not in p.parents and _looks_like_entry_file(p)
     )
     if project_filter:
         candidates = [p for p in candidates if p.relative_to(ROOT).parts[0] == project_filter]
@@ -339,7 +370,7 @@ def _resolve_spec(spec, candidates):
 
 def _resolve_pattern(kind, pattern, project_filter):
     """Returns [(matched_files, name_glob), ...], one per comma-separated spec."""
-    candidates = _candidates_for(kind, project_filter)
+    candidates = _candidates_for(project_filter)
     specs = [s.strip() for s in pattern.split(",")] if pattern else [""]
     return [_resolve_spec(s, candidates) for s in specs]
 
@@ -433,23 +464,25 @@ def _run_entries(kind, entries, file_modules, env_name):
     each entry's module so bodies execute isolated -- exactly the C++ harness's
     model. Each run gets its own tmp/{kind}/... leaf directory (see above), a
     result.yaml (status, timing, RAM, params, p.results, captured output), and
-    the two ancestor rollups get refreshed right after."""
+    the ancestor rollups get refreshed right after."""
     from loom import testing as tm
     if not entries:
         return []
 
     # The kernel build cache keys on the GENERATED .cpp alone -- the hand-written headers it
     # includes (sdot/include, loom/include) are not part of the hash (see
-    # `compilation.adaptive_cpp.make_library`). So editing a kernel BODY and re-running the tests
-    # would silently reuse the previous .dylib, and the run would say nothing about the new code.
-    # Tests are where that matters most, so they force a rebuild -- unless the caller said
-    # otherwise, which is what makes a fast re-run still possible (`SDOT_FORCE_BUILD=0 ./run test`).
+    # `compilation.adaptive_cpp.make_library`). So editing one of those and re-running the
+    # tests would silently reuse the previous .dylib, and the run would say nothing about the
+    # new code. Tests are where that matters most, so they default to level 1 (rebuild only
+    # when those sources actually changed, via `_cpp_sources_hash` -- cheap on a cache hit)
+    # unless the caller said otherwise: `SDOT_FORCE_BUILD=0` to trust the cache outright,
+    # `=2` to force every kernel to rebuild regardless of the hash.
     os.environ.setdefault("SDOT_FORCE_BUILD", "1")
 
     print(f"\n{'='*12} [{kind}] {len(entries)} entrie(s) {'='*12}", flush=True)
     tm.test_phase = tm.PHASE_RUN
     failures = []
-    date_str = _today_utc()
+    date_str = _date_for(kind)
     try:
         for e in entries:
             tm.test_filter = e
@@ -475,6 +508,15 @@ def _run_entries(kind, entries, file_modules, env_name):
 
             if status == "PASS":
                 print(f"{tm.GREEN}PASS:{tm.RESET} {e.name} ({where})", flush=True)
+                # an experiment IS its output files -- name them, and their directory, so the
+                # thing to open is in the terminal rather than to be reconstructed from the
+                # naming scheme.
+                if kind == "experiment":
+                    written = sorted(f.name for f in leaf_dir.iterdir()
+                                     if f.name not in ("result.yaml", "output.txt"))
+                    print(_dim(f"  {leaf_dir.relative_to(ROOT)}/"), flush=True)
+                    for name in written:
+                        print(_dim(f"    {name}"), flush=True)
             else:
                 print(f"{tm.RED}FAIL:{tm.RESET} {e.name} ({where}) - {error}", flush=True)
                 sys.stdout.flush()
@@ -485,7 +527,7 @@ def _run_entries(kind, entries, file_modules, env_name):
                 status=status, error=error, duration_s=duration_s, ram_mb=_ram_mb(),
                 params=resolved, results=dict(tm.current_results), output_text=buf.getvalue(),
             )
-            _refresh_rollups(hash_dir, _slug(env_name))
+            _refresh_rollups(hash_dir, _slug(env_name), dated=date_str is not None)
     finally:
         tm.test_phase = tm.PHASE_COLLECT; tm.test_filter = None
     return failures
@@ -637,7 +679,87 @@ def cmd_bench(args):
 
 # ── experiment ────────────────────────────────────────────────────────────────
 
-def cmd_experiment(args): return _run_entry("experiment", args)
+def cmd_experiment(args):
+    """Same entries, same runner as test/bench (see `_run_entries`) -- an
+    experiment differs only in what it is FOR: a file to look at, written to
+    `p.out_dir`, whose path carries no date (see `_entry_dirs`).
+
+    The one thing it has that the other two don't is the param SWEEP:
+    `--nb-diracs=1000,2000` runs every combination, each into its own
+    param_hash directory. It lives here rather than in `_run_entries` because
+    that is where a sweep makes sense -- comparing pictures, not asserting.
+    """
+    from . import envs
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    seq = env_cfg.seq if env_cfg else []
+    # see cmd_test's comment on SDOT_ENV_NAME
+    env_name = os.environ.get("SDOT_ENV_NAME") or (env_cfg.name if env_cfg else "default")
+
+    try:
+        entries, file_modules, seen_params = _entries_and_overrides("experiment", args)
+    except ValueError as e:
+        print(_err(str(e)))
+        return 1
+
+    if not entries:
+        print(_err(f"No experiment matched '{args.pattern}'" if getattr(args, "pattern", None)
+                   else "No experiment found"))
+        _list_available()
+        return 1
+
+    combos = _expand_param_combos(args, seen_params)
+    if combos is None:
+        return 1
+
+    if envs.remote_of(env_cfg):
+        pattern_arg = [args.pattern] if getattr(args, "pattern", None) else []
+        rc = 0
+        for variants, combo_args in combos:
+            overrides = envs.arg_overrides_to_env(combo_args, seen_params)
+            env_vars = envs.build_env_vars(args)
+            env_vars.update(overrides)
+            pull = _pull_dirs_for("experiment", entries, env_name, overrides)
+            # see cmd_test's comment on SDOT_ENV_NAME vs "--env"
+            env_vars["SDOT_ENV_NAME"] = env_name
+            # the sweep is expanded HERE, one plain run per combination -- the
+            # remote side receives each value already split, as SDOT_ARG_*
+            # env vars (same as test/bench), so it never re-splits an "a,b".
+            rc = run_in_env(seq, ["python", "./run", "experiment", *pattern_arg], env_vars, pull=pull) or rc
+        return rc
+
+    # see cmd_test's comment on SDOT_ENV_NAME vs re-printing this banner
+    if not os.environ.get("SDOT_ENV_NAME"):
+        _env_banner(seq)
+
+    failures = []
+    for i, (variants, combo_args) in enumerate(combos):
+        if len(combos) > 1:
+            label = ", ".join(f"{k.replace('_','-')}={v}" for k, v in variants.items())
+            # flush explicitly: stdout is fully buffered (not line-buffered) when
+            # redirected/piped, so without this every sweep header would print only
+            # at process exit -- all bunched after every child's own (unbuffered) output.
+            print(_hdr(f"\n=== sweep [{i+1}/{len(combos)}] {label} ==="), flush=True)
+        if seen_params:
+            os.environ.update(envs.arg_overrides_to_env(combo_args, seen_params))
+        failures += _run_entries("experiment", entries, file_modules, env_name)
+
+    print("\n" + "=" * 48)
+    if failures:
+        for label, name, phase in failures:
+            print(f"  [{label}] {name}: {phase} FAILED")
+        return 1
+    print("  all good")
+    return 0
+
+
+def _list_available():
+    """Lists the files that plausibly declare an entry -- no import (a marker
+    is a text check, not a guarantee), so just the names to pick from."""
+    candidates = _candidates_for()
+    if candidates:
+        print(_dim("\n  Files declaring entries:"))
+        for p in candidates:
+            print(_dim(f"    {p.stem}  ({p.relative_to(ROOT)})"))
 
 
 def _expand_param_combos(args, params):
@@ -693,91 +815,6 @@ def _expand_param_combos(args, params):
                 variants[pname] = val
         out.append((variants, a))
     return out
-
-
-def _run_entry(kind, args):
-    from .harness import collect, lookup
-    from . import envs
-    name = getattr(args, f"{kind}_name", None)
-    if not name:
-        print(_err(f"Usage: ./run {kind} <name>")); _list_available(kind); return 1
-
-    # Same repo-wide, marker-filtered discovery as test/bench (see
-    # `_candidates_for`) -- `name` is the file's full stem, no auto-prefixing
-    # and no fuzzy description fallback (removed: with the full name now
-    # required, a silent partial-description match would be more confusing
-    # than helpful -- `_list_available` below covers "I don't remember the
-    # exact name"). Only the MATCHED file is imported (like test/bench's
-    # `_select_entries`, not every candidate) -- the marker is a cheap text
-    # check, not a real import guarantee, so an unrelated file that happens
-    # to mention the marker string (e.g. a docstring) must never be
-    # imported just for appearing in the candidate list.
-    candidates = _candidates_for(kind)
-    matched = [p for p in candidates if p.stem == name]
-    if len(matched) > 1:
-        names = ", ".join(str(p.relative_to(ROOT)) for p in matched)
-        print(_err(f"'{name}' matches several files ({names})")); return 1
-    collect(matched)
-    entry = lookup(name)
-    if entry is None:
-        msg = _err(f"No {kind} found matching '{name}' (full file name required, e.g. 'exp_lung')")
-        print(msg, file=sys.stderr, flush=True); print(msg, flush=True)
-        _list_available(kind); return 1
-
-    env_cfg = envs.get_env(name=args.env, driver=args.driver)
-    seq = env_cfg.seq if env_cfg else []
-    remote = envs.remote_of(env_cfg)
-
-    # PYTHONPATH entries stay relative to the repo root -- the subprocess's
-    # cwd is always that root (locally, or remotely via Remote's `cd`).
-    pp_parts = [f"{p}/src" for p in ("loom", "sdot", "otrec")
-                if remote or (ROOT / p / "src").is_dir()]
-    existing_pp = os.environ.get("PYTHONPATH", "")
-    if existing_pp: pp_parts.insert(0, existing_pp)
-    pythonpath = ":".join(pp_parts)
-
-    entry_file = str(Path(entry["file"]).relative_to(ROOT))
-
-    combos = _expand_param_combos(args, entry["params"])
-    if combos is None:
-        return 1
-    rc = 0
-    for i, (variants, combo_args) in enumerate(combos):
-        if len(combos) > 1:
-            label = ", ".join(f"{k.replace('_','-')}={v}" for k, v in variants.items())
-            # flush explicitly: stdout is fully buffered (not line-buffered) when
-            # redirected/piped, so without this every sweep header would print only
-            # at process exit -- all bunched after every child's own (unbuffered) output.
-            print(_hdr(f"\n=== sweep [{i+1}/{len(combos)}] {label} ==="), flush=True)
-
-        env_vars = envs.build_env_vars(combo_args)
-        env_vars["SDOT_RUN_PHASE"] = "1"
-        env_vars["PYTHONPATH"] = pythonpath
-
-        arg_overrides = envs.arg_overrides_to_env(combo_args, entry["params"])
-        env_vars.update(arg_overrides)
-
-        print(_hdr(f"\n{kind}: {entry['description']}"))
-        print(_dim(f"  file: {entry['file']}"))
-        if arg_overrides: print(_dim(f"  overrides: {arg_overrides}"))
-        # No pull=: experiments write to ad hoc paths they choose themselves
-        # (no fixed naming scheme like test/bench's tmp/{kind}/...), and tmp/
-        # isn't reset by the repo push, so a remote host can carry old,
-        # unrelated files there -- nothing precise to pull back automatically.
-        r = run_in_env(seq, [python(), entry_file], env_vars)
-        rc = rc or r
-    return rc
-
-
-def _list_available(kind):
-    """Lists candidate file stems for `kind` -- no import (see `_run_entry`:
-    only the exact requested file gets imported, never every candidate),
-    so no description/params preview here, just the names to pick from."""
-    candidates = _candidates_for(kind)
-    if candidates:
-        print(_dim(f"\n  Available {kind}s:"))
-        for p in candidates:
-            print(_dim(f"    {p.stem}  ({p.relative_to(ROOT)})"))
 
 
 # ── other commands ────────────────────────────────────────────────────────────
@@ -957,8 +994,9 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
 
     p_exp = sub.add_parser("experiment", help="Run an experiment", add_help=False)
     add_shared(p_exp)
-    p_exp.add_argument("experiment_name", nargs="?", help="Full experiment file name, e.g. exp_lung")
-    p_exp.add_argument("-h", "--help", action="store_true", help="Show help with dynamic params")
+    p_exp.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
+    p_exp.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
+    p_exp.add_argument("-h", "--help", action="store_true", help="Show matched experiments and their params")
 
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)
     p_tool = sub.add_parser("toolchain", help="Toolchain diagnostic"); add_shared(p_tool)
@@ -974,8 +1012,8 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
     known, remaining = parser.parse_known_args(argv)
     wants_help = getattr(known, "help", False)
 
-    if known.command in ("test", "bench") and (getattr(known, "pattern", None) or wants_help):
-        target = p_test if known.command == "test" else p_bench
+    if known.command in ("test", "bench", "experiment") and (getattr(known, "pattern", None) or wants_help):
+        target = {"test": p_test, "bench": p_bench, "experiment": p_exp}[known.command]
         try:
             entries, _, seen_params = _entries_and_overrides(known.command, known)
         except ValueError as e:
@@ -990,22 +1028,6 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
                 target.add_argument(flag, type=str, default=None, help=p.help)
         if wants_help:
             _print_entries_help(known.command, entries)
-            return 0
-        args = parser.parse_args(argv)
-    elif known.command == "experiment" and (getattr(known, "experiment_name", None) or wants_help):
-        from .harness import collect, lookup
-        name = known.experiment_name
-        matched = [p for p in _candidates_for("experiment") if name and p.stem == name]
-        collect(matched)
-        entry = lookup(name) if name else None
-        if entry:
-            for pname, p in entry["params"].items():
-                flag = f"--{pname.replace('_', '-')}"
-                if p.ptype is bool: p_exp.add_argument(flag, action="store_true", default=None, help=p.help)
-                else: p_exp.add_argument(flag, type=str, default=None, help=p.help)
-        if wants_help:
-            p_exp.print_help()
-            if entry: print(_hdr(f"\n  {entry['description']}")+_dim(f"\n  file: {entry['file']}"))
             return 0
         args = parser.parse_args(argv)
     else:

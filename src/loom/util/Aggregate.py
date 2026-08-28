@@ -230,6 +230,17 @@ class Aggregate:
                 attr = _batched_schema( type_to_check, self.batch_axes )( scope = self )
                 attr.name = name
                 self.__dict__[ name ] = attr
+            else:
+                # a COUNT (`ShapeVar`) is batched too -- a count a kernel writes is one count PER
+                # ITEM, and sharing a single slot between items is a data race, not a saving. It is
+                # only TOLD, not rebuilt: unlike a tensor it has no axes of its own to renumber, and
+                # whether the batch actually materializes is decided per call, on whether a kernel
+                # is what puts the count there (see `CallArg_ShapeVar`). Attributes with nothing to
+                # say to this (an `Axis`, a `CtShapeVar`) simply do not answer.
+                attr = get_attribute( name, self )
+                accept = getattr( attr, "accept_batch_axes", None )
+                if accept is not None:
+                    accept( self.batch_axes )
 
     def _rebuild_field_unbatched( self, name ):
         """Replace the (batched) tensor field `name` with a fresh one built straight from its

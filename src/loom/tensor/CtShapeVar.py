@@ -29,6 +29,11 @@ class CtShapeVar( ShapeVar ):
     def set_count( self, value ):
         raise ValueError( f"CtShapeVar '{ self.name }' is compile-time: a kernel cannot write it" )
 
+    def accept_batch_axes( self, batch_axes ):
+        # a value baked into the C++ type is the SAME value for every item, by construction --
+        # there is nothing per-item for a batch axis to index.
+        pass
+
     if TYPE_CHECKING:
          def __lt__( self, that ) -> bool: ...
          def __le__( self, that ) -> bool: ...

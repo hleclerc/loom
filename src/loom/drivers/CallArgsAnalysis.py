@@ -212,6 +212,11 @@ class CallArgsAnalysis:
         # nodes, so they follow the CLONES on their own (each keeps its `ffi_name`/`error_id`), and
         # the batch axis reaches them through the buffers we are about to give it below.
 
+        # les clones appartiennent à `res`, pas à nous : sans ça un noeud cloné irait demander
+        # l'étendue de son NOUVEL axe de batch à une analyse qui ne le connaît pas.
+        for node in res.nodes():
+            node._rebind_analysis( res )
+
         for tensor in res.tensors:
             if not tensor.takes_batch_axis():
                 continue

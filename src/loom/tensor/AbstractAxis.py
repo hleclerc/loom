@@ -1,5 +1,6 @@
 from ..util.Attribute import Attribute, resolve_attribute
 import numpy
+import weakref
 
 from .Affine import Affine, parse_terms
 
@@ -319,16 +320,31 @@ class AbstractAxis( Attribute ):
         inverts our affine on the LOGICAL size there (`reference_shape.sizes(...)`, a 0-d scalar for a dense
         axis or a per-segment array for a ragged one -- unpadded); `capacity` on the ALLOCATED buffer
         size (`allocated_sizes` at that dimension). Our position is resolved at PULL time (`_dim_index`),
-        by then `tensor.axes` is complete."""
+        by then `tensor.axes` is complete.
+
+        The axis and the ShapeVar are captured WEAKLY, and that is not a detail: a resolver is
+        stored ON the ShapeVar (`add_usage`), so capturing them strongly closes the ring
+        `Axis -> coeffs -> ShapeVar -> usages -> resolver -> Axis` -- and a ring is freed only by
+        the cyclic collector, never by refcounting. The tensor weakref right below is there for the
+        same reason; it just did not go far enough.
+
+        Weak is SAFE by construction, not by luck: `_pull` only ever calls a resolver whose tensor
+        is still alive, a live tensor holds its axes, and an axis holds its ShapeVars. So neither
+        referent can be gone while the entry is usable -- and if one somehow is, the resolver
+        answers `None`, which `_pull` already means as "cannot say"."""
+        axis_ref = weakref.ref( self )
         for shape_var in self.coeffs:
-            def logical( t, axis = self, shape_var = shape_var ):
-                if t.reference_shape is None:
+            sv_ref = weakref.ref( shape_var )
+            def logical( t, axis_ref = axis_ref, sv_ref = sv_ref ):
+                axis, shape_var = axis_ref(), sv_ref()
+                if axis is None or shape_var is None or t.reference_shape is None:
                     return None
                 dim = t._spec_dims()[ t._dim_index( axis ) ]
                 return axis.solve_single( shape_var, t.reference_shape.sizes( dim ) )
-            def capacity( t, axis = self, shape_var = shape_var ):
+            def capacity( t, axis_ref = axis_ref, sv_ref = sv_ref ):
+                axis, shape_var = axis_ref(), sv_ref()
                 sizes = t.allocated_sizes
-                if sizes is None:
+                if axis is None or shape_var is None or sizes is None:
                     return None
                 dim = t._spec_dims()[ t._dim_index( axis ) ]
                 return axis.solve_single( shape_var, sizes[ dim ] )

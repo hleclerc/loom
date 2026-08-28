@@ -540,16 +540,36 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
             grad = Tensor.like( inst )   # non-differentiable or non-perturbed -> a NoneTensor
         return residual, grad
 
+    def _fresh_scratch( inst ):
+        """A scratch argument's stand-in for the backward: the same SHAPE, none of the values.
+
+        A tensor gives an empty one of its kind; an AGGREGATE is mirrored member by member -- fresh
+        tensors, and its non-tensor members (`Axis` / `ShapeVar` / `CtShapeVar`) SHARED with the
+        primal, exactly as `_build` shares them, so the new buffers resolve their capacity from the
+        counts the forward already grew. Declaring the aggregate itself as a backward output is then
+        enough: the analysis walks it and allocates each member, just as the forward did.
+        """
+        if not _is_agg( inst ):
+            return Tensor.like( inst )
+        obj = _blank( inst )
+        for mname in annotations( type( inst ) ):
+            member = get_attribute( mname, inst )
+            obj.__dict__[ mname ] = ( _fresh_scratch( member )
+                                      if isinstance( member, Tensor ) or _is_agg( member )
+                                      else member )
+        return obj
+
     kwargs = {}
     for name, arg in ca.args.items():
         if not hasattr( arg, "inst" ):
             continue
         # SCRATCH: the backward gets a FRESH writable buffer under the same name (an output of the
         # backward call), NOT the forward's transient per-thread values as a residual. The body
-        # re-derives into it whatever it needs (a re-sort). Capacity resolves on its own -- the
-        # thread axis is a `CtShapeVar` (static), the item axis is shared with a residual it mirrors.
+        # re-derives into it whatever it needs (a re-sort, a rebuilt cell). Capacity resolves on its
+        # own -- the thread axis is a `CtShapeVar` (static), the item axis is shared with a residual
+        # it mirrors, and an aggregate's counts are the primal's, already grown to what fits.
         if name in ca.scratch_paths:
-            kwargs[ name ] = Tensor.like( arg.inst )
+            kwargs[ name ] = _fresh_scratch( arg.inst )
             output_paths.append( name )
             continue
         residual, grad = _build( arg.inst, "grad_for_" + name )
@@ -571,7 +591,15 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
     # two paths. Excluding only one of them would bind the other.
     bwd_input_exceptions = [ p for e in ca.input_exceptions
                                for p in ( e, "grad_for_" + e ) ]
+    # ... and so do the forward's OUTPUT exceptions, but only those inside a SCRATCH: that scratch
+    # is re-declared as a whole here, so without them every member it carved out (a `Cell`'s face
+    # lattice in 2D, say) would come back as an output to allocate -- for a count that was never
+    # given one, precisely because nothing allocates it. Elsewhere they are moot: a member excluded
+    # from the forward's outputs is a residual or unbound, neither of which this call allocates.
+    bwd_output_exceptions = [ e for e in ca.output_exceptions
+                                if any( e == p or e.startswith( p + "." ) for p in ca.scratch_paths ) ]
     bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
+                               output_attribute_exceptions = bwd_output_exceptions,
                                input_exceptions = bwd_input_exceptions )
     bwd_outputs, bwd_results = _run( bwd_code, bwd_ca, device, prefix + "bwd_" )
 

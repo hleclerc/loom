@@ -32,6 +32,12 @@ class CallArg:
         mapping[ id( self ) ] = res
         return res
 
+    def _rebind_analysis( self, caa ):
+        """Told which `CallArgsAnalysis` we now belong to -- `batched()` clones the tree, and a
+        clone belongs to the NEW analysis, not the one it was copied from. A node that holds no
+        reference to its analysis has nothing to do here, which is most of them."""
+        pass
+
     def takes_batch_axis( self ):
         """Whether a `vmap` gives us one more (leading) axis. True of anything that holds ONE
         value per batch item -- which is everything the kernel writes, save the buffers that

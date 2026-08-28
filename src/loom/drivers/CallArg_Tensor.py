@@ -1,3 +1,5 @@
+import weakref
+
 from .CallArg import CallArg
 
 class CallArg_Tensor( CallArg ):
@@ -36,7 +38,13 @@ class CallArg_Tensor( CallArg ):
         # what decides our C++ form: `cpp_type` / `cpp_view` / `_jax_buffer_shape` all ask IT, and
         # this class only supplies the spelling primitives (see `loom/tensor/storage.py`).
         self.storage = inst.storage
-        self._caa = call_args_analysis
+        # la SEULE référence remontante de tout l'arbre d'abaissement, et elle est FAIBLE : notre
+        # analyse nous tient (`args` -> ... -> nous), donc la tenir en retour fermait l'anneau
+        # `CallArgsAnalysis <-> CallArg_*`, que seul le ramasse-miettes cyclique défait. Ce n'est
+        # pas qu'une question de nommage d'axes : cet anneau retenait aussi les agrégats de
+        # l'appel, donc leurs tampons -- des tableaux du device -- bien après la fin de l'appel.
+        # Faible est sûr : on ne s'en sert que pendant la génération de code, que l'analyse pilote.
+        self._caa = weakref.ref( call_args_analysis )
         self.memory_space = call_args_analysis.cpp_memory_space
 
         if self.io_category.is_output:
@@ -176,7 +184,15 @@ class CallArg_Tensor( CallArg ):
         """Where the extent of axis `name` can be read at run time, off ANOTHER argument of this
         call that carries it. What a value with no extents of its own (a fill) builds its logical
         shape from -- so no extent is baked into the generated source."""
-        return self._caa.batch_dim_expr( name )
+        caa = self._caa()
+        if caa is None:
+            raise RuntimeError( f"'{ self.name }' was asked for the extent of '{ name }' after its "
+                                f"call's analysis was gone -- a lowering node only answers while "
+                                f"the analysis driving the codegen is alive" )
+        return caa.batch_dim_expr( name )
+
+    def _rebind_analysis( self, caa ):
+        self._caa = weakref.ref( caa )
 
     # -- seeding: what an output must hold before the body runs --
     def cpp_seed_member( self, owner_name ):

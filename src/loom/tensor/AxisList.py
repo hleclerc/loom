@@ -1,3 +1,5 @@
+import weakref
+
 import numpy
 
 from ..util.Attribute import resolve_attribute
@@ -94,16 +96,24 @@ class AxisList( AbstractAxis ):
         #  - each member: logical by inverting its affine on every logical size over the span, capacity
         #    on the buffer sizes there. An unrolled tensor is dense (no padding), so the two agree --
         #    but we keep them distinct so capacity stays a fact about the BUFFER.
+        # capturés WEAKLY -- même raison qu'`AbstractAxis._register_dense` (voir sa docstring) :
+        # un résolveur vit SUR la ShapeVar, donc le capturer fort refermerait l'anneau
+        # `Axis -> coeffs -> ShapeVar -> usages -> résolveur -> Axis`.
+        loop_ref = weakref.ref( self.loop_axis )
+        list_ref = weakref.ref( self )
         for shape_var in self.loop_axis.coeffs:
-            def loop_logical( t, axis = self.loop_axis, shape_var = shape_var, list_axis = self ):
-                if t.reference_shape is None:
+            sv_ref = weakref.ref( shape_var )
+            def loop_logical( t, axis_ref = loop_ref, sv_ref = sv_ref, list_ref = list_ref ):
+                axis, shape_var, list_axis = axis_ref(), sv_ref(), list_ref()
+                if axis is None or shape_var is None or list_axis is None or t.reference_shape is None:
                     return None
                 width = list_axis._structural_width( t, len( t.reference_shape ) )
                 if width is None:
                     return None
                 return axis.solve_single( shape_var, numpy.array( width, dtype = int ) )
-            def loop_capacity( t, axis = self.loop_axis, shape_var = shape_var, list_axis = self ):
-                if t.buffer_rank is None:
+            def loop_capacity( t, axis_ref = loop_ref, sv_ref = sv_ref, list_ref = list_ref ):
+                axis, shape_var, list_axis = axis_ref(), sv_ref(), list_ref()
+                if axis is None or shape_var is None or list_axis is None or t.buffer_rank is None:
                     return None
                 width = list_axis._structural_width( t, t.buffer_rank )
                 if width is None:
@@ -112,8 +122,10 @@ class AxisList( AbstractAxis ):
             shape_var.add_usage( tensor, loop_logical, loop_capacity )
 
         for shape_var in self.coeffs:
-            def member_logical( t, axis = self, shape_var = shape_var ):
-                if t.reference_shape is None:
+            sv_ref = weakref.ref( shape_var )
+            def member_logical( t, axis_ref = list_ref, sv_ref = sv_ref ):
+                axis, shape_var = axis_ref(), sv_ref()
+                if axis is None or shape_var is None or t.reference_shape is None:
                     return None
                 span = t._unroll_span( t._dim_index( axis ) )
                 if span is None:
@@ -123,10 +135,11 @@ class AxisList( AbstractAxis ):
                 if any( v is None for v in vals ):
                     return None
                 return numpy.array( vals, dtype = int )
-            def member_capacity( t, axis = self, shape_var = shape_var ):
-                span  = t._unroll_span( t._dim_index( axis ) )
+            def member_capacity( t, axis_ref = list_ref, sv_ref = sv_ref ):
+                axis, shape_var = axis_ref(), sv_ref()
+                span  = t._unroll_span( t._dim_index( axis ) ) if axis is not None else None
                 sizes = t.allocated_sizes
-                if span is None or sizes is None:
+                if axis is None or shape_var is None or span is None or sizes is None:
                     return None
                 start, count = span
                 vals = [ axis.solve_single( shape_var, sizes[ start + k ] ) for k in range( count ) ]

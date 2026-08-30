@@ -174,9 +174,14 @@ class Device:
         total = 1
         for axis in batch_axes:
             total *= int( axis.max )
-        if batch_axes:
-            n = min( n, total )
-        return max( 1, n )
+        # Le plafond par NOMBRE D'ITEMS s'applique toujours, y compris quand `batch_axes` est vide
+        # -- une liste vide ne veut pas dire « on ne sait pas », elle veut dire UN item. Tous les
+        # appelants la passent pour dire sur quoi le travail s'étale ; ne pas plafonner dans ce
+        # cas-là réservait un scratch pour tout le parallélisme de la machine alors qu'un seul
+        # work-item allait tourner. Invisible sur CPU (le plafond matériel y est le nombre de
+        # cœurs), fatal sur GPU où il se déduit de la RAM du device : `Cell.cut` sur UNE cellule
+        # y demandait 5.28 GiB de table de compaction.
+        return max( 1, min( n, total ) )
 
     def _hw_thread_cap( self, **per_thread ) -> int:
         """The hardware/RAM ceiling on simultaneous threads, given a per-thread footprint. Device

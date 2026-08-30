@@ -332,14 +332,11 @@ _CLI_DIR = Path(__file__).resolve().parent  # loom/src/loom/cli itself -- exclud
                                              # would otherwise self-match the marker check
 
 
-def _candidates_for(project_filter=None):
-    candidates = sorted(
+def _candidates_for():
+    return sorted(
         p for p in _iter_py_files(ROOT)
         if _CLI_DIR not in p.parents and _looks_like_entry_file(p)
     )
-    if project_filter:
-        candidates = [p for p in candidates if p.relative_to(ROOT).parts[0] == project_filter]
-    return candidates
 
 
 def _resolve_spec(spec, candidates):
@@ -368,9 +365,9 @@ def _resolve_spec(spec, candidates):
     return matched, name_glob
 
 
-def _resolve_pattern(kind, pattern, project_filter):
+def _resolve_pattern(kind, pattern):
     """Returns [(matched_files, name_glob), ...], one per comma-separated spec."""
-    candidates = _candidates_for(project_filter)
+    candidates = _candidates_for()
     specs = [s.strip() for s in pattern.split(",")] if pattern else [""]
     return [_resolve_spec(s, candidates) for s in specs]
 
@@ -404,7 +401,16 @@ def _import_test_file(path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except SystemExit:
+        # Le fichier s'est RETIRÉ : c'est la façon dont un fichier dit « je ne vaux pas pour cette
+        # exécution » AVANT d'importer ce qui n'irait pas (`loom.testing.driver_is` + `sys.exit`).
+        # Il faut l'attraper ici : une `SystemExit` levée pendant un import remonte jusqu'en haut
+        # et termine le processus -- sans message et avec le code 0, donc en donnant l'impression
+        # d'une découverte vide plutôt que d'un fichier sauté.
+        sys.modules.pop(name, None)
+        return None, name
     return mod, name
 
 
@@ -418,7 +424,9 @@ def _select_entries(kind, resolved_specs):
     tm.all_entries.clear()
     file_modules = {}
     for f in files:
-        _, mname = _import_test_file(f)
+        mod, mname = _import_test_file(f)
+        if mod is None:      # le fichier s'est retiré (voir `_import_test_file`)
+            continue
         file_modules[mname] = f
 
     selected = []
@@ -437,7 +445,7 @@ def _select_entries(kind, resolved_specs):
 
 def _entries_and_overrides(kind, args):
     """Resolve args.pattern -> (entries, file_modules, union-of-declared-params)."""
-    resolved_specs = _resolve_pattern(kind, getattr(args, "pattern", None), getattr(args, "project", None))
+    resolved_specs = _resolve_pattern(kind, getattr(args, "pattern", None))
     entries, file_modules = _select_entries(kind, resolved_specs)
     seen_params = {}
     for e in entries:
@@ -552,6 +560,11 @@ def _cpp_filters(pattern):
 def cmd_test(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    # le driver résolu, visible du processus fils : c'est ce que `loom.testing.driver_is` lit pour
+    # qu'un fichier puisse sortir AVANT d'importer un backend qui n'est pas celui de cette
+    # exécution (et qui peut être cassé sur cette machine).
+    if env_cfg and env_cfg.driver:
+        os.environ.setdefault("SDOT_DRIVER", env_cfg.driver)
     seq = env_cfg.seq if env_cfg else []
     # SDOT_ENV_NAME, if set, means we're the remote-side half of a dispatch:
     # use the ORIGINATING env's name for output-path labeling rather than
@@ -577,6 +590,11 @@ def cmd_test(args):
         # try to ssh from the remote host back out to itself. SDOT_ENV_NAME
         # only overrides the output-path label, without touching dispatch.
         env_vars["SDOT_ENV_NAME"] = env_name
+        # le driver traverse le saut ssh : la machine distante re-résout `.envs.py`
+        # SANS `--env` (pour ne pas re-ssh vers elle-même) et retomberait sinon sur
+        # l'env "default", qui n'est pas forcément le bon driver.
+        if env_cfg and env_cfg.driver:
+            env_vars["SDOT_DRIVER"] = env_cfg.driver
         return run_in_env(seq, ["python", "./run", "test", *pattern_arg], env_vars, pull=pull)
 
     # SDOT_ENV_NAME set means we're the remote HALF of a dispatch: the
@@ -635,6 +653,11 @@ def _run_cpp_tests(filters):
 def cmd_bench(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    # le driver résolu, visible du processus fils : c'est ce que `loom.testing.driver_is` lit pour
+    # qu'un fichier puisse sortir AVANT d'importer un backend qui n'est pas celui de cette
+    # exécution (et qui peut être cassé sur cette machine).
+    if env_cfg and env_cfg.driver:
+        os.environ.setdefault("SDOT_DRIVER", env_cfg.driver)
     seq = env_cfg.seq if env_cfg else []
     # see cmd_test's comment on SDOT_ENV_NAME
     env_name = os.environ.get("SDOT_ENV_NAME") or (env_cfg.name if env_cfg else "default")
@@ -655,6 +678,11 @@ def cmd_bench(args):
         # here would make the remote side re-resolve the same Remote layer
         # and try to ssh back out to itself.
         env_vars["SDOT_ENV_NAME"] = env_name
+        # le driver traverse le saut ssh : la machine distante re-résout `.envs.py`
+        # SANS `--env` (pour ne pas re-ssh vers elle-même) et retomberait sinon sur
+        # l'env "default", qui n'est pas forcément le bon driver.
+        if env_cfg and env_cfg.driver:
+            env_vars["SDOT_DRIVER"] = env_cfg.driver
         return run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull)
 
     # see cmd_test's comment on SDOT_ENV_NAME vs re-printing this banner
@@ -691,6 +719,11 @@ def cmd_experiment(args):
     """
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    # le driver résolu, visible du processus fils : c'est ce que `loom.testing.driver_is` lit pour
+    # qu'un fichier puisse sortir AVANT d'importer un backend qui n'est pas celui de cette
+    # exécution (et qui peut être cassé sur cette machine).
+    if env_cfg and env_cfg.driver:
+        os.environ.setdefault("SDOT_DRIVER", env_cfg.driver)
     seq = env_cfg.seq if env_cfg else []
     # see cmd_test's comment on SDOT_ENV_NAME
     env_name = os.environ.get("SDOT_ENV_NAME") or (env_cfg.name if env_cfg else "default")
@@ -721,6 +754,11 @@ def cmd_experiment(args):
             pull = _pull_dirs_for("experiment", entries, env_name, overrides)
             # see cmd_test's comment on SDOT_ENV_NAME vs "--env"
             env_vars["SDOT_ENV_NAME"] = env_name
+        # le driver traverse le saut ssh : la machine distante re-résout `.envs.py`
+        # SANS `--env` (pour ne pas re-ssh vers elle-même) et retomberait sinon sur
+        # l'env "default", qui n'est pas forcément le bon driver.
+        if env_cfg and env_cfg.driver:
+            env_vars["SDOT_DRIVER"] = env_cfg.driver
             # the sweep is expanded HERE, one plain run per combination -- the
             # remote side receives each value already split, as SDOT_ARG_*
             # env vars (same as test/bench), so it never re-splits an "a,b".
@@ -916,6 +954,11 @@ def cmd_env(args):
 def cmd_install(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    # le driver résolu, visible du processus fils : c'est ce que `loom.testing.driver_is` lit pour
+    # qu'un fichier puisse sortir AVANT d'importer un backend qui n'est pas celui de cette
+    # exécution (et qui peut être cassé sur cette machine).
+    if env_cfg and env_cfg.driver:
+        os.environ.setdefault("SDOT_DRIVER", env_cfg.driver)
     seq = env_cfg.seq if env_cfg else []
     remote = envs.remote_of(env_cfg)
     rc = 0
@@ -935,6 +978,11 @@ def cmd_install(args):
 def cmd_toolchain(args):
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    # le driver résolu, visible du processus fils : c'est ce que `loom.testing.driver_is` lit pour
+    # qu'un fichier puisse sortir AVANT d'importer un backend qui n'est pas celui de cette
+    # exécution (et qui peut être cassé sur cette machine).
+    if env_cfg and env_cfg.driver:
+        os.environ.setdefault("SDOT_DRIVER", env_cfg.driver)
     seq = env_cfg.seq if env_cfg else []
     return run_in_env(seq, [python(), "-m", "loom.toolchain"])
 
@@ -983,19 +1031,16 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
     p_test = sub.add_parser("test", help="Run tests", add_help=False)
     add_shared(p_test)
     p_test.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
-    p_test.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
     p_test.add_argument("-h", "--help", action="store_true", help="Show matched tests and their params")
 
     p_bench = sub.add_parser("bench", help="Run benchmarks", add_help=False)
     add_shared(p_bench)
     p_bench.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
-    p_bench.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
     p_bench.add_argument("-h", "--help", action="store_true", help="Show matched benchmarks and their params")
 
     p_exp = sub.add_parser("experiment", help="Run an experiment", add_help=False)
     add_shared(p_exp)
     p_exp.add_argument("pattern", nargs="?", help="file[::name] spec(s), comma-separated, `*` globbable")
-    p_exp.add_argument("--project", help="Restrict to a top-level directory (e.g. loom, sdot, otrec)")
     p_exp.add_argument("-h", "--help", action="store_true", help="Show matched experiments and their params")
 
     p_inst = sub.add_parser("install", help="Editable install all packages"); add_shared(p_inst)

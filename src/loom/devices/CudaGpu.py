@@ -14,6 +14,10 @@ class CudaGpu( Device ):
     def __init__( self, device_id, mem_fraction = 0.5, _attrs = None ):
         self.mem_fraction = mem_fraction  # fraction of total_dev_mem reserved for per-thread scratch
         self.device_id = device_id
+        # INDEXÉ, pas dépaqueté par la fin : `shm_per_block` est le DERNIER, donc un
+        # `*_, sm_major, sm_minor = attrs` prend `( sm_minor, shm_per_block )` et fabrique un
+        # `sm_549152` au lieu de `sm_75`. Resté invisible tant que rien n'utilisait la cible AOT,
+        # puisque `generic` gagnait toujours (voir `resolve_targets`).
         self._attrs = _attrs # (nb_sm, max_thr_per_sm, regs_per_sm, shm_per_sm, total_dev_mem, sm_major, sm_minor, shm_per_block)
 
     def copy( self ) -> 'Device':
@@ -28,7 +32,7 @@ class CudaGpu( Device ):
         attrs = self._get_attrs()
         if attrs is None:
             return "cuda"
-        *_, sm_major, sm_minor = attrs
+        sm_major, sm_minor = attrs[ 5 ], attrs[ 6 ]
         return f"cuda_sm{ sm_major }{ sm_minor }"
 
     @property
@@ -62,7 +66,7 @@ class CudaGpu( Device ):
         attrs = self._get_attrs()
         if attrs is None:
             return "cuda"
-        *_, sm_major, sm_minor = attrs
+        sm_major, sm_minor = attrs[ 5 ], attrs[ 6 ]
         return f"cuda:sm_{ sm_major }{ sm_minor }"
 
     @property

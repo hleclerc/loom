@@ -225,6 +225,12 @@ def usable_backend_set( profile: str, backends ) -> tuple | None:
 # while the question is asked on every `driver.call` (through `JaxFfi.compile_and_register`) --
 # and answering it means listing directories. A build happening mid-process would make an entry
 # stale, which is why `sdot-toolchain install` is a separate process.
+def _env_flag( name ) -> bool:
+    """Un drapeau d'environnement, lu comme on s'y attend : `1` / `true` / `yes` / `on` (insensible
+    à la casse) sont vrais, tout le reste -- y compris absent et chaîne vide -- est faux."""
+    return os.getenv( name, "" ).strip().lower() in ( "1", "true", "yes", "on" )
+
+
 _resolved_targets = {}
 
 
@@ -236,11 +242,18 @@ def resolve_targets( device ) -> tuple:
 
       1. `SDOT_ACPP_TARGET` — the explicit escape hatch ("generic", "omp", "cuda:sm_75", ...),
          for benchmarking one flow against the other or working around a broken JIT.
-      2. `generic`, if an SSCP-capable acpp is already there (bundled in the wheel, or in the
+      2. `LOOM_GPU_AOT` — "compile AHEAD OF TIME for whatever this device is". Same thing as
+         spelling the target by hand, minus having to know the architecture: the device knows it
+         (`acpp_aot_targets`, e.g. `cuda:sm_75` read off the card). Why one would want it: the
+         `generic` flow JITs its kernels at run time, so they are invisible to anything that
+         inspects real binaries — `compute-sanitizer` sees nothing, and a profiler sees little.
+         AOT produces ordinary cubins. It costs a vendor toolchain AT RUN TIME (`ptxas`,
+         `fatbinary`), which the JIT path does not need.
+      3. `generic`, if an SSCP-capable acpp is already there (bundled in the wheel, or in the
          user cache): nothing to build, and one binary covers every architecture.
-      3. the device's ahead-of-time target when it only needs the cheap `minimal` profile —
+      4. the device's ahead-of-time target when it only needs the cheap `minimal` profile —
          i.e. the CPU/OpenMP case. Keeps a machine with no LLVM at all working out of the box.
-      4. `generic` otherwise: for a GPU the AOT path needs the very same `full` acpp build
+      5. `generic` otherwise: for a GPU the AOT path needs the very same `full` acpp build
          PLUS a vendor toolchain, so it is strictly the harder of the two.
     """
     if not device.acpp_reachable:
@@ -263,6 +276,17 @@ def _resolve_targets( device ) -> tuple:
     if override:
         profile = "minimal" if override.startswith( "omp" ) else "full"
         return override, profile, ( usable_backend_set( profile, backends ) or backends )
+
+    if _env_flag( "LOOM_GPU_AOT" ):
+        aot = device.acpp_aot_targets
+        if aot is None:
+            raise RuntimeError(
+                f"LOOM_GPU_AOT is set but { device } has no ahead-of-time target to offer "
+                "(`acpp_aot_targets` is None). Unset it, or name the target yourself with "
+                "SDOT_ACPP_TARGET."
+            )
+        profile = device.acpp_aot_profile or "full"
+        return aot, profile, ( usable_backend_set( profile, backends ) or backends )
 
     generic_backends = usable_backend_set( "full", backends )
     if generic_backends is not None:

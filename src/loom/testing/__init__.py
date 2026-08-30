@@ -139,6 +139,38 @@ def _normalize_tags( tags ):
     return list( tags )
 
 
+def driver_is( name ):
+    """Le driver de CETTE exécution est-il `name` ( "jax", "torch", ... ) ?
+
+    À mettre EN TÊTE d'un fichier qui importe un backend précis, avant l'import :
+
+        from loom.testing import driver_is
+        if not driver_is( "torch" ):
+            sys.exit( 0 )
+        import torch
+
+    Pourquoi un `sys.exit` et pas un `if` autour du fichier : la découverte des entrées IMPORTE
+    chaque fichier candidat, donc un `import torch` en tête s'exécute même quand on tourne sous
+    jax -- et sur une machine où torch est cassé (chez `lmo`, `libcusparseLt.so.0`), c'est toute
+    la session qui tombe, pas seulement ce fichier. Sortir tôt est la seule chose qui empêche
+    l'import d'avoir lieu.
+
+    La réponse vient de `SDOT_DRIVER`, posé par le CLI. À défaut -- fichier lancé à la main -- on
+    relit l'env par défaut de `.envs.py` ; et si même ça échoue, on répond OUI, parce que faire
+    disparaître des tests en silence est pire que de laisser un import échouer bruyamment.
+    """
+    import os
+    driver = os.environ.get( "SDOT_DRIVER" )
+    if not driver:
+        try:
+            from loom.cli import envs
+            cfg = envs.get_env()
+            driver = cfg.driver if cfg else None
+        except Exception:
+            driver = None
+    return driver is None or driver == name
+
+
 def test( name, tags = None, /, **params: Param ):
     """Register a test (collect) or return its parsed Args if selected (run).
 

@@ -1,3 +1,4 @@
+import os
 import weakref
 
 from .CallArg import CallArg
@@ -204,7 +205,31 @@ class CallArg_Tensor( CallArg ):
         carries a batch axis) is written once per item -- no seed; and with no batch there is no
         accumulation at all. `fill_with( queue, 0 )` goes through the queue, so it is ordered before
         the body's kernel. Unbound (NoneTensor/ZeroTensor) and integer/int scratch have nothing to seed."""
-        if not ( self.io_category.is_bound and self.io_category.is_output and self.dtype.floating_point ):
+        if not ( self.io_category.is_bound and self.io_category.is_output ):
+            return ""
+
+        # `LOOM_ZERO_OUTPUTS=1` : mettre à zéro TOUTE sortie, sur toute sa capacité, avant le corps.
+        #
+        # Une expérience, et une expérience qu'on peut éteindre. Un tampon de sortie que le corps
+        # n'écrit QUE PARTIELLEMENT laisse le reste tel que l'allocateur l'a rendu -- et sur GPU ce
+        # n'est pas zéro. `compute-sanitizer --tool initcheck` en compte ~24000 par passe de la
+        # suite. Les cas où ça se produit ici : une boucle striée `for i = thread_index; i < n;
+        # i += nb_threads` ne touche rien quand `thread_index >= n`, donc les tampons de ce
+        # work-item (dont `is_fully_bounded`) restent vierges ; et un scratch déclaré en sortie que
+        # le forward n'écrit jamais (`grad_vp`) l'est en entier.
+        #
+        # Ce n'est PAS gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur : on
+        # mesure d'abord si ça règle le problème, on décide ensuite quoi garder.
+        if os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower() in ( "1", "true", "yes", "on" ):
+            return f"{ owner_name }.{ self.name }.fill_with( queue, 0 );"
+
+        # Le cas déjà couvert : une sortie flottante PARTAGÉE d'un appel batché. Elle ne porte aucun
+        # axe de batch alors que l'appel en a, donc chaque item écrit le MÊME tampon : le kernel y
+        # accumule (le gradient de points d'un `ProjectedSumOfDiracs`, ajouté atomiquement par chaque
+        # angle) et il doit partir de zéro. Une sortie PAR ITEM est écrite une fois par item -- rien
+        # à semer ; et sans batch il n'y a pas d'accumulation du tout. `fill_with( queue, 0 )` passe
+        # par la queue, donc il est ordonné avant le kernel du corps.
+        if not self.dtype.floating_point:
             return ""
         if not self._call_batch_axes or any( b in self.axis_names for b in self._call_batch_axes ):
             return ""

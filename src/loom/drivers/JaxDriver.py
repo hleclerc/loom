@@ -20,6 +20,7 @@ from .JaxFfi import call_body, call as ffi_call
 # import numpy
 # import re
 
+import os
 import jax.core as jax_core
 import jax.numpy as jnp
 import jax
@@ -365,6 +366,15 @@ class JaxDriver:
 
             if not overflows:
                 return
+
+            # `SDOT_DEBUG_CAPACITY=1` : ce que le kernel a VRAIMENT demandé, tour par tour. Une
+            # capacité qui double sans fin est le symptôme d'un `wanted` qui n'arrive pas (buffer
+            # d'erreurs mal remis à zéro, lecture non synchronisée) plutôt que d'une cellule qui
+            # grandirait -- et seul ce journal fait la différence entre les deux.
+            if os.environ.get( "SDOT_DEBUG_CAPACITY" ):
+                print( f"[capacity] { code.name }: " + ", ".join(
+                    f"{ path } voulu={ wanted } capacite={ capacity }" for path, wanted, capacity in overflows ),
+                    flush = True )
 
             for path, wanted, capacity in overflows:
                 output_capacities[ path ] = max( wanted, 2 * capacity )

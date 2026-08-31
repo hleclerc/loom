@@ -98,16 +98,77 @@ class Driver:
         return cmd
 
 
+def _sh(argv: list[str]) -> str:
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+def micromamba_root_prefix() -> str | None:
+    """Where `micromamba -n <name>` should look, independent of how we were started.
+
+    `MAMBA_ROOT_PREFIX` when the caller has it (an activated shell, CI that sets it);
+    otherwise the conventional locations, in the order the shell hook itself uses them.
+    `None` means "say nothing" -- micromamba's own default then applies, which is the
+    behaviour this function replaced.
+    """
+    env_root = os.environ.get("MAMBA_ROOT_PREFIX")
+    if env_root:
+        return env_root
+    for candidate in (Path.home() / ".mamba", Path.home() / "micromamba"):
+        if (candidate / "envs").is_dir():
+            return str(candidate)
+    return None
+
+
+def run_shell(cmd: str, remote: "Remote | None" = None, quiet: bool = False) -> int:
+    """Run a PROVISIONING command: a shell string, here or on `remote`'s host.
+
+    Deliberately not `resolve`/`compose`: those build a command to run INSIDE an
+    environment (every layer swapping in its own python), whereas CREATING that
+    environment has to run outside it. The only layer that still means anything is
+    `Remote`, and all it says is where.
+    """
+    out = subprocess.DEVNULL if quiet else None
+    if remote is None:
+        return subprocess.run(["sh", "-c", cmd], stdout=out, stderr=out).returncode
+    return subprocess.run(["ssh", remote.host, f"$SHELL -ic {shlex.quote(cmd)}"],
+                          stdout=out, stderr=out).returncode
+
+
 @dataclass
 class Micromamba:
+    """A micromamba environment, selected by name.
+
+    `python`/`channels`/`packages` say what `./run env create` BUILDS it with;
+    running in an already-created env needs none of them.
+    """
     name: str
+    python: str | None = None
+    channels: list[str] = field(default_factory=lambda: ["conda-forge"])
+    packages: list[str] = field(default_factory=list)
+
+    def describe(self) -> str:
+        return f"micromamba env '{self.name}'"
+
+    def _argv(self, ctx: Context) -> list[str]:
+        """`micromamba`, pinned to the root prefix `-n <name>` must resolve against.
+
+        Not pinning it is a real trap: the shell hook exports MAMBA_ROOT_PREFIX from
+        ~/.zshrc, which only INTERACTIVE shells read. Started from `make`, from cron or
+        from any plain subprocess, micromamba instead falls back to the envs dir beside
+        its own binary (a Homebrew Cellar path, wiped on every upgrade) -- so `-n vfs`
+        silently names a DIFFERENT env than the same command typed by hand, and reports
+        it as "prefix does not exist". Resolving it here makes `./run` behave the same
+        however it was started. Remote is left alone on purpose: `Remote.run` goes
+        through `$SHELL -ic`, an interactive shell, which reads the hook itself.
+        """
+        root = None if ctx.remote else micromamba_root_prefix()
+        return ["micromamba"] + (["--root-prefix", root] if root else [])
 
     def wrap(self, cmd: Command, ctx: Context) -> Command:
         # These are local-only shortcuts (checking *this* process's env/PATH) —
         # meaningless once ctx.remote, since the remote shell's state is
         # invisible from here. Remote just always wraps; a missing micromamba
-        # over there surfaces as a normal command failure (proper availability
-        # checking is future work, see is_available()/install()).
+        # over there surfaces as a normal command failure.
         if not ctx.remote:
             if self.name in os.environ.get("CONDA_DEFAULT_ENV", ""):
                 return cmd
@@ -116,7 +177,18 @@ class Micromamba:
         # Use the env's own `python` on PATH rather than whatever interpreter
         # came in as argv[0] — matches Apptainer/Venv: each python-selecting
         # layer picks its own interpreter, overriding the incoming default.
-        return Command(["micromamba", "-n", self.name, "run", "python", *cmd.argv[1:]], cmd.env)
+        return Command([*self._argv(ctx), "-n", self.name, "run", "python", *cmd.argv[1:]], cmd.env)
+
+    def probe_shell(self, ctx: Context) -> str:
+        """Exits 0 iff the env exists and can be run in."""
+        return _sh([*self._argv(ctx), "-n", self.name, "run", "true"])
+
+    def create_shell(self, ctx: Context) -> str:
+        # `pip` explicitly: the editable installs `./run install` does next need it, and a
+        # bare `python` spec does not always pull it in.
+        spec = [f"python={self.python}" if self.python else "python", "pip", *self.packages]
+        chans = [f for c in self.channels for f in ("-c", c)]
+        return _sh([*self._argv(ctx), "create", "-y", "-n", self.name, *chans, *spec])
 
 
 @dataclass

@@ -919,6 +919,9 @@ def cmd_build_sif(args):
 
 
 def cmd_env(args):
+    if getattr(args, "env_action", "list") == "create":
+        return _cmd_env_create(args)
+
     from . import envs
     all_envs = envs.load_envs()
 
@@ -949,6 +952,42 @@ def cmd_env(args):
     drivers = sorted({e.driver for e in all_envs.values() if e.driver})
     print(_dim(f"\n  Select with: --env <name>  (or --driver <{', '.join(drivers)}>)"))
     return 0
+
+
+def _cmd_env_create(args):
+    """`./run env create` : fabrique ce que l'env DÉCLARE et qui n'est pas encore là.
+
+    Une couche sait se sonder (`probe_shell`) et se créer (`create_shell`) ou ne sait pas :
+    une qui ne sait pas est simplement ignorée, sans branche par type ici. `Apptainer` est
+    volontairement de celles-là -- son image se construit avec `./run build-sif`, qui a ses
+    propres options (--fakeroot, scratch) et n'a rien à faire dans une boucle générique.
+    """
+    from . import envs
+    env_cfg = envs.get_env(name=args.env, driver=args.driver)
+    if env_cfg is None:
+        print(_err("env create: aucun environnement de ce nom (voir `./run env`)"))
+        return 1
+
+    remote = envs.remote_of(env_cfg)
+    ctx = layers.Context(root=Path(remote.remote_dir) if remote else ROOT, remote=bool(remote))
+    todo = [l for l in env_cfg.seq if hasattr(l, "create_shell")]
+    if not todo:
+        print(_dim(f"  '{env_cfg.name}' : rien à créer"))
+        return 0
+
+    rc = 0
+    for layer in todo:
+        what = layer.describe()
+        if layers.run_shell(layer.probe_shell(ctx), remote, quiet=True) == 0:
+            print(_dim(f"  {what} : déjà présent"))
+            continue
+        print(_hdr(f"\ncréation: {what}"))
+        if layers.run_shell(layer.create_shell(ctx), remote) != 0:
+            print(_err(f"  échec: {what}"))
+            rc = 1
+    if rc == 0:
+        print(_dim("\n  puis: ./run install"))
+    return rc
 
 
 def cmd_install(args):
@@ -1051,7 +1090,8 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
     p_sif.add_argument("--fakeroot", action="store_true", help="Use --fakeroot for apptainer build")
     p_sif.add_argument("--scratch-dir", help="Scratch directory (APPTAINER_TMPDIR / APPTAINER_CACHEDIR)")
     p_env = sub.add_parser("env", help="Environment management")
-    p_env.add_argument("env_action", nargs="?", default="list", choices=["list"])
+    p_env.add_argument("env_action", nargs="?", default="list", choices=["list", "create"])
+    add_shared(p_env)
 
     # Two-pass for dynamic params
     known, remaining = parser.parse_known_args(argv)

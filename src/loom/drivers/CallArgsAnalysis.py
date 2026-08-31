@@ -11,6 +11,12 @@ from .CallArg import CallArg
 _FFI_PREFIX = "ffi_"
 
 
+def batch_attr_name( axis_name ):
+    """The FFI attribute carrying a batch axis's item count. Shared with `JaxFfi._render_call`,
+    which declares it, and `batch_dim_expr`, which reads it."""
+    return f"nb_batch_{ axis_name }"
+
+
 class CallArgsAnalysis:
     """Lower the kwargs of `driver.call` into a tree of `CallArg`.
 
@@ -225,15 +231,38 @@ class CallArgsAnalysis:
 
         return res
 
+    def batch_axis_size( self, axis_name ):
+        """How many ITEMS a batch axis holds, read HOST-side off a lowering node's LOGICAL shape.
+
+        Never off a buffer's leading dimension. The physical layout flattens that dimension and
+        PADS it to the device's batch alignment, so the buffer is routinely longer than the batch
+        -- 32 slots for 20 cells. A batch extent is a COUNT, and a padded capacity is precisely
+        what a count is not. The logical shapes all agree on the count (they are what this call
+        allocated from), so any carrier answers the same thing."""
+        for node in self.tensors:
+            names = getattr( node, "axis_names", None ) or []
+            if axis_name in names and len( names ) == len( node.shape ):
+                return int( node.shape[ names.index( axis_name ) ] )
+        raise ValueError( f"no lowering node carries the batch axis '{ axis_name }'" )
+
     def batch_dim_expr( self, axis_name ):
-        """Where the size of a batch axis is READ at run time: an extent of the first buffer that
-        carries it. Like any extent, it is not a literal in the source -- one compiled kernel has
-        to serve every batch size."""
-        for tensor in self.tensors:
-            expr = tensor.batch_dim_expr( axis_name )
+        """Where the extent of `axis_name` is read in the generated C++.
+
+        A BATCH axis is a count like any other, so it crosses like any other simple host-known
+        count: BY VALUE, as an FFI attribute (see `CallArg_ShapeVar.as_scalar` for the rule, and
+        `_render_call` for where the attribute is declared). Not read off a buffer -- that leading
+        dimension is a padded capacity, and iterating over it walked past the end of the count
+        buffer, whose garbage then bounded a loop over the geometry. Not a literal either: that
+        would recompile the library for every batch size.
+
+        Any other axis still answers with a run-time extent off the first buffer carrying it."""
+        if axis_name in self.batch_axes:
+            return f"SI( { batch_attr_name( axis_name ) } )"
+        for node in self.tensors:
+            expr = node.batch_dim_expr( axis_name )
             if expr is not None:
                 return expr
-        raise ValueError( f"no buffer carries the batch axis '{ axis_name }'" )
+        raise ValueError( f"no buffer carries the axis '{ axis_name }'" )
 
     @staticmethod
     def _attribute_at( args, path ):

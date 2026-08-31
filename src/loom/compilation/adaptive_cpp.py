@@ -887,6 +887,23 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
         f"--acpp-targets={ targets }",
         "-std=c++20", "-O2",
         "-fPIC", "-shared",
+        # Chaque bibliotheque generee embarque SA copie de la glue AdaptiveCpp (le lanceur SSCP,
+        # les instanciations de `handler`), exportee en symbole FAIBLE. Comme on les charge en
+        # RTLD_GLOBAL (voir `JaxFfi.py`, ou c'est indispensable au module JIT), ces copies se
+        # fusionnent : le handler d'une bibliotheque appelle alors le lanceur d'une AUTRE, avec la
+        # table de code objects de cette autre -- on lance un kernel qui n'est pas le sien, avec
+        # nos arguments, d'ou un acces a une adresse arbitraire. `-Bsymbolic` lie chaque reference
+        # INTERNE a la definition locale, tout en continuant d'EXPORTER (RTLD_GLOBAL garde son
+        # effet). Symptome sans ce flag : `CUDA_ERROR_ILLEGAL_ADDRESS` dependant de l'ordre de
+        # chargement, donc de la suite de tests jouee avant.
+        # ELF SEULEMENT : `-Bsymbolic` est un flag GNU ld / lld, et `ld64` le refuse
+        # (`ld: unknown options: -Bsymbolic`). Il n'y sert de toute facon a rien : macOS lie
+        # en two-level namespace, ou les references internes d'une dylib designent deja ses
+        # propres definitions -- la fusion decrite ci-dessus est un comportement ELF.
+        *( [] if sys.platform == "darwin" else [ "-Wl,-Bsymbolic" ] ),
+        # `LOOM_LINEINFO=1` : garde les numeros de ligne dans le device code, pour que
+        # `compute-sanitizer` designe la ligne fautive au lieu d'un offset dans le symbole.
+        *( [ "-g" ] if os.environ.get( "LOOM_LINEINFO" ) else [] ),
         "-I", cpp_include_root(),
         *extra_includes,
         *omp_flags,

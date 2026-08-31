@@ -19,6 +19,7 @@ by XLA). Real argument/output binding — driven by `CallArgsAnalysis` / `IoCate
 the separate backward handler for `custom_vjp` come next.
 """
 from __future__ import annotations
+import os
 
 import ctypes
 import sys
@@ -169,7 +170,9 @@ using namespace sdot;
 // pulls in its own generated macros), then whatever the body listed for itself.
 {extra_includes}
 
+{stream_decls}
 static ffi::Error sdot_ffi_impl( {params} ) {{
+{stream_sync}
     // the one execution context of this call. A `sycl::queue` is expensive to create, and this
     // handler always runs on the same device (the device is in the TYPE of everything below), so
     // there is exactly one, made on first use -- and never destroyed: the SYCL runtime is torn
@@ -199,7 +202,12 @@ def _batch_indices_decl( ca ):
 
     Unmapped, `CartesianIndices<Tuple<>>` -- one item, the empty multi-index. A `vmap` gives it a
     NAMED axis, whose extent is read from a buffer at run time (a batch size is an extent like any
-    other: making it a literal would recompile the kernel for every batch size)."""
+    other: making it a literal would recompile the kernel for every batch size).
+
+    That extent crosses BY VALUE, as an FFI attribute -- see `CallArgsAnalysis.batch_dim_expr`.
+    Reading it off a buffer is what this used to do, and it was wrong: a leading dimension is a
+    padded CAPACITY, so the body iterated over 32 slots for 20 cells, read the count buffer past
+    its end, and let the garbage bound a loop over the geometry."""
     if not ca.batch_axes:
         return "    CartesianIndices<Tuple<>> global_batch_indices;"
     shape = ", ".join( "SI" for _ in ca.batch_axes )
@@ -230,7 +238,15 @@ def _render_call( code, ca, device ):
     # cross as XLA FFI ATTRIBUTES: baked into the call, not into the kernel, so a new value does
     # not mean a new compilation. (Extents need no attribute at all: XLA carries them next to the
     # data.) Gathered by folding the node tree, each node answering for itself.
+    # importé ici et non en tête : `JaxFfi` <-> `CallArgsAnalysis` se tiennent mutuellement
+    # (voir l'import de `CallArgsAnalysis` plus bas, déjà local pour la même raison).
+    from .CallArgsAnalysis import batch_attr_name
+
     attrs = [ a for n in ca.nodes() if hasattr( n, "jax_attrs" ) for a in n.jax_attrs() ]
+    # l'extent de chaque axe de batch, PAR VALEUR : un compte simple, de rang 0, en lecture seule
+    # et connu de l'hôte -- exactement ce que `CallArg_ShapeVar.as_scalar` fait traverser en
+    # attribut. Un axe de batch n'est pas un cas à part sur ce point.
+    attrs += [ ( batch_attr_name( n ), "int64_t", ca.batch_axis_size( n ) ) for n in ca.batch_axes ]
 
     # the headers the arguments ask for (an aggregate names its struct header), then whatever the
     # body itself listed. Collected blind: the call never knows which node brought a header, nor
@@ -242,11 +258,40 @@ def _render_call( code, ca, device ):
 
     # XLA FFI binds in this order, and the handler's parameters must follow it: args, results,
     # then attributes.
-    params = [ f"{ b.jax_ffi_type() } { b.ffi_name }" for b in inputs ]
+    # `LOOM_XLA_STREAM_SYNC=1` : recevoir le FLUX de XLA et l'attendre avant de commencer.
+    #
+    # Ce handler lance son travail sur SA PROPRE queue SYCL, que XLA ne connaît pas. Il attend bien
+    # la sienne avant de rendre la main (`QueueEvent` est RAII), mais rien ne l'ordonne par rapport
+    # à celle de XLA : quand on démarre, XLA peut ENCORE ÊTRE EN TRAIN de produire nos entrées, et
+    # dès qu'on rend la main il peut recycler la mémoire de nos sorties. Un `cudaStreamSynchronize`
+    # à l'entrée referme la première moitié de la fenêtre.
+    #
+    # Les types CUDA sont déclarés à la main plutôt qu'inclus : l'image non-AOT retire le toolkit,
+    # donc `cuda_runtime.h` n'y existe pas. `cudaStream_t` EST `struct CUstream_st *`.
+    #
+    # Ce n'est qu'une EXPÉRIENCE : la vraie correction serait de bâtir la queue SYCL SUR le flux de
+    # XLA, pas de synchroniser en gros.
+    want_stream = ( getattr( device, "is_cuda_gpu", False )
+                    and os.environ.get( "LOOM_XLA_STREAM_SYNC", "" ).strip().lower() in ( "1", "true", "yes", "on" ) )
+    # L'en-tête s'il existe, une déclaration à la main sinon. Les deux cas se produisent : l'image
+    # AOT garde le toolkit CUDA (clang inclut alors `cuda_runtime.h` tout seul, et une déclaration
+    # concurrente en `int` entre en CONFLIT avec le vrai `cudaError_t`), l'image JIT ne le garde pas.
+    stream_decls = ( "#if __has_include( <cuda_runtime.h> )\n"
+                     "#  include <cuda_runtime.h>\n"
+                     "#else\n"
+                     "   typedef struct CUstream_st *cudaStream_t;\n"
+                     "   extern \"C\" int cudaStreamSynchronize( cudaStream_t );\n"
+                     "#endif\n" ) if want_stream else ""
+    stream_sync = ( "    // voir `LOOM_XLA_STREAM_SYNC` : nos entrées peuvent encore être en cours d'écriture\n"
+                    "    cudaStreamSynchronize( xla_stream );\n" ) if want_stream else ""
+
+    params = [ "cudaStream_t xla_stream" ] if want_stream else []
+    params += [ f"{ b.jax_ffi_type() } { b.ffi_name }" for b in inputs ]
     params += [ f"ffi::Result<{ b.jax_ffi_type() }> { b.ffi_name }" for b in outputs ]
     params += [ f"{ cpp_type } { name }" for name, cpp_type, _ in attrs ]
 
-    binds = "".join( f"\n        .Arg<{ b.jax_ffi_type() }>()" for b in inputs )
+    binds = "\n        .Ctx<ffi::PlatformStream<cudaStream_t>>()" if want_stream else ""
+    binds += "".join( f"\n        .Arg<{ b.jax_ffi_type() }>()" for b in inputs )
     binds += "".join( f"\n        .Ret<{ b.jax_ffi_type() }>()" for b in outputs )
     binds += "".join( f'\n        .Attr<{ cpp_type }>( "{ name }" )' for name, cpp_type, _ in attrs )
 
@@ -259,6 +304,8 @@ def _render_call( code, ca, device ):
 
     from ..tensor.AbstractAxis import AbstractAxis
     source = _CALL_TEMPLATE.format(
+        stream_decls  = stream_decls,
+        stream_sync   = stream_sync,
         queue_type    = device.cpp_queue_type,
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'

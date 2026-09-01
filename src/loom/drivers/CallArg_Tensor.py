@@ -208,19 +208,25 @@ class CallArg_Tensor( CallArg ):
         if not ( self.io_category.is_bound and self.io_category.is_output ):
             return ""
 
-        # `LOOM_ZERO_OUTPUTS=1` : mettre à zéro TOUTE sortie, sur toute sa capacité, avant le corps.
+        # Toute sortie part à ZÉRO, sur toute sa CAPACITÉ, avant le corps.
         #
-        # Une expérience, et une expérience qu'on peut éteindre. Un tampon de sortie que le corps
-        # n'écrit QUE PARTIELLEMENT laisse le reste tel que l'allocateur l'a rendu -- et sur GPU ce
-        # n'est pas zéro. `compute-sanitizer --tool initcheck` en compte ~24000 par passe de la
-        # suite. Les cas où ça se produit ici : une boucle striée `for i = thread_index; i < n;
-        # i += nb_threads` ne touche rien quand `thread_index >= n`, donc les tampons de ce
-        # work-item (dont `is_fully_bounded`) restent vierges ; et un scratch déclaré en sortie que
-        # le forward n'écrit jamais (`grad_vp`) l'est en entier.
+        # Un tampon de sortie que le corps n'écrit que PARTIELLEMENT laisse le reste tel que
+        # l'allocateur l'a rendu -- et sur GPU ce n'est pas zéro. Deux façons d'en arriver là, et la
+        # seconde est la règle, pas l'exception :
+        #  * une boucle striée `for i = thread_index; i < n; i += nb_threads` ne touche rien quand
+        #    `thread_index >= n`, ni un scratch déclaré en sortie que le forward n'écrit jamais ;
+        #  * surtout, la dimension de BATCH est allouée à la capacité alignée (16 emplacements pour
+        #    4 items), et le corps ne parcourt que le COMPTE -- depuis que la boucle se borne au
+        #    compte et non plus à cette capacité (voir `CallArgsAnalysis.batch_dim_expr`), la queue
+        #    rembourrée n'est plus écrite du tout.
         #
-        # Ce n'est PAS gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur : on
-        # mesure d'abord si ça règle le problème, on décide ensuite quoi garder.
-        if os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower() in ( "1", "true", "yes", "on" ):
+        # Ce que lit ensuite quelqu'un qui parcourt la capacité est alors indéterminé, et un COMPTE
+        # indéterminé y borne une boucle : un accès des gigaoctets hors de toute allocation. Semer
+        # rend cela inoffensif sans rien exiger des lecteurs.
+        #
+        # Ce n'est pas gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur, qui
+        # sert maintenant à MESURER ce que coûte le semis, pas à décider s'il a lieu.
+        if os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower() not in ( "0", "false", "no", "off" ):
             return f"{ owner_name }.{ self.name }.fill_with( queue, 0 );"
 
         # Le cas déjà couvert : une sortie flottante PARTAGÉE d'un appel batché. Elle ne porte aucun

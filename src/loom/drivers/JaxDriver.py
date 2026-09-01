@@ -228,9 +228,18 @@ class JaxDriver:
         a residual and gets stored once per iteration."""
         return jax.lax.scan( lambda carry, x: ( body( carry, x ), None ), init, xs )[ 0 ]
 
-    def random( self, shape, dtype = None ):
-        seed = getattr( self, "_rng_seed", 0 )
-        self._rng_seed = seed + 1
+    def random( self, shape, dtype = None, seed = None ):
+        """Un tirage uniforme. `seed = None` prend le suivant d'un COMPTEUR de process, de sorte
+        que deux tirages consécutifs diffèrent ; un `seed` explicite le court-circuite.
+
+        Pourquoi le compteur ne suffit pas : il avance à chaque tirage du process, donc ce qu'un
+        test tire dépend de COMBIEN de tirages les tests d'avant ont faits. Un test peut alors
+        passer seul et échouer dans la suite (ou l'inverse) sans que rien n'ait changé chez lui --
+        et c'est arrivé, voir `check_grad`. Un appelant qui veut être reproductible passe son seed.
+        """
+        if seed is None:
+            seed = getattr( self, "_rng_seed", 0 )
+            self._rng_seed = seed + 1
         dtype_ver = Dtype.factory( dtype or self.ftype ).driver_version
         return jax.random.uniform( jax.random.PRNGKey( seed ), tuple( shape ), dtype = dtype_ver )
 

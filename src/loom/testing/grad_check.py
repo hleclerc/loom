@@ -26,12 +26,27 @@ def _raw( x ):
     return x.raw if isinstance( x, Tensor ) else x
 
 
-def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4 ):
+def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
     """Vérifie la dérivée de `f` par différence finie.
 
     `f` prend un ou plusieurs `Tensor` (ou tenseurs bruts du driver) et renvoie un `Tensor`
     (ou un tenseur brut). Lève une `AssertionError` si l'adjoint et la différence finie
     s'écartent de plus de `atol + rtol * |num|`. Renvoie le couple ( adjoint, diff. finie ).
+
+    `seed` fixe les projections aléatoires (la cotangente `w` et les tangentes `vs`). Sans lui
+    elles viennent du compteur de process de `driver.random`, donc de COMBIEN de tirages les
+    tests d'avant ont faits : un même test tire alors des directions différentes selon qu'il est
+    lancé seul ou dans la suite, et un contrôle dont l'erreur dépend de la direction peut passer
+    d'un côté et échouer de l'autre. Le passer rend le test reproductible.
+
+    ATTENTION à la FORME de la tolérance. `atol + rtol * |num|` suppose que l'erreur de la
+    différence finie est proportionnelle à ce qu'on mesure. C'est vrai quand elle vient de la
+    troncature ou de l'arrondi ; ça ne l'est PAS quand `f` a de petites discontinuités (une
+    quadrature adaptative par la valeur, une subdivision qui bascule) : l'écart est alors un SAUT
+    DIVISÉ PAR `2 eps`, une quantité ABSOLUE, indépendante de la projection tirée. Comme `num`
+    est le produit de la jacobienne par une direction aléatoire, il peut être petit là où le saut
+    ne l'est pas -- et c'est `atol`, pas `rtol`, qui doit alors porter le plancher. Voir
+    `test_PowerDiagram::the_subdivided_quadrature_derives_right`.
     """
     # La différence finie centrée amplifie le bruit d'arrondi (~machine_eps / eps) : en FP32
     # (machine_eps ~1.2e-7) avec eps=1e-4 ça reste marginal, mais suffisant pour noyer un vrai
@@ -58,8 +73,9 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4 ):
         out, pullback = driver.vjp( out_f, *primals )
 
         # cotangente aléatoire en sortie, tangentes aléatoires en entrée
-        w  = driver.random( out.shape )
-        vs = [ driver.random( p.shape ) for p in primals ]
+        w  = driver.random( out.shape, seed = seed )
+        vs = [ driver.random( p.shape, seed = None if seed is None else seed + 1 + i )
+               for i, p in enumerate( primals ) ]
 
         # adjoint : < vjp(w), v >, sommé sur les entrées
         grads = pullback( w )

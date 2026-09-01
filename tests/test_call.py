@@ -461,7 +461,12 @@ if test( "capacity_overflow" ):
     cell = cell_of( 3, 2 )
     assert cell.nb_vertices.value == 3
     assert cell.vertex_positions.capacity == ( 4, 2 )
-    assert [ row[ 0 ] for row in cell.vertex_positions.raw.tolist() ] == [ 0, 1, 2, 0 ]
+    # les 3 que le kernel a ECRITS, et rien de plus : la 4e case est allouee mais jamais ecrite,
+    # et un tampon de sortie est FRAIS, pas remis a zero (seul un output PARTAGE d'un appel batche
+    # est semé, cf. `CallArg_Tensor.cpp_seed_member`). L'affirmer valait 0 marchait tant que
+    # l'allocateur rendait des pages deja nulles -- donc au gre de ce qui avait tourne avant :
+    # ici on lit 1e-323, ailleurs 6.5e-310.
+    assert [ row[ 0 ] for row in cell.vertex_positions.raw.tolist() ][ :3 ] == [ 0, 1, 2 ]
 
     # 5 into a buffer of 1 -> `max( 5, 2 * 1 ) = 5`: this time it is the count that decides.
     cell = cell_of( 5, 1 )

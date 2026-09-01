@@ -904,6 +904,10 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
         # `LOOM_LINEINFO=1` : garde les numeros de ligne dans le device code, pour que
         # `compute-sanitizer` designe la ligne fautive au lieu d'un offset dans le symbole.
         *( [ "-g" ] if os.environ.get( "LOOM_LINEINFO" ) else [] ),
+        # `LOOM_BOUNDS_CHECK=1` : arme la verification de bornes de `TensorView::squeeze` (voir
+        # `common_macros.h`). Un test par acces, donc reserve au diagnostic -- mais deterministe,
+        # la ou `compute-sanitizer` est lent et fait disparaitre les bugs de course.
+        *( [ "-DLOOM_BOUNDS_CHECK" ] if os.environ.get( "LOOM_BOUNDS_CHECK" ) else [] ),
         "-I", cpp_include_root(),
         *extra_includes,
         *omp_flags,

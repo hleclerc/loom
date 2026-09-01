@@ -57,3 +57,23 @@ namespace sdot { namespace detail {
 #define HAS_STATIC_VALUE( expr )   ::sdot::detail::has_static_value<DECAYED_TYPE_OF( expr )>::value
 #define IS_DETECTED( Op, ... )     ::sdot::detail::is_detected<Op,__VA_ARGS__>::value
 #define HAS_CT_RANK( T )           ::sdot::detail::has_ct_rank<T>::value
+
+// ---- verification de bornes, OPTIONNELLE (`-DLOOM_BOUNDS_CHECK`) -------------------------------
+//
+// `TensorView::squeeze` est le point de passage UNIQUE de toute indexation : y borner l'indice
+// attrape n'importe quel depassement, dans n'importe quel kernel, sans sanitizer.
+//
+// Pourquoi ce n'est pas toujours actif : c'est un test par acces, sur le chemin le plus chaud du
+// code. Pourquoi ca existe : un indice hors bornes ne fait PAS toujours fauter -- il tombe souvent
+// dans de la memoire mappee voisine, et le calcul continue faux, ou faute des minutes plus tard
+// dans un kernel innocent. `compute-sanitizer` le voit, mais il est lent et change assez le timing
+// pour faire disparaitre les bugs de course. Ce garde-fou, lui, est deterministe et nomme la ligne.
+//
+// Usage : `LOOM_BOUNDS_CHECK=1 ./run test ...` (voir `adaptive_cpp.py`).
+#ifdef LOOM_BOUNDS_CHECK
+#include <cassert>
+#define LOOM_CHECK_INDEX( index, extent ) \
+    assert( SI( index ) >= 0 && SI( index ) < SI( extent ) && "TensorView: indice hors bornes" )
+#else
+#define LOOM_CHECK_INDEX( index, extent ) ( (void) 0 )
+#endif

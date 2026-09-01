@@ -2,6 +2,7 @@
 
 // #include "../algorithms/apply_values.h"
 #include "../kernels/IoCategory.h" // UndefList/InpList/OutList/MutList
+#include "../common_macros.h" // IWYU pragma: export  (LOOM_CHECK_INDEX)
 #include "TensorView.h"
 #include "Range.h"
 
@@ -65,6 +66,7 @@ UTP auto DTP::squeeze( auto axis, auto index ) const {
         auto new_shape   = _shape.without_index( axis );
         auto new_strides = _strides.without_index( axis );
         auto new_names   = AxisNames{}.without_index( axis );
+        LOOM_CHECK_INDEX( index, _shape[ axis ] );
         SI   off         = _strides[ axis ] * index;         // offset en octets (Ct ou runtime -> SI)
         auto ptr         = DataPtr( ( _data + off ).template as<TF>(), _data.memory_space ); // typé, pour le ctor
         using R = TensorView<TF,DECAYED_TYPE_OF( new_shape ),MemorySpace,DECAYED_TYPE_OF( new_names ),DECAYED_TYPE_OF( new_strides )>;

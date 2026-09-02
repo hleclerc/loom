@@ -64,6 +64,17 @@ class CallArg_Tensor( CallArg ):
         # here -- so nothing assumes a single, or any, `AxisList`.
         self.axis_names = [ n for index, axis in enumerate( inst.axes ) for n in axis.cpp_dim_names( index ) ]
 
+        # Et, par dimension, l'extent que le TYPE peut porter : `None` quand il n'est connu qu'a
+        # l'execution, l'entier quand il est fige a la COMPILATION -- c'est-a-dire quand l'extent de
+        # l'axe ne depend que de `CtShapeVar`s (`RealTensor[ "num_vertex", "dim" ]` : `dim` oui,
+        # `num_vertex` non, sa capacite double en cours de route). Le lowering le repand alors dans
+        # le tuple de shape (`Ct<SI,2>` au lieu d'un `SI`), et `contiguous_strides` -- qui derive les
+        # strides du TYPE de la shape -- en tire un stride de LIGNE compile-time : `vertex_positions(
+        # v, d )` devient `base + v * 16 + d * 8` au lieu d'une multiplication par un `long long` lu
+        # en memoire. Une capacite, elle, ne DOIT pas y aller : elle changerait a chaque doublement,
+        # donc un noyau recompile a chaque fois.
+        self._dim_ct_extent = _ct_extents_of( inst )
+
         # the PHYSICAL layout this buffer has (input: the one it already carries) or should get
         # (output: chosen from the device's batch alignment + this dtype's itemsize). `self.shape`
         # stays the LOGICAL extents (what the kernel iterates); the layout adds the physical
@@ -124,6 +135,7 @@ class CallArg_Tensor( CallArg ):
         handed us)."""
         self.axis_names = [ name ] + self.axis_names
         self.shape = [ int( size ) ] + self.shape
+        self._dim_ct_extent = [ None ] + self._dim_ct_extent
         self._has_vmap = True   # the framework owns this leading dim -> stay contiguous (see `layout`)
 
     def batch_dim_expr( self, name ):
@@ -143,15 +155,24 @@ class CallArg_Tensor( CallArg ):
                  ( "u", 4 ): "std::uint32_t", ( "u", 8 ): "std::uint64_t" }[ ( dt.kind, dt.itemsize ) ]
 
     def cpp_shape_tuple( self ):
-        # the extents come from the BUFFER, not from `self.shape`: see `CallArg.jax_dim`.
-        return "tuple( " + ", ".join( self.jax_dim( d ) for d in range( len( self.shape ) ) ) + " )"
+        # the extents come from the BUFFER, not from `self.shape`: see `CallArg.jax_dim`. Except a
+        # COMPILE-TIME one, which comes from the type instead -- reading it back off the buffer would
+        # hand a `long long` to something the type already knows.
+        return "tuple( " + ", ".join( self._cpp_extent( d ) or self.jax_dim( d )
+                                      for d in range( len( self.shape ) ) ) + " )"
+
+    def _cpp_extent( self, d ):
+        """`Ct<SI,n>()` when dimension `d`'s extent is compile-time, else `None`."""
+        n = self._dim_ct_extent[ d ]
+        return None if n is None else f"Ct<SI, { n }>()"
 
     def cpp_logical_shape_tuple( self ):
         # the LOGICAL extents as literals -- used with a NON-contiguous layout, where the buffer's
         # physical dims (flattened/reordered) no longer match the logical axes, so `jax_dim` (which
         # reads the buffer) cannot serve them. Batch extents are prescribed and the rest are the
         # capacities this call allocates: all known at trace time.
-        return "tuple( " + ", ".join( f"SI( { int( e ) } )" for e in self.shape ) + " )"
+        return "tuple( " + ", ".join( self._cpp_extent( d ) or f"SI( { int( e ) } )"
+                                      for d, e in enumerate( self.shape ) ) + " )"
 
     def cpp_strides_tuple( self ):
         # the per-LOGICAL-axis BYTE strides of the physical layout (what `tensor_view`'s 4th arg wants).
@@ -162,8 +183,9 @@ class CallArg_Tensor( CallArg ):
 
     def cpp_shape_type( self ):
         # the *type* of the shape tuple: only the rank (extents are runtime `SI`s) -- a
-        # statically known extent would show up here as a `Ct<SI,n>`.
-        return "Tuple<" + ", ".join( "SI" for _ in self.shape ) + ">"
+        # statically known extent shows up here as a `Ct<SI,n>` -- see `_dim_ct_extent`.
+        return "Tuple<" + ", ".join( "SI" if n is None else f"Ct<SI, { n }>"
+                                     for n in self._dim_ct_extent ) + ">"
 
     def cpp_axis_names_type( self ):
         # `DEFINE_AXIS( num_vertex )` declares the type `_num_vertex` (and the value `num_vertex`).
@@ -282,3 +304,26 @@ class CallArg_Tensor( CallArg ):
         # hand the result tensor its physical layout too, so downstream ops read it back logically
         # (via the storage's gather). Identity passes `None` -> the plain contiguous default.
         self.inst.set_raw( array, layout = None if self.layout.is_identity else self.layout )
+
+
+def _ct_extents_of( inst ):
+    """Per DIMENSION of `inst`, the extent frozen at C++ compile time, or `None`.
+
+    An axis qualifies when its extent EXPRESSION (`hi - lo`, at step 1 -- a stepped window's size is
+    a ceiling division, which no affine is) involves nothing but `CtShapeVar`s: their values are
+    already baked into the generated source, so putting the extent in the type adds no key to the
+    compile cache. An `AxisList` (several dimensions from one declaration) is left alone: it has one
+    expression for several extents, and nothing here needs it yet.
+    """
+    from ..tensor.CtShapeVar import CtShapeVar
+    res = []
+    for index, axis in enumerate( inst.axes ):
+        names = axis.cpp_dim_names( index )
+        ct = None
+        if len( names ) == 1 and axis.step == 1:
+            symbols = ( axis.hi - axis.lo ).coeffs
+            if all( isinstance( s, CtShapeVar ) for s in symbols ):
+                n = axis.numeric_extent( lambda sv: None if sv.raw is None else int( sv.raw ) )
+                ct = None if n is None else int( n )
+        res += [ ct ] * len( names )
+    return res

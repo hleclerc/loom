@@ -21,6 +21,7 @@ from .JaxFfi import call_body, call as ffi_call
 # import re
 
 import os
+import numpy
 import jax.core as jax_core
 import jax.numpy as jnp
 import jax
@@ -154,8 +155,16 @@ class JaxDriver:
         dtype_ver = Dtype.factory( dtype or self.ftype ).driver_version
         if _has_tracer( data ):
             return jnp.asarray( data, dtype = dtype_ver )
-        # device = self.device.driver_version
-        return jnp.asarray( data, dtype = dtype_ver )
+        # a HOST value (no tracer in it): cast through plain NUMPY, not a jax op. `jax.jit` makes
+        # its dynamic trace the ambient one for the WHOLE lexical extent of the traced function, so
+        # any jax primitive called there -- `jnp.asarray` included -- comes back one of its
+        # tracers, even given a value that never depends on what is being traced (a domain closed
+        # over as a Python constant, say). That tracer is then unreadable from Python
+        # (`TracerArrayConversionError` on `np.asarray`), which a plain host constant should never
+        # be. Staying in numpy here means such a value stays host-readable wherever it is built,
+        # jit or not -- jax lifts a numpy constant into the trace itself, automatically, the moment
+        # some actual jax primitive consumes it.
+        return numpy.asarray( data, dtype = dtype_ver )
 
     # functional building blocks (tracer-safe, differentiable): used to assemble
     # padded buffers without in-place mutation, which does not fit Jax.

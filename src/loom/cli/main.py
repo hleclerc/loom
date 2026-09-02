@@ -293,6 +293,12 @@ def _refresh_rollups(hash_dir, env_name, dated=True):
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", "build", "dist", ".venv", "tmp",
     ".private", ".cache", "graphify-out",
+    # `.claude` porte l'état de l'outillage, pas des sources -- et depuis qu'il peut contenir des
+    # WORKTREES (`.claude/worktrees/<nom>`, une copie complète du dépôt par session d'agent), ne pas
+    # l'exclure ne fait pas que du bruit : la découverte y trouve un second `test_Cell.py`, un second
+    # `loom/`, et l'import échoue sur une dépendance qui n'existe que dans l'autre arbre. Symptôme
+    # observé : `./run test` rend « 0 test exécuté » sans rien dire de plus.
+    ".claude",
 }
 
 

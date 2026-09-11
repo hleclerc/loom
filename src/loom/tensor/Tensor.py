@@ -208,6 +208,18 @@ class Tensor( Attribute ):
     def is_defined( self ) -> bool:
         return self.storage.holds_value
 
+    # Combien d'octets separer entre deux items du LOT dans le tampon physique -- `0`, donc rien,
+    # tant qu'un tenseur ne le demande pas. Le demander vaut pour un tenseur que plusieurs
+    # work-items ecrivent EN MEME TEMPS : sans separation, deux items voisins partagent une ligne
+    # de cache et leurs ecritures s'invalident d'un coeur a l'autre (faux partage). Le mettre a la
+    # taille d'une ligne (64) donne a chaque item la sienne.
+    #
+    # Un reglage PAR TENSEUR et non une politique d'appareil, parce que ca se paie en memoire et
+    # que ca ne rapporte que sur les rares tenseurs concernes : mesure sur le PowerDiagram de
+    # `sdot`, ca vaut -21 % de `xsnp_hitm` et -1.4 % de temps a huit threads. Voir
+    # `PhysicalLayout.of`, qui borne en plus la depense.
+    item_alignment_bytes = 0
+
     def set( self, value ):
         if isinstance( value, Tensor ):
             # take the source's STORAGE whole: its kind rides along (a fill stays a fill, a symbolic

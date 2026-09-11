@@ -106,7 +106,8 @@ class CallArg_Tensor( CallArg ):
             # logical view). Only outputs choose a layout; inputs carry the one they already have.
             phys_num = self._device.physical_axis_num( self.axis_names ) if self._device else None
             return PhysicalLayout.of( self.shape, self._dim_is_batch,
-                                      self._alignment_bytes, self.itemsize, phys_num )
+                                      self._alignment_bytes, self.itemsize, phys_num,
+                                      getattr( self.inst, "item_alignment_bytes", 0 ) )
         if self.io_category.is_input:
             return self.inst.buffer_layout
         return PhysicalLayout.contiguous( self.shape )          # unbound -> NoneTensor, unused

@@ -249,12 +249,19 @@ def resolve_targets( device ) -> tuple:
          inspects real binaries — `compute-sanitizer` sees nothing, and a profiler sees little.
          AOT produces ordinary cubins. It costs a vendor toolchain AT RUN TIME (`ptxas`,
          `fatbinary`), which the JIT path does not need.
-      3. `generic`, if an SSCP-capable acpp is already there (bundled in the wheel, or in the
-         user cache): nothing to build, and one binary covers every architecture.
-      4. the device's ahead-of-time target when it only needs the cheap `minimal` profile —
-         i.e. the CPU/OpenMP case. Keeps a machine with no LLVM at all working out of the box.
-      5. `generic` otherwise: for a GPU the AOT path needs the very same `full` acpp build
-         PLUS a vendor toolchain, so it is strictly the harder of the two.
+      3. the device's ahead-of-time target when it only needs the cheap `minimal` profile —
+         i.e. the CPU/OpenMP case. It comes BEFORE `generic`, and the reason is a measurement
+         rather than a preference: under `generic` the kernel body goes through SSCP and is
+         JIT-compiled AT LAUNCH, for a generic host, so it sees neither the compilation flags nor
+         the machine it is about to run on. Compiled ahead of time instead, the very same kernel
+         is TWICE as fast (Xeon W-2145, 16 threads, FP64, 1e6 seeds in 2D, leaf = 10: 2.174 s
+         under `generic`, 1.041 s AOT at -O2, 0.951 s AOT at -O3 -march=native). It is also the
+         CHEAPER of the two to obtain -- `minimal` needs no LLVM at all -- so there was never a
+         trade-off here, only an order that happened to be wrong.
+      4. `generic` otherwise: for a GPU the AOT path needs the very same `full` acpp build PLUS a
+         vendor toolchain AT RUN TIME, so there it really is the harder of the two -- and a GPU
+         kernel is long enough that the JIT's blindness to the host costs it far less than it
+         costs a CPU one.
     """
     if not device.acpp_reachable:
         raise RuntimeError(
@@ -288,13 +295,17 @@ def _resolve_targets( device ) -> tuple:
         profile = device.acpp_aot_profile or "full"
         return aot, profile, ( usable_backend_set( profile, backends ) or backends )
 
-    generic_backends = usable_backend_set( "full", backends )
-    if generic_backends is not None:
-        return GENERIC_TARGET, "full", generic_backends
-
+    # AOT D'ABORD quand il ne coute QUE le profil `minimal` -- le cas CPU/OpenMP. Sous `generic`
+    # le corps du kernel part en SSCP et est JIT-compile AU LANCEMENT, pour un hote generique : il
+    # ne voit ni les flags de compilation ni la machine sur laquelle il va tourner, et ca vaut un
+    # FACTEUR DEUX sur CPU (voir la docstring). Un GPU, lui, garde `generic`.
     aot = device.acpp_aot_targets
     if aot is not None and device.acpp_aot_profile == "minimal":
         return aot, "minimal", backends
+
+    generic_backends = usable_backend_set( "full", backends )
+    if generic_backends is not None:
+        return GENERIC_TARGET, "full", generic_backends
 
     return GENERIC_TARGET, "full", backends
 
@@ -801,6 +812,39 @@ def _macos_omp_include_flags() -> list:
     )
 
 
+def _opt_flag( targets ) -> str:
+    """Le niveau d'optimisation, selon la CIBLE.
+
+    `-O3` sur la cible CPU (`omp`), ou le corps du kernel est compile ICI et ou il vaut 4 %
+    (Xeon W-2145, 16 threads, FP64, 1e6 germes en 2D, leaf = 10 : 1.018 s en `-O2`, 0.979 s en
+    `-O3`). `-O2` ailleurs : sous `generic` le corps part en SSCP et est JIT-compile au lancement,
+    donc ce flag-ci ne compile que la colle cote hote et n'a rien a gagner -- il ne ferait
+    qu'allonger une compilation deja longue.
+
+    Ce qui n'est PAS ici, et volontairement : `-march=native`. Mesure sur la meme cible, il ne
+    donne rien (1.036 s seul, 0.974 s avec `-O3`, contre 0.979 s pour `-O3` seul -- du bruit), et
+    il figerait l'architecture de la machine dans un `.so` que le cache rend au nom du seul `.cpp`
+    genere. Zero gain contre un piege : `SDOT_CXXFLAGS="-march=native"` reste la pour qui veut
+    reessayer sur une autre machine.
+    """
+    return "-O3" if str( targets ).startswith( "omp" ) else "-O2"
+
+
+def _env_cxxflags() -> list:
+    """`SDOT_CXXFLAGS`, decoupe en mots -- l'echappatoire pour essayer un reglage de compilation
+    sans toucher au code.
+
+    Ce qu'on veut essayer en pratique : `-march=native -O3` sur la cible CPU. Le defaut est le
+    x86-64 de base (pas d'AVX du tout), parce qu'un `.so` compile ici pourrait etre lu ailleurs --
+    mais sur une machine de banc c'est precisement la contrainte qu'on veut lever.
+
+    Ces mots-la n'entrent PAS dans le nom du `.so` (qui ne hashe que le .cpp genere, voir
+    `make_library`), donc changer ce reglage sur un build deja fait demande `SDOT_FORCE_BUILD=2`.
+    """
+    import shlex
+    return shlex.split( os.getenv( "SDOT_CXXFLAGS", "" ) )
+
+
 def make_executable( exe_name, src_paths, device, *, profile = None, extra_flags = None ):
     """Compile & link `src_paths` into an executable using the `acpp` driver.
 
@@ -828,11 +872,12 @@ def make_executable( exe_name, src_paths, device, *, profile = None, extra_flags
     cmd = [
         acpp,
         f"--acpp-targets={ targets }",
-        "-std=c++20", "-O2",
+        "-std=c++20", _opt_flag( targets ),
         "-I", cpp_include_root(),
         *extra_includes,
         *omp_flags,
         *( extra_flags or [] ),
+        *_env_cxxflags(),
         "-o", exe,
         *src_paths,
     ]
@@ -885,7 +930,7 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
     cmd = [
         acpp,
         f"--acpp-targets={ targets }",
-        "-std=c++20", "-O2",
+        "-std=c++20", _opt_flag( targets ),
         "-fPIC", "-shared",
         # Chaque bibliotheque generee embarque SA copie de la glue AdaptiveCpp (le lanceur SSCP,
         # les instanciations de `handler`), exportee en symbole FAIBLE. Comme on les charge en
@@ -912,6 +957,7 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
         *extra_includes,
         *omp_flags,
         *( extra_flags or [] ),
+        *_env_cxxflags(),
         "-o", lib,
         *src_paths,
     ]

@@ -674,34 +674,55 @@ def cmd_bench(args):
         print(_err(str(e)))
         return 1
 
-    if envs.remote_of(env_cfg):
-        overrides = envs.arg_overrides_to_env(args, seen_params)
-        env_vars = envs.build_env_vars(args)
-        env_vars.update(overrides)
-        pattern_arg = [args.pattern] if getattr(args, "pattern", None) else []
-        pull = _pull_dirs_for("bench", entries, env_name, overrides)
-        # see cmd_test's comment on SDOT_ENV_NAME vs "--env": passing --env
-        # here would make the remote side re-resolve the same Remote layer
-        # and try to ssh back out to itself.
-        env_vars["SDOT_ENV_NAME"] = env_name
-        # le driver traverse le saut ssh : la machine distante re-résout `.envs.py`
-        # SANS `--env` (pour ne pas re-ssh vers elle-même) et retomberait sinon sur
-        # l'env "default", qui n'est pas forcément le bon driver.
-        if env_cfg and env_cfg.driver:
-            env_vars["SDOT_DRIVER"] = env_cfg.driver
-        return run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull)
-
-    # see cmd_test's comment on SDOT_ENV_NAME vs re-printing this banner
-    if not os.environ.get("SDOT_ENV_NAME"):
-        _env_banner(seq)
-    if seen_params:
-        os.environ.update(envs.arg_overrides_to_env(args, seen_params))
-
     if not entries:
         print(_err(f"No bench matched '{args.pattern}'" if getattr(args, "pattern", None) else "No bench found"))
         return 1
 
-    failures = _run_entries("bench", entries, file_modules, env_name)
+    # le SWEEP, comme pour `experiment` (voir `_expand_param_combos`) : `--leaf-size=12,30` lance
+    # une fois par combinaison, chacune dans son propre `param_hash`. Il a autant sa place ici que
+    # là -- un banc ne sert qu'à être comparé à un autre banc, et le paramètre qu'on balaie est
+    # justement celui qu'on cherche à régler.
+    combos = _expand_param_combos(args, seen_params)
+    if combos is None:
+        return 1
+
+    if envs.remote_of(env_cfg):
+        pattern_arg = [args.pattern] if getattr(args, "pattern", None) else []
+        rc = 0
+        for variants, combo_args in combos:
+            overrides = envs.arg_overrides_to_env(combo_args, seen_params)
+            env_vars = envs.build_env_vars(args)
+            env_vars.update(overrides)
+            pull = _pull_dirs_for("bench", entries, env_name, overrides)
+            # see cmd_test's comment on SDOT_ENV_NAME vs "--env": passing --env
+            # here would make the remote side re-resolve the same Remote layer
+            # and try to ssh back out to itself.
+            env_vars["SDOT_ENV_NAME"] = env_name
+            # le driver traverse le saut ssh : la machine distante re-résout `.envs.py`
+            # SANS `--env` (pour ne pas re-ssh vers elle-même) et retomberait sinon sur
+            # l'env "default", qui n'est pas forcément le bon driver.
+            if env_cfg and env_cfg.driver:
+                env_vars["SDOT_DRIVER"] = env_cfg.driver
+            # la combinaison traverse le saut ssh DÉJÀ ÉCLATÉE, en `SDOT_ARG_*` : la machine
+            # distante ne revoit jamais un "a,b" et n'a donc rien à re-découper.
+            rc = run_in_env(seq, ["python", "./run", "bench", *pattern_arg], env_vars, pull=pull) or rc
+        return rc
+
+    # see cmd_test's comment on SDOT_ENV_NAME vs re-printing this banner
+    if not os.environ.get("SDOT_ENV_NAME"):
+        _env_banner(seq)
+
+    failures = []
+    for i, (variants, combo_args) in enumerate(combos):
+        if len(combos) > 1:
+            label = ", ".join(f"{k.replace('_','-')}={v}" for k, v in variants.items())
+            # flush explicitly: stdout is fully buffered (not line-buffered) when
+            # redirected/piped, so without this every sweep header would print only
+            # at process exit -- all bunched after every child's own (unbuffered) output.
+            print(_hdr(f"\n=== sweep [{i+1}/{len(combos)}] {label} ==="), flush=True)
+        if seen_params:
+            os.environ.update(envs.arg_overrides_to_env(combo_args, seen_params))
+        failures += _run_entries("bench", entries, file_modules, env_name)
     print("\n" + "=" * 48)
     if failures:
         for label, name, phase in failures:
@@ -718,10 +739,10 @@ def cmd_experiment(args):
     experiment differs only in what it is FOR: a file to look at, written to
     `p.out_dir`, whose path carries no date (see `_entry_dirs`).
 
-    The one thing it has that the other two don't is the param SWEEP:
-    `--nb-diracs=1000,2000` runs every combination, each into its own
-    param_hash directory. It lives here rather than in `_run_entries` because
-    that is where a sweep makes sense -- comparing pictures, not asserting.
+    Le param SWEEP (`--nb-diracs=1000,2000` : une exécution par combinaison,
+    chacune dans son propre `param_hash`) est partagé avec `bench` -- les deux
+    servent à COMPARER, des images ici, des chiffres là. `test` ne l'a pas :
+    une assertion ne se compare à rien.
     """
     from . import envs
     env_cfg = envs.get_env(name=args.env, driver=args.driver)
@@ -1102,6 +1123,16 @@ Test / bench selection (positional pattern, comma-separated file[::name] specs):
     # Two-pass for dynamic params
     known, remaining = parser.parse_known_args(argv)
     wants_help = getattr(known, "help", False)
+
+    # `--device` / `--fp` dans os.environ TOUT DE SUITE, et pas seulement dans l'env d'un fils
+    # distant (`build_env_vars` n'etait lu que par la branche remote). Deux raisons de le faire
+    # ICI et pas dans les `cmd_*` : une execution locale n'a pas de fils a qui passer un env, et
+    # les entrees sont importees DANS CE PROCESSUS quelques lignes plus bas
+    # (`_entries_and_overrides`), donc elles importent jax d'ici la -- `JAX_PLATFORMS` pose apres
+    # cet import n'a plus aucun effet. Un `--device cpu` local qui tournait quand meme sur le GPU
+    # sans rien dire est ce que ca corrige.
+    from . import envs as _envs
+    os.environ.update(_envs.build_env_vars(known))
 
     if known.command in ("test", "bench", "experiment") and (getattr(known, "pattern", None) or wants_help):
         target = {"test": p_test, "bench": p_bench, "experiment": p_exp}[known.command]

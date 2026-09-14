@@ -41,9 +41,19 @@ def include_root():
 def shared_header( rel_path: str, content: str ) -> str:
     """Ensure `content` lives at `rel_path` (e.g. `sdot/generated/axes/num_vertex.h`) under
     `include_root()`, writing only when the bytes would differ, and return `rel_path` -- the
-    string to `#include`."""
+    string to `#include`.
+
+    What this process already wrote is remembered: a call renders its headers EVERY time it runs
+    (not only when it compiles), and re-reading each one from disk to find it unchanged was ~30
+    file reads per call -- more than the kernel itself, on a small problem."""
+    if _written.get( rel_path ) == content:
+        return rel_path
     path = include_root() / rel_path
     if not ( path.exists() and path.read_text() == content ):
         path.parent.mkdir( parents = True, exist_ok = True )
         path.write_text( content )
+    _written[ rel_path ] = content
     return rel_path
+
+
+_written = {}

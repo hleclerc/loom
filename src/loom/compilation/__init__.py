@@ -98,8 +98,23 @@ def build_dir():
          as the AdaptiveCpp toolchain -- never inside the venv/site-packages.
 
     The chosen directory is created if needed and returned as a `Path`.
+
+    The answer is CACHED per `SDOT_BUILD_DIR` value: it is asked on every generated header of every
+    call (`generated_headers.shared_header`), and probing writability each time -- a `mkdir`, a
+    probe file, an `unlink` -- was measured at a third of the per-call overhead of a small kernel.
     """
     override = os.getenv( "SDOT_BUILD_DIR" )
+    cached = _build_dir_cache.get( override )
+    if cached is not None:
+        return cached
+    path = _build_dir_cache[ override ] = _resolve_build_dir( override )
+    return path
+
+
+_build_dir_cache = {}
+
+
+def _resolve_build_dir( override ):
     if override:
         path = Path( override ).expanduser()
         path.mkdir( parents = True, exist_ok = True )

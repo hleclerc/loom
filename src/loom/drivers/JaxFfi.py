@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy
 
-from ..compilation.adaptive_cpp import make_library, resolve_targets, ACPP_VERSION
+from ..compilation.adaptive_cpp import make_library, resolve_targets, build_signature, ACPP_VERSION
 from ..compilation import build_dir
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
@@ -98,8 +98,10 @@ def compile_and_register( source: str, device, prefix: str = "" ) -> str:
     # (a cluster home, a baked container image) could hand an sm_75 binary to an sm_90 card.
     # Naming the target fixes both, and under `generic` the architecture stops being part of
     # the question at all.
+    # ... et les FLAGS, avec la machine quand `-march=native` en fait partie (`build_signature`) :
+    # un reglage de compilation change le binaire autant que le source.
     targets, _, _ = resolve_targets( device )
-    name = prefix + encode_base_62( f"{ source }|{ targets }|{ ACPP_VERSION }" )
+    name = prefix + encode_base_62( f"{ source }|{ targets }|{ ACPP_VERSION }|{ build_signature( targets ) }" )
     if name in _loaded:
         return name
 

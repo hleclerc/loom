@@ -820,26 +820,66 @@ def _opt_flag( targets ) -> str:
     `-O3`). `-O2` ailleurs : sous `generic` le corps part en SSCP et est JIT-compile au lancement,
     donc ce flag-ci ne compile que la colle cote hote et n'a rien a gagner -- il ne ferait
     qu'allonger une compilation deja longue.
-
-    Ce qui n'est PAS ici, et volontairement : `-march=native`. Mesure sur la meme cible, il ne
-    donne rien (1.036 s seul, 0.974 s avec `-O3`, contre 0.979 s pour `-O3` seul -- du bruit), et
-    il figerait l'architecture de la machine dans un `.so` que le cache rend au nom du seul `.cpp`
-    genere. Zero gain contre un piege : `SDOT_CXXFLAGS="-march=native"` reste la pour qui veut
-    reessayer sur une autre machine.
     """
     return "-O3" if str( targets ).startswith( "omp" ) else "-O2"
+
+
+def _march_flags( targets ) -> list:
+    """`-march=native` sur la cible CPU, et sur elle seule.
+
+    Ce n'etait PAS le cas tant que le clip etait scalaire : mesure, `-march=native` ne rendait rien
+    (voir `notes/2026-09-02-perf-2d-lmo.md`), et il figeait l'architecture de la machine dans un
+    `.so` que le cache nommait d'apres le seul `.cpp` genere. Le noyau a registres de
+    `sdot/cell/Moteur2Reg.h` change la donne : ecrit en asimd, il tient huit sommets dans un
+    registre AVX2 et se DECOUPE en deux `xmm` SSE2 sans ce flag -- mesure, 1e6 germes 2D sur le
+    meme Xeon : 1.00 s en x86-64 de base, 0.33 s avec `-march=native`. Le piege du cache est leve
+    autrement : le nom du `.so` porte les flags ET le modele de processeur (`build_signature`).
+
+    `SDOT_CXXFLAGS` qui nomme deja un `-march=` / `-mtune=` l'emporte ; `SDOT_NO_MARCH_NATIVE=1`
+    revient au x86-64 de base (un `.so` a emporter ailleurs)."""
+    if not str( targets ).startswith( "omp" ):
+        return []
+    if os.environ.get( "SDOT_NO_MARCH_NATIVE" ):
+        return []
+    if any( f.startswith( "-march" ) or f.startswith( "-mcpu" ) for f in _env_cxxflags() ):
+        return []
+    return [ "-march=native" ]
+
+
+def _cpu_model() -> str:
+    """Le processeur, tel que `-march=native` le voit -- ce qui doit entrer dans le nom d'un `.so`
+    compile pour lui. `/proc/cpuinfo` sur Linux, `platform` ailleurs."""
+    try:
+        with open( "/proc/cpuinfo" ) as f:
+            for line in f:
+                if line.lower().startswith( "model name" ) or line.lower().startswith( "flags" ):
+                    return line.split( ":", 1 )[ 1 ].strip()
+    except OSError:
+        pass
+    import platform
+    return platform.processor() or platform.machine()
+
+
+def build_signature( targets ) -> str:
+    """Ce qui, hors du source, change le binaire : les flags de compilation, et la machine quand
+    `-march=native` est de la partie. A mettre dans le nom du `.so` (voir `JaxFfi`) pour qu'un
+    changement de reglage ne retombe pas sur un cache bati avec un autre."""
+    flags = [ _opt_flag( targets ), *_march_flags( targets ), *_env_cxxflags() ]
+    sig = " ".join( flags )
+    if "-march=native" in flags:
+        sig += "|" + _cpu_model()
+    return sig
 
 
 def _env_cxxflags() -> list:
     """`SDOT_CXXFLAGS`, decoupe en mots -- l'echappatoire pour essayer un reglage de compilation
     sans toucher au code.
 
-    Ce qu'on veut essayer en pratique : `-march=native -O3` sur la cible CPU. Le defaut est le
-    x86-64 de base (pas d'AVX du tout), parce qu'un `.so` compile ici pourrait etre lu ailleurs --
-    mais sur une machine de banc c'est precisement la contrainte qu'on veut lever.
+    La cible CPU est deja en `-O3 -march=native` (voir `_march_flags`) : ce qui reste a essayer
+    par ici est un autre `-march`, un `-mprefer-vector-width`, un drapeau de diagnostic.
 
-    Ces mots-la n'entrent PAS dans le nom du `.so` (qui ne hashe que le .cpp genere, voir
-    `make_library`), donc changer ce reglage sur un build deja fait demande `SDOT_FORCE_BUILD=2`.
+    Ces mots-la entrent dans le nom du `.so` (voir `build_signature` et `JaxFfi`) : les changer
+    donne un autre binaire, sans `SDOT_FORCE_BUILD`.
     """
     import shlex
     return shlex.split( os.getenv( "SDOT_CXXFLAGS", "" ) )
@@ -957,6 +997,7 @@ def make_library( lib_name, src_paths, device, *, profile = None, extra_flags = 
         *extra_includes,
         *omp_flags,
         *( extra_flags or [] ),
+        *_march_flags( targets ),
         *_env_cxxflags(),
         "-o", lib,
         *src_paths,

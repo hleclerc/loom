@@ -38,8 +38,12 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, fwd_code, bwd_code = "", name = "", batch_axes = (), includes = (),
                   thread_cap = None, group_size = None, local_mem_elems = None,
-                  fwd_setup_code = "", bwd_setup_code = "" ) -> None:
+                  fwd_setup_code = "", bwd_setup_code = "", sources = () ) -> None:
         self._code = dict( fwd = fwd_code, bwd = bwd_code )
+        # the C++ units this body LINKS (`"sdot/x.cpp"` or `( "sdot/x.cpp", { "DEF": "1" } )`), as
+        # opposed to what it includes: compiled once per (source, defines, compiler) and shared by
+        # every kernel that names them -- see `make_library`.
+        self.sources = tuple( sources )
         # a plain C++ STATEMENT emitted verbatim BEFORE the scaffolded call below (outside the
         # per-item lambda, in the handler's own scope -- where a call's aggregate args are already
         # declared, see `_render_call`'s `decls`). For a one-time, pre-launch step a per-item body
@@ -89,7 +93,7 @@ class FfiCode( AbstractFfiCode ):
         return type( self )( self._code[ "bwd" ], name = ( self.name or "sdot" ) + "_bwd",
                              includes = self.includes, thread_cap = self.thread_cap,
                              group_size = self.group_size, local_mem_elems = self.local_mem_elems,
-                             fwd_setup_code = self._setup_code[ "bwd" ] )
+                             fwd_setup_code = self._setup_code[ "bwd" ], sources = self.sources )
 
     def with_batch_axis( self ):
         """The same code, mapped over one more axis: what a `vmap` runs. The name is derived from
@@ -101,7 +105,7 @@ class FfiCode( AbstractFfiCode ):
                                    thread_cap = self.thread_cap, group_size = self.group_size,
                                    local_mem_elems = self.local_mem_elems,
                                    fwd_setup_code = self._setup_code[ "fwd" ],
-                                   bwd_setup_code = self._setup_code[ "bwd" ] )
+                                   bwd_setup_code = self._setup_code[ "bwd" ], sources = self.sources )
 
 
 class FfiCodeParallel( FfiCode ):

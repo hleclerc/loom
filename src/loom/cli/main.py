@@ -483,15 +483,6 @@ def _run_entries(kind, entries, file_modules, env_name):
     if not entries:
         return []
 
-    # The kernel build cache keys on the GENERATED .cpp alone -- the hand-written headers it
-    # includes (sdot/include, loom/include) are not part of the hash (see
-    # `compilation.make_library`). So editing one of those and re-running the
-    # tests would silently reuse the previous .dylib, and the run would say nothing about the
-    # new code. Tests are where that matters most, so they default to level 1 (rebuild only
-    # when those sources actually changed, via `_cpp_sources_hash` -- cheap on a cache hit)
-    # unless the caller said otherwise: `SDOT_FORCE_BUILD=0` to trust the cache outright,
-    # `=2` to force every kernel to rebuild regardless of the hash.
-    os.environ.setdefault("SDOT_FORCE_BUILD", "1")
 
     print(f"\n{'='*12} [{kind}] {len(entries)} entrie(s) {'='*12}", flush=True)
     tm.test_phase = tm.PHASE_RUN
@@ -634,9 +625,6 @@ def _run_cpp_tests(filters):
     an empty failures list otherwise)."""
     from loom.compilation import make_executable
     from loom.devices.Device import Device
-    # same rebuild policy as the Python entries (see `_run_entries`): an executable is named after
-    # the test file, so only the source hash can tell "the headers changed" from "nothing changed".
-    os.environ.setdefault("SDOT_FORCE_BUILD", "1")
     cpp_dir = ROOT / "loom" / "tests" / "cpp"
     if not cpp_dir.is_dir(): return 0, []
     files = sorted(cpp_dir.glob("test_*.*"))

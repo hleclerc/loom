@@ -227,16 +227,21 @@ UTP void DTP::fill_with( TF value ) {
 // variante avec contextes d'exécution : dispatch via run_parallel (choix du meilleur contexte)
 // Choix de l'item_list + du kernel selon la forme. `run` effectue l'appel run_parallel (avec ou
 // sans dépendances) -> on ne nomme jamais SYCL/Dependencies ici (TensorView reste sans SYCL).
+// les corps de `fill_with`, des FONCTEURS nommés et non des lambdas : un lambda défini côté hôte ne
+// peut pas être le noyau d'un lancement device (nvcc), une struct à portée d'espace de noms si.
+namespace detail::TensorViewFill {
+    struct Scalar     { template<class I,class Out,class V> HD void operator()( I, Out out, V v ) const { out.ref() = v; } };
+    struct Contiguous { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out._data.template as<typename Out::TF>()[ id ] = v; } };
+    struct Strided    { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out( out.indices_col_ordering( id ) ) = v; } };
+}
+
 UTP auto DTP::_fill_with( TF value, auto &&run ) {
     if constexpr ( ct_rank == 0 )
-        return run( range( 1 ), []( auto, auto out, auto v ) { out.ref() = v; },
-                    OutList(), *this, InpList(), value );
+        return run( range( 1 ), detail::TensorViewFill::Scalar{}, OutList(), *this, InpList(), value );
     else if ( items_are_contiguous() )
-        return run( range( nb_items() ), []( auto id, auto out, auto v ) { out._data.template as<TF>()[ id ] = v; },
-                    OutList(), *this, InpList(), value );
+        return run( range( nb_items() ), detail::TensorViewFill::Contiguous{}, OutList(), *this, InpList(), value );
     else
-        return run( range( nb_items() ), []( auto id, auto out, auto v ) { out( out.indices_col_ordering( id ) ) = v; },
-                    OutList(), *this, InpList(), value );
+        return run( range( nb_items() ), detail::TensorViewFill::Strided{}, OutList(), *this, InpList(), value );
 }
 
 UTP auto DTP::fill_with( auto &&queue_list, TF value ) {

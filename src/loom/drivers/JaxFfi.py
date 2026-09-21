@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 
 import ctypes
+from pathlib import Path
 import sys
 
 import jax
@@ -76,8 +77,9 @@ def render_source( body: str ) -> str:
     return _SOURCE_TEMPLATE.format( body = body )
 
 
-def compile_and_register( source: str, device, prefix: str = "" ) -> str:
-    """Compile *source*, load and register it, and return its Jax FFI target name.
+def compile_and_register( source: str, device, prefix: str = "", sources = () ) -> str:
+    """Compile *source* (plus the `sources` units it links, see `make_library`), load and
+    register it, and return its Jax FFI target name.
 
     Idempotent and cached: repeated calls with the same source + device reuse the compiled
     library and the existing registration.
@@ -94,17 +96,20 @@ def compile_and_register( source: str, device, prefix: str = "" ) -> str:
     # library twice on a two-GPU node.) How it is compiled = the compiler's `build_signature`:
     # the flags, and the machine when `-march=native` is among them -- a compilation setting
     # changes the binary as much as the source does, and a GPU architecture belongs there too.
-    name = prefix + encode_base_62( f"{ source }|{ device.compiler.build_signature }" )
+    name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }" )
     if name in _loaded:
         return name
 
+    # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes would
+    # look like a change to it (one recompilation per process, for nothing).
     src_path = build_dir() / f"{ name }.cpp"
     src_path.parent.mkdir( parents = True, exist_ok = True )
-    src_path.write_text( source )
+    if not ( src_path.exists() and src_path.read_text() == source ):
+        src_path.write_text( source )
 
     lib_path = make_library(
         name + _lib_suffix(), [ src_path ], device,
-        extra_flags = _ffi_include_flags(),
+        extra_flags = _ffi_include_flags(), sources = sources,
     )
 
     lib = ctypes.CDLL( str( lib_path ) )
@@ -186,6 +191,9 @@ static ffi::Error sdot_ffi_impl( {params} ) {{
     return ffi::Error::Success();
 }}
 
+// the ONE exported symbol (everything else is hidden, see `HostCxx`): the declaration carries the
+// visibility, the macro below defines it.
+extern "C" LOOM_EXPORT XLA_FFI_Error *sdot_ffi_entry( XLA_FFI_CallFrame * );
 XLA_FFI_DEFINE_HANDLER_SYMBOL( sdot_ffi_entry, sdot_ffi_impl,
     ffi::Ffi::Bind(){binds} );
 """
@@ -250,6 +258,15 @@ def _render_call( code, ca, device ):
         if inc not in includes:
             includes.append( inc )
 
+    # the units to LINK, collected the same blind way: `( path, defines )`, resolved against the
+    # C++ source roots. Compiled once per (source, defines, compiler) by the build graph.
+    sources = []
+    for src in [ s for arg_ca in ca.args.values() for s in getattr( arg_ca, "cpp_sources", lambda: () )() ] + list( code.sources ):
+        path, defines = ( src if isinstance( src, tuple ) else ( src, {} ) )
+        item = ( str( _resolve_source( path ) ), tuple( sorted( dict( defines ).items() ) ) )
+        if item not in sources:
+            sources.append( item )
+
     # XLA FFI binds in this order, and the handler's parameters must follow it: args, results,
     # then attributes.
     # `LOOM_XLA_STREAM_SYNC=1` : recevoir le FLUX de XLA et l'attendre avant de commencer.
@@ -313,7 +330,19 @@ def _render_call( code, ca, device ):
         body          = code.code_for( "fwd", ca ),
         binds         = binds,
     )
-    return source, inputs, outputs, attrs
+    return source, inputs, outputs, attrs, tuple( sources )
+
+
+def _resolve_source( path ):
+    """A kernel source, as given (`sdot/density/gaussians.cpp`, like an include) or absolute."""
+    from ..compilation import cpp_include_root, additional_include_dirs
+    p = Path( path )
+    if p.is_absolute():
+        return p
+    for root in [ cpp_include_root(), *additional_include_dirs() ]:
+        if ( Path( root ) / p ).is_file():
+            return Path( root ) / p
+    raise FileNotFoundError( f"kernel source `{ path }` not found under the C++ source roots" )
 
 
 def _make_op( code, ca, device, prefix ):
@@ -328,8 +357,8 @@ def _make_op( code, ca, device, prefix ):
     """
     @jax.custom_batching.custom_vmap
     def op( *arrays ):
-        source, _, outputs, attrs = _render_call( code, ca, device )
-        target = compile_and_register( source, device, prefix )
+        source, _, outputs, attrs, sources = _render_call( code, ca, device )
+        target = compile_and_register( source, device, prefix, sources )
         results = jax.ffi.ffi_call( target, [ b.jax_out_spec() for b in outputs ] )(
             *arrays, **{ name: numpy.int64( value ) for name, _, value in attrs }
         )

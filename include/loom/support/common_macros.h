@@ -30,6 +30,14 @@
 #endif
 #define HD_INLINE HD inline
 
+// `LOOM_EXPORT` : un symbole qu'une bibliothèque PUBLIE (tout est caché par défaut,
+// `-fvisibility=hidden`) -- le point d'entrée d'un noyau, la file de threads du runtime.
+#if defined( _WIN32 )
+#define LOOM_EXPORT __declspec( dllexport )
+#else
+#define LOOM_EXPORT __attribute__(( visibility( "default" ) ))
+#endif
+
 #define ASSERTED_EQUAL( A, B ) ( []( auto a, auto b ) { if ( a != b ) throw std::runtime_error( #A " and " #B " are not equal" ); return a; } )( A, B )
 #define DECAYED_TYPE_OF( v )   std::decay_t<decltype( v )>
 #define IS_BASE_OF( A, V )     std::is_base_of_v<A,std::decay_t<V>>

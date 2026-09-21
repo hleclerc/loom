@@ -4,31 +4,25 @@
 #include "CpuHostMemorySpace.h"
 #include "../common_macros.h"
 #include "../common_types.h"
+#include "CpuThreadPool.h"
 #include "QueueEvent.h"
 #include "IoCategory.h"
 #include "Reducer.h"
 #include "Group.h"
 #include "../Ct.h"
 
-#include <condition_variable>
 #include <functional>
-#include <cstdlib>
 #include <barrier>
 #include <thread>
 #include <vector>
 #include <memory>
-#include <mutex>
 #include <tuple>
-
-#ifdef __linux__
-#include <pthread.h>
-#include <sched.h>
-#endif
 
 namespace sdot {
 
-/// Le contexte d'exécution CPU : une file de threads PERSISTANTE, et les deux formes de
-/// lancement qu'un kernel peut demander (`submit_kernel`, `submit_kernel_grouped`).
+/// Le contexte d'exécution CPU : la file de threads du processus (`cpu_thread_pool()`, dans la
+/// bibliothèque runtime), et les deux formes de lancement qu'un kernel peut demander
+/// (`submit_kernel`, `submit_kernel_grouped`).
 ///
 /// C'est ICI que vit ce qui est propre au CPU -- la boucle sur les items, la répartition entre
 /// fils, les réductions par fil. `run_parallel` ne sait rien du device : il pèle les catégories
@@ -36,153 +30,23 @@ namespace sdot {
 /// une surcharge par type de queue, trouvée par ADL. Ajouter un device = écrire sa queue et ses
 /// deux `submit_kernel`, pas un `if` dans `run_parallel`.
 ///
-/// Répartition : chaque « fil virtuel » `t` de `[ 0, nb_threads )` traite une tranche CONTIGUË des
-/// items (`[ t n / T, ( t + 1 ) n / T )`), et les fils virtuels sont eux-mêmes répartis en
-/// tranches contiguës sur les workers. C'est le découpage qui a gagné dans le banc
-/// (`solvers_des_familles/src/util/parallel.h`, « blocks contre strided ») : un fil reste dans
-/// SA région de l'espace, ce qui compte quand les items sont en ordre d'arbre. Le contrat du
-/// corps ne change pas : `thread_index` est unique et STABLE pour tout ce qu'un fil traite (une
-/// ligne de scratch par fil), et `nb_threads` est leur compte.
+/// Chaque « fil virtuel » `t` de `[ 0, nb_threads )` traite une tranche CONTIGUË des items
+/// (`[ t n / T, ( t + 1 ) n / T )`), voir `CpuThreadPool`. Le contrat du corps ne change pas :
+/// `thread_index` est unique et STABLE pour tout ce qu'un fil traite (une ligne de scratch par
+/// fil), et `nb_threads` est leur compte.
 ///
-/// Les workers sont créés au premier lancement et dorment sur une variable de condition entre
-/// deux : coût nul au repos, ~10 µs par réveil. Le fil appelant fait office de worker 0 (pas de
-/// réveil pour lui). `SDOT_NB_THREADS` fixe leur nombre (défaut : `hardware_concurrency`),
-/// `SDOT_PIN_THREADS=1` épingle le worker `w` sur le CPU `w`.
-///
-/// Une queue par bibliothèque générée pour l'instant (chaque `.so` a sa statique) : le runtime
-/// partagé, avec une seule file par processus, est l'étape « couches » de la refonte.
-///
-/// La file elle-même (`CpuThreadPool`) n'est pas copiable ; `CpuQueue` est la POIGNÉE qu'on
-/// passe partout, copiable à volonté (un `shared_ptr` sur la file), comme l'était la queue SYCL.
-struct CpuThreadPool {
-    CpuThreadPool() {
-        nb_workers = 0;
-        if ( const char *env = std::getenv( "SDOT_NB_THREADS" ) )
-            nb_workers = std::atoi( env );
-        if ( nb_workers <= 0 )
-            nb_workers = int( std::thread::hardware_concurrency() );
-        if ( nb_workers <= 0 )
-            nb_workers = 1;
-        if ( const char *env = std::getenv( "SDOT_PIN_THREADS" ) )
-            pin = std::atoi( env ) != 0;
-    }
-
-    ~CpuThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            stop = true;
-            ++generation;
-        }
-        cv_job.notify_all();
-        for ( auto &th : workers )
-            th.join();
-    }
-
-    CpuThreadPool( const CpuThreadPool & ) = delete;
-    CpuThreadPool &operator=( const CpuThreadPool & ) = delete;
-
-    /// `job( t )` pour chaque fil virtuel `t` de `[ 0, nb_threads )`, réparti par tranches
-    /// contiguës sur les workers. Rend la main quand tout est fait.
-    void run_threads( int nb_threads, const std::function<void( int )> &job ) {
-        if ( nb_threads <= 0 )
-            return;
-        const int W = std::min( nb_threads, nb_workers );
-        if ( W == 1 ) {
-            for ( int t = 0; t < nb_threads; ++t )
-                job( t );
-            return;
-        }
-        _ensure_workers();
-
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            current_job        = &job;
-            current_nb_threads = nb_threads;
-            current_nb_workers = W;
-            nb_remaining       = W - 1;
-            ++generation;
-        }
-        cv_job.notify_all();
-
-        _run_slice( 0, W, nb_threads, job );
-
-        std::unique_lock<std::mutex> lock( mutex );
-        cv_done.wait( lock, [&] { return nb_remaining == 0; } );
-        current_job = nullptr;
-    }
-
-    int  nb_workers;   ///< fils disponibles, fil appelant compris
-    bool pin = false;  ///< épingler le worker `w` sur le CPU `w`
-
-private:
-    static void _run_slice( int w, int W, int nb_threads, const std::function<void( int )> &job ) {
-        const int b = int( ( long long ) w * nb_threads / W );
-        const int e = int( ( long long ) ( w + 1 ) * nb_threads / W );
-        for ( int t = b; t < e; ++t )
-            job( t );
-    }
-
-    void _ensure_workers() {
-        if ( ! workers.empty() )
-            return;
-        workers.reserve( nb_workers - 1 );
-        for ( int w = 1; w < nb_workers; ++w )
-            workers.emplace_back( [this,w] { _worker_loop( w ); } );
-    }
-
-    void _worker_loop( int w ) {
-        if ( pin ) {
-#ifdef __linux__
-            cpu_set_t set;
-            CPU_ZERO( &set );
-            CPU_SET( w, &set );
-            pthread_setaffinity_np( pthread_self(), sizeof( set ), &set );
-#endif
-        }
-        long seen = 0;
-        for ( ;; ) {
-            const std::function<void( int )> *job;
-            int nb_threads, W;
-            {
-                std::unique_lock<std::mutex> lock( mutex );
-                cv_job.wait( lock, [&] { return generation != seen; } );
-                seen = generation;
-                if ( stop )
-                    return;
-                job = current_job; nb_threads = current_nb_threads; W = current_nb_workers;
-            }
-            if ( w < W )
-                _run_slice( w, W, nb_threads, *job );
-            {
-                std::lock_guard<std::mutex> lock( mutex );
-                if ( w < W && --nb_remaining == 0 )
-                    cv_done.notify_one();
-            }
-        }
-    }
-
-    std::vector<std::thread>          workers;
-    std::mutex                        mutex;
-    std::condition_variable           cv_job, cv_done;
-    const std::function<void( int )> *current_job        = nullptr;
-    int                               current_nb_threads = 0;
-    int                               current_nb_workers = 0;
-    int                               nb_remaining       = 0;
-    long                              generation         = 0;
-    bool                              stop               = false;
-};
-
+/// Une poignée trivialement copiable, comme l'était la queue SYCL.
 struct CpuQueue {
     /// zone mémoire par défaut vue par les kernels lancés sur cette queue (un contexte
     /// d'exécution peut exposer plusieurs zones ; celle-ci est celle utilisée par défaut)
     using DefaultKernelMemorySpace = CpuKernelMemorySpace;
 
-    CpuQueue() : pool( std::make_shared<CpuThreadPool>() ) {}
+    CpuQueue() : pool( &cpu_thread_pool() ) {}
 
     void run_threads( int nb_threads, const std::function<void( int )> &job ) const { pool->run_threads( nb_threads, job ); }
-    int  nb_workers () const { return pool->nb_workers; }
+    int  nb_workers () const { return pool->nb_workers(); }
 
-    std::shared_ptr<CpuThreadPool> pool;
+    CpuThreadPool *pool;
 };
 
 /// Coût de transfert (secondes par octet) pour rendre une zone source accessible depuis ce

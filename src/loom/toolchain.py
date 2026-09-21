@@ -13,6 +13,7 @@ import platform
 import sys
 
 from .compilation import build_dir, include_dirs
+from .compilation.build import ninja_path
 from .devices.Device import Device
 
 # The devices we know how to ask about. Metal is intentionally absent: it has its own
@@ -37,6 +38,10 @@ def survey( only = None ) -> int:
     """Print what is available and what each present device would compile with."""
     print( f"machine   : { platform.system() } { platform.machine() }, python { platform.python_version() }" )
     print( f"build dir : { build_dir() }" )
+    try:
+        print( f"ninja     : { ninja_path() }" )
+    except RuntimeError as e:
+        print( f"ninja     : { _mark( False ) } ({ e })" )
     print( "includes  : " + ", ".join( map( str, include_dirs() ) ) )
 
     print( "\ndevices:" )

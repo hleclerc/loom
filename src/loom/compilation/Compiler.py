@@ -5,7 +5,8 @@ autour du compilateur hôte pour CUDA. C'est le seul aiguillage -- `make_library
 device il sert, il demande une commande au compilateur et gère le cache disque, pareil pour tous.
 
 Un compilateur répond à trois questions :
-  * `command( src_paths, out_path, includes, extra_flags )` -- la ligne de commande ;
+  * `ninja_rules()` / `rule_for( src )` -- comment compiler une source en objet, lier une
+    bibliothèque, un exécutable (voir `build.py`, qui ne connaît que des chemins et des règles) ;
   * `build_signature` -- ce qui, HORS du source, change le binaire (les flags, la machine quand
     `-march=native` en fait partie) ; `JaxFfi` la met dans le nom du `.so` avec le hash du source,
     pour qu'un changement de réglage ne retombe pas sur un cache bâti avec un autre ;
@@ -70,10 +71,26 @@ class Compiler:
     def build_signature( self ) -> str:
         raise NotImplementedError
 
-    def command( self, src_paths: list, out_path: Path, includes: list, extra_flags: list, kind: str = "shared" ) -> list:
-        """La commande qui produit `out_path` (`kind` : "shared" pour un `.so`, "binary" pour un
-        exécutable) à partir de `src_paths`."""
+    def ninja_rules( self ) -> dict:
+        """nom -> ( commande ninja, a un depfile, description ). Attendus : une règle par sorte de source
+        (`rule_for`), `link_shared`, `link_executable`. Variables disponibles dans une commande
+        de compilation : `$includes`, `$defines`, `$extra` ; de liaison : `$libs`, `$soname`."""
         raise NotImplementedError
+
+    def rule_for( self, src: Path ) -> str:
+        """La règle qui compile cette source (par extension : `.cpp` -> le compilateur hôte,
+        `.cu` -> nvcc)."""
+        raise NotImplementedError
+
+    def link_libraries( self, libraries: list ) -> str:
+        """Les flags pour lier ces bibliothèques partagées (chemins), rpath compris."""
+        raise NotImplementedError
+
+    def soname_flags( self, out: Path ) -> str:
+        return ""
+
+    def library_file_name( self, name: str ) -> str:
+        return f"lib{ name }.dylib" if sys.platform == "darwin" else f"lib{ name }.so"
 
     def describe( self ) -> list:
         """Lignes (`nom`, `valeur`) pour `sdot-toolchain`."""
@@ -91,6 +108,10 @@ class HostCxx( Compiler ):
     1e6 germes 2D sur le même Xeon : 1.00 s en x86-64 de base, 0.33 s avec `-march=native`. Le
     piège du cache est levé autrement : le nom du `.so` porte les flags ET le modèle de processeur
     (`build_signature`).
+
+    `-fvisibility=hidden` : une bibliothèque générée n'exporte que son point d'entrée (déclaré
+    `visibility( "default" )` par le source généré) -- mesuré, le `.so` d'un noyau passe de 5.5 Mo
+    à 0.3 Mo, et rien de ses milliers d'instanciations de templates n'est visible d'une autre.
 
     `SDOT_CXXFLAGS` qui nomme déjà un `-march=` / `-mcpu=` l'emporte.
     """
@@ -124,7 +145,8 @@ class HostCxx( Compiler ):
         return flags
 
     def flags( self ) -> list:
-        return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(), *env_cxxflags() ]
+        return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
+                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *env_cxxflags() ]
 
     @property
     def build_signature( self ) -> str:
@@ -134,21 +156,38 @@ class HostCxx( Compiler ):
             sig += "|" + cpu_model()
         return sig
 
-    def command( self, src_paths, out_path, includes, extra_flags, kind = "shared" ):
+    def _require( self ):
         if self.cxx is None:
             raise RuntimeError( "sdot: aucun compilateur C++ trouvé (SDOT_CXX, CXX, ou c++/clang++/g++ sur PATH)" )
-        cmd = [ self.cxx, *self.flags(), "-fPIC", "-pthread" ]
-        if kind == "shared":
-            cmd += [ "-shared" ]
-            # ELF : lier chaque référence INTERNE à la définition locale -- pas de PLT pour les
-            # appels d'une bibliothèque générée à ses propres instanciations de templates, et aucune
-            # interposition possible entre deux `.so` qui définissent les mêmes symboles faibles.
-            if sys.platform != "darwin":
-                cmd += [ "-Wl,-Bsymbolic" ]
-        for inc in includes:
-            cmd += [ "-I", str( inc ) ]
-        cmd += [ *( extra_flags or [] ), "-o", str( out_path ), *map( str, src_paths ) ]
-        return cmd
+
+    def ninja_rules( self ):
+        self._require()
+        flags = " ".join( self.flags() )
+        # ELF : lier chaque référence INTERNE à la définition locale -- pas de PLT pour les appels
+        # d'une bibliothèque générée à ses propres instanciations de templates.
+        bsymbolic = "" if sys.platform == "darwin" else "-Wl,-Bsymbolic"
+        return {
+            "cxx":             ( f"{ self.cxx } { flags } $includes $defines $extra -MMD -MF $out.d -c $in -o $out", True, "c++ $in $defines" ),
+            "link_shared":     ( f"{ self.cxx } -pthread -shared { bsymbolic } $soname -o $out $in $libs", False, "link $out" ),
+            "link_executable": ( f"{ self.cxx } -pthread -o $out $in $libs", False, "link $out" ),
+        }
+
+    def rule_for( self, src ):
+        return "cxx"
+
+    def link_libraries( self, libraries ):
+        flags = []
+        for lib in libraries:
+            lib = Path( lib )
+            name = lib.name
+            for prefix, suffix in ( ( "lib", ".so" ), ( "lib", ".dylib" ) ):
+                if name.startswith( prefix ) and name.endswith( suffix ):
+                    name = name[ len( prefix ):-len( suffix ) ]
+            flags += [ f"-L{ lib.parent }", f"-l{ name }", f"-Wl,-rpath,{ lib.parent }" ]
+        return " ".join( flags )
+
+    def soname_flags( self, out ):
+        return f"-Wl,-install_name,@rpath/{ Path( out ).name }" if sys.platform == "darwin" else ""
 
     def describe( self ):
         return [ ( "c++ hôte", self.cxx or "introuvable" ), ( "flags", " ".join( self.flags() ) ) ]
@@ -156,7 +195,7 @@ class HostCxx( Compiler ):
 
 class Nvcc( Compiler ):
     """`nvcc` autour du compilateur hôte : ce que CUDA utilisera. Étape 3 de la refonte : le contrat
-    est posé, la commande n'est pas écrite (elle viendra avec `CudaQueue.h`)."""
+    est posé, les règles ne sont pas écrites (elles viendront avec `CudaQueue.h`)."""
 
     name = "nvcc"
 
@@ -171,8 +210,14 @@ class Nvcc( Compiler ):
     def build_signature( self ) -> str:
         return f"nvcc:{ self.nvcc }|{ self.host.build_signature }"
 
-    def command( self, src_paths, out_path, includes, extra_flags, kind = "shared" ):
+    def ninja_rules( self ):
         raise NotImplementedError( "sdot: le backend CUDA n'est pas encore porté (étape 3 de la refonte)" )
+
+    def rule_for( self, src ):
+        raise NotImplementedError( "sdot: le backend CUDA n'est pas encore porté (étape 3 de la refonte)" )
+
+    def link_libraries( self, libraries ):
+        return self.host.link_libraries( libraries )
 
     def describe( self ):
         return [ ( "nvcc", self.nvcc or "introuvable" ), ( "état", "non porté (étape 3)" ), *self.host.describe() ]

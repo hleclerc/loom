@@ -1,5 +1,6 @@
 from pathlib import Path
 import tempfile
+import hashlib
 import getpass
 import sys
 import os

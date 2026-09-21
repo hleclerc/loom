@@ -30,7 +30,7 @@ class AppleGpu( Device ):
 
     @property
     def cpp_queue_type( self ):
-        # not acpp-reachable (see `acpp_reachable`): no SYCL queue targets Metal.
+        # no C++ queue yet: Metal has its own (non-C++) kernel path.
         raise NotImplementedError
 
     @property

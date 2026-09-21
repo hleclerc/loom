@@ -16,8 +16,7 @@ class CudaGpu( Device ):
         self.device_id = device_id
         # INDEXÉ, pas dépaqueté par la fin : `shm_per_block` est le DERNIER, donc un
         # `*_, sm_major, sm_minor = attrs` prend `( sm_minor, shm_per_block )` et fabrique un
-        # `sm_549152` au lieu de `sm_75`. Resté invisible tant que rien n'utilisait la cible AOT,
-        # puisque `generic` gagnait toujours (voir `resolve_targets`).
+        # `sm_549152` au lieu de `sm_75`.
         self._attrs = _attrs # (nb_sm, max_thr_per_sm, regs_per_sm, shm_per_sm, total_dev_mem, sm_major, sm_minor, shm_per_block)
 
     def copy( self ) -> 'Device':
@@ -54,28 +53,21 @@ class CudaGpu( Device ):
         return True
 
     @property
-    def acpp_reachable( self ):
-        return True
+    def cpp_queue_include( self ):
+        return "loom/support/kernels/CudaQueue.h"
 
     @property
-    def acpp_aot_targets( self ):
-        # Only used when the SSCP toolchain is unavailable. Note that this path bakes in the
-        # compute capability AND needs a full CUDA toolkit at compile time (clang's CUDA
-        # support caps at CUDA 12.8, so a CUDA 13 host cannot compile it at all) -- which is
-        # precisely why `generic` is the default.
+    def compiler( self ):
+        from ..compilation.Compiler import Nvcc
+        return Nvcc()
+
+    @property
+    def sm_arch( self ):
+        """`sm_75`-style architecture of the card, read off the driver (None if no card)."""
         attrs = self._get_attrs()
         if attrs is None:
-            return "cuda"
-        sm_major, sm_minor = attrs[ 5 ], attrs[ 6 ]
-        return f"cuda:sm_{ sm_major }{ sm_minor }"
-
-    @property
-    def acpp_aot_profile( self ):
-        return "full"
-
-    @property
-    def acpp_backends( self ):
-        return ( "cuda", )
+            return None
+        return f"sm_{ attrs[ 5 ] }{ attrs[ 6 ] }"
 
     @property
     def ffi_platform( self ):
@@ -89,8 +81,8 @@ class CudaGpu( Device ):
 
     @property
     def device_is_present( self ):
-        # acpp-reachable AND a real CUDA driver/device available (libcuda loads, attrs read).
-        return self.acpp_reachable and self._get_attrs() is not None
+        # a compiler for it AND a real CUDA driver/device available (libcuda loads, attrs read).
+        return self.compiler.is_available() and self._get_attrs() is not None
 
     def driver_version_for_jax( self, devices ):
         return devices( "gpu" )[ self.device_id ]

@@ -113,8 +113,13 @@ class JaxDriver:
     def default_device_for( ftype ):
         platforms = { d.platform for d in jax.devices() }
         if "gpu" in platforms:
+            # the card is there, but it is only a device for us if we can compile for it
+            # (`device_is_present` asks the compiler): until the CUDA backend is ported, a GPU
+            # machine works on its CPU.
             from ..devices.CudaGpu import CudaGpu
-            return CudaGpu( 0 )
+            gpu = CudaGpu( 0 )
+            if gpu.device_is_present:
+                return gpu
 
         # Metal (jax-metal) — auto-select when available; always uses FP32
         if "METAL" in platforms and ftype in ( None, "FP32" ):

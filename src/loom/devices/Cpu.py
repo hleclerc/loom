@@ -31,13 +31,17 @@ class Cpu( Device ):
         return True
 
     @property
-    def acpp_reachable( self ):
-        return True
+    def cpp_queue_include( self ):
+        return "loom/support/kernels/CpuQueue.h"
 
     @property
-    def acpp_aot_targets( self ):
-        # the library-only OpenMP backend: no LLVM, hence the fallback that works everywhere
-        return "omp"
+    def compiler( self ):
+        from ..compilation.Compiler import HostCxx
+        return HostCxx()
+
+    @property
+    def device_is_present( self ):
+        return self.compiler.is_available()
 
     @property
     def ffi_platform( self ):
@@ -49,7 +53,7 @@ class Cpu( Device ):
     def _hw_thread_cap( self, nb_local_bytes_per_thread=0, nb_pinned_bytes_per_thread=0, nb_waves=1 ):
         # registers managed by compiler; shared memory not applicable to CPU threads
         # both local and pinned bytes draw from host RAM
-        n          = os.cpu_count() or 1
+        n          = _nb_workers()
         per_thread = max( nb_local_bytes_per_thread, nb_pinned_bytes_per_thread )
         if per_thread > 0:
             usable = int( _total_host_ram() * self.scratch_ram_fraction )
@@ -57,19 +61,25 @@ class Cpu( Device ):
         return n
 
     def group_size( self, **per_group_item ):
-        # AdaptiveCpp's own docs: "Don't use nd_range parallel for unless you absolutely have to,
-        # as it is difficult to map efficiently to CPUs" -- this device only ever selects the
-        # `omp.library-only` backend (`acpp_aot_targets = "omp"`, no Clang-plugin-accelerated
-        # `omp.accelerated` path configured), which implements nd_range barriers via Boost.Fiber
-        # (cooperative user-space fibers): "the relative cost of a barrier... is significantly
-        # higher... kernels relying on barriers may experience substantial performance degradation."
-        # Stay at the degenerate `1` (see `Device.group_size`) on purpose -- do NOT raise this to
-        # "use more cores per group" without re-reading that doc, it would make things slower, not
-        # faster; CPU parallelism already comes from `nb_threads`/`_hw_thread_cap` above.
+        # A group of more than one lane is, on CPU, that many system threads around a
+        # `std::barrier` (see `CpuQueue.h::submit_kernel_grouped`): correct, and slow -- it exists
+        # so a kernel written for GPU groups can be TESTED on CPU. Stay at the degenerate `1` (see
+        # `Device.group_size`) on purpose; CPU parallelism already comes from
+        # `nb_threads`/`_hw_thread_cap` above.
         return 1
 
     def driver_version_for_jax( self, devices ):
         return devices( "cpu" )[ 0 ]
+
+
+def _nb_workers():
+    """What `CpuQueue` will use: `SDOT_NB_THREADS` if set, else every hardware thread. The
+    per-thread scratch is sized on this, so the two must agree."""
+    try:
+        n = int( os.environ.get( "SDOT_NB_THREADS", "0" ) )
+    except ValueError:
+        n = 0
+    return n if n > 0 else ( os.cpu_count() or 1 )
 
 
 def _total_host_ram():

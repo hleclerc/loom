@@ -1,4 +1,4 @@
-"""loom — agnostic Jax/Torch → SYCL interface.
+"""loom — agnostic Jax/Torch → C++ kernels interface.
 
 Lazy imports: `import loom` is instant. Heavy modules (Tensor, driver, FfiCode)
 are loaded on first access, e.g. `from loom import Tensor`.

@@ -20,6 +20,16 @@
 
 #define SCInt static constexpr int
 
+// `HD` marque ce qui doit exister des deux côtés, hôte et device : vide partout sauf sous nvcc, où
+// c'est `__host__ __device__`. C'est le SEUL endroit où l'attribut est épelé -- le code métier
+// écrit `HD`, jamais `__device__`.
+#ifdef __CUDACC__
+#define HD __host__ __device__
+#else
+#define HD
+#endif
+#define HD_INLINE HD inline
+
 #define ASSERTED_EQUAL( A, B ) ( []( auto a, auto b ) { if ( a != b ) throw std::runtime_error( #A " and " #B " are not equal" ); return a; } )( A, B )
 #define DECAYED_TYPE_OF( v )   std::decay_t<decltype( v )>
 #define IS_BASE_OF( A, V )     std::is_base_of_v<A,std::decay_t<V>>

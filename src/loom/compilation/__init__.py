@@ -1,10 +1,8 @@
-from ..devices.Device import Device
 from pathlib import Path
 import subprocess
 import tempfile
 import hashlib
 import getpass
-import shutil
 import sys
 import os
 
@@ -94,8 +92,8 @@ def build_dir():
       1. `SDOT_BUILD_DIR` if set (explicit override).
       2. Dev checkout: `<repo>/build` when writable, else a stable per-user directory
          under the system temp dir (used when the checkout is read-only).
-      3. Installed wheel (no dev checkout): the per-user cache root, the same convention
-         as the AdaptiveCpp toolchain -- never inside the venv/site-packages.
+      3. Installed wheel (no dev checkout): the per-user cache root (`cache_root`) -- never
+         inside the venv/site-packages.
 
     The chosen directory is created if needed and returned as a `Path`.
 
@@ -130,10 +128,7 @@ def _resolve_build_dir( override ):
         fallback.mkdir( parents = True, exist_ok = True )
         return fallback
 
-    # installed wheel: no meaningful in-tree default -- reuse the same per-user cache
-    # convention as the AdaptiveCpp toolchain itself. (local import avoids a circular
-    # import between this module and adaptive_cpp.)
-    from .adaptive_cpp import cache_root
+    # installed wheel: no meaningful in-tree default -- the per-user cache root.
     installed_default = cache_root() / "build"
     installed_default.mkdir( parents = True, exist_ok = True )
     return installed_default
@@ -147,70 +142,146 @@ def additional_include_dirs():
     return []
 
 
-def make_executable( exe_name: str, src_paths: list, device: Device, requires = None ):
-    """Build a standalone executable from *src_paths* using the shared compilation/xmake.lua.
-
-    Counterpart of make_dylib_from_files for the C++/CUDA tests: produces a binary
-    (SDOT_XMAKE_KIND=binary), links Catch2 instead of nanobind, and — for CUDA — routes the
-    sources through nvcc via a generated .cu shim (nvcc is selected by the .cu extension,
-    exactly like the bindings). Returns the path to the built executable.
-    """
-    project_root = Path( __file__ ).absolute().parents[ 4 ]
-    src_paths = [ Path( p ) for p in src_paths ]
-    requires = list( requires or [ "catch2" ] )
-
-    # CUDA: wrap the .cpp sources in a .cu shim so nvcc compiles them (defines __CUDACC__)
-    if device.is_cuda_gpu:
-        raise NotImplementedError
-        # shim = compilation_directories.src_dir( exe_name ) / f"{ exe_name }.cu"
-        # shim.write_text( "".join( f'#include "{ p }"\n' for p in src_paths ) )
-        # sources = [ shim ]
+def cache_root() -> Path:
+    """Le premier répertoire de cache utilisateur inscriptible : `SDOT_CACHE_DIR` s'il est mis,
+    sinon la convention de la plateforme (`~/.cache/sdot`, `~/Library/Caches/sdot`,
+    `%LOCALAPPDATA%/sdot/cache`), puis `/tmp` en dernier recours."""
+    candidates = []
+    override = os.getenv( "SDOT_CACHE_DIR" )
+    if override:
+        candidates.append( Path( override ).expanduser() )
+    if sys.platform == "darwin":
+        candidates.append( Path.home() / "Library" / "Caches" / "sdot" )
+    elif os.name == "nt":
+        base = os.getenv( "LOCALAPPDATA" ) or str( Path.home() / "AppData" / "Local" )
+        candidates.append( Path( base ) / "sdot" / "cache" )
     else:
-        sources = src_paths
+        xdg = os.getenv( "XDG_CACHE_HOME" )
+        candidates.append( ( Path( xdg ) if xdg else Path.home() / ".cache" ) / "sdot" )
+    if os.name != "nt":
+        uid = os.getuid() if hasattr( os, "getuid" ) else "shared"
+        candidates.append( Path( "/tmp" ) / f"sdot-cache-{ uid }" )
+    for p in candidates:
+        if _is_writable_dir( p ):
+            return p
+    raise RuntimeError( "sdot: could not find a writable cache directory. Set SDOT_CACHE_DIR to an explicit writable path." )
 
-    extended_path = os.pathsep.join( p for p in [
-        str( Path( sys.executable ).parent ),
-        str( Path.home() / ".local" / "bin" ),  # default xmake.io install
-        "/opt/homebrew/bin",                    # homebrew Apple Silicon
-        "/usr/local/bin",                       # homebrew Intel
-        os.environ.get( "PATH", "" ),
-    ] if p )
 
-    xmake_bin = shutil.which( "xmake", path = extended_path )
-    if xmake_bin is None:
-        raise RuntimeError( "xmake introuvable (brew install xmake ou https://xmake.io)" )
+def include_dirs() -> list:
+    """Tous les `-I` d'une compilation : les sources C++ de sdot, ceux de loom, les en-têtes
+    générés (sous le répertoire de build)."""
+    from .generated_headers import include_root
+    return [ cpp_include_root(), *additional_include_dirs(), include_root() ]
 
-    output_dir = build_dir() # / "tests"
-    output_dir.mkdir( parents = True, exist_ok = True )
 
-    print( output_dir )
+def force_build_level() -> int:
+    """`SDOT_FORCE_BUILD` as a level, not a bool -- see `make_library`.
 
-    env = {
-        **os.environ,
-        **( { "XMAKE_ROOT": "y" } if hasattr( os, "getuid" ) and os.getuid() == 0 else {} ),
-        "SDOT_XMAKE_KIND"      : "binary",
-        "SDOT_XMAKE_TARGET"    : exe_name,
-        "SDOT_XMAKE_OUTPUT_DIR": str( output_dir ),
-        "SDOT_XMAKE_NEEDS_CUDA": str( int( device.is_cuda_gpu ) ),
-        "SDOT_XMAKE_REQUIRES"  : ",".join( requires ),
-        "SDOT_XMAKE_INCLUDES"  : str.join( ",", map( str, [
-                                      project_root / "sdot" / "include",
-                                      project_root / "loom" / "include",
-                                  ] + additional_include_dirs() ) ),
-        "SDOT_XMAKE_CXXFLAGS"  : "-fno-strict-aliasing",
-        "SDOT_XMAKE_SOURCES"   : ",".join( map( str, sources ) ),
-        "SDOT_XMAKE_DEFINES"   : "",
-        "PATH"                 : extended_path,
-    }
+    0 : unset / "0" / "false" / "no" / "off" -- plain disk cache, reuse the library as-is.
+    1 : "1" (or any other truthy value) -- hash-checked rebuild: compare the hand-written C++
+        sources against the stamp left next to the library, rebuild only on a mismatch. The
+        default for test runs (`cli/main.py`), since it is what makes "the header changed"
+        distinguishable from "nothing changed" without paying for a full rebuild every time.
+    2 : "2" -- unconditional rebuild, ignoring both the library and the stamp. For when the hash
+        itself is under suspicion, or the toolchain/flags changed in a way the hash can't see.
+    """
+    v = os.getenv( "SDOT_FORCE_BUILD" )
+    if v is None:
+        return 0
+    v = v.strip().lower()
+    if v in ( "", "0", "false", "no", "off" ):
+        return 0
+    return 2 if v == "2" else 1
 
-    sdot_dir = Path( __file__ ).parents[ 4 ] / "scripts"  # holds xmake.lua
-    mode = os.environ.get( "SDOT_XMAKE_MODE", "release" )
 
-    def run( cmd ):
-        if subprocess.run( cmd, cwd = output_dir, env = env ).returncode:
-            raise RuntimeError( f"xmake failed: { ' '.join( map( str, cmd ) ) }" )
+_source_hash_cache = {}
 
-    run( [ xmake_bin, "f", "-P", str( sdot_dir ), "-y", "--require=yes", "-m", mode ] )
-    run( [ xmake_bin, "-P", str( sdot_dir ), "-v" ] )
 
-    return output_dir / exe_name
+def cpp_sources_hash() -> str:
+    """SHA-256 over every hand-written `.h`/`.hpp`/`.cxx`/`.cpp` under the C++ include roots.
+
+    `make_library`'s disk cache is keyed on the *generated* .cpp text alone (see its docstring):
+    a kernel's fwd/bwd body is in there, but the hand-written headers/sources it `#include`s
+    (`sdot/include`, `loom/include`) are not, so editing one of those does not change the key.
+    This hash covers exactly that gap. Walking + reading the whole include tree costs real time,
+    so it is computed once per (include roots) and memoized -- fine since nothing under those
+    roots changes while a test process is running.
+
+    (L'étape « couches » de la refonte remplace ce hachage global par les depfiles du
+    compilateur : la fermeture d'en-têtes exacte de chaque unité, et rien d'autre.)
+    """
+    roots = tuple( sorted( { str( cpp_include_root() ), *( str( d ) for d in additional_include_dirs() ) } ) )
+    cached = _source_hash_cache.get( roots )
+    if cached is not None:
+        return cached
+
+    files = []
+    for root in roots:
+        root_path = Path( root )
+        if root_path.is_dir():
+            files += ( p for p in root_path.rglob( "*" ) if p.suffix in ( ".h", ".hpp", ".cxx", ".cpp" ) )
+
+    h = hashlib.sha256()
+    for p in sorted( files ):
+        h.update( str( p ).encode() )
+        h.update( p.read_bytes() )
+
+    digest = h.hexdigest()
+    _source_hash_cache[ roots ] = digest
+    return digest
+
+
+def _run( cmd ):
+    print( "[cxx] $ " + " ".join( map( str, cmd ) ), flush = True )
+    r = subprocess.run( list( map( str, cmd ) ) )
+    if r.returncode:
+        raise RuntimeError( f"command failed ({ r.returncode }): { ' '.join( map( str, cmd ) ) }" )
+
+
+def _build( out_name, src_paths, device, extra_flags, kind ):
+    """Le cache disque commun à `make_library` / `make_executable`, puis la commande du
+    compilateur du device."""
+    out_dir = build_dir()
+    out_dir.mkdir( parents = True, exist_ok = True )
+    out = out_dir / out_name
+    stamp = out.with_name( out.name + ".srchash" )
+
+    level = force_build_level()
+    if out.exists() and level != 2:
+        if level == 0:
+            return out
+        # level == 1: reuse only if the hand-written sources haven't moved since this exact
+        # library was built (an older one, or one built at level 0/2, has no stamp -> rebuild).
+        if stamp.is_file() and stamp.read_text().strip() == cpp_sources_hash():
+            return out
+
+    _run( device.compiler.command( src_paths, out, include_dirs(), extra_flags, kind ) )
+    if level == 1:
+        stamp.write_text( cpp_sources_hash() )
+    elif stamp.exists():
+        stamp.unlink()
+    return out
+
+
+def make_library( lib_name, src_paths, device, *, extra_flags = None ):
+    """Compile & link `src_paths` into a shared library with the compiler of `device`.
+
+    Emits a relocatable shared object (`-shared -fPIC`) meant to be `dlopen`ed at runtime (e.g.
+    to expose an XLA FFI handler symbol to Jax). The output file name is taken verbatim, so
+    callers are expected to make it unique -- typically a content hash of the sources + the
+    compiler's `build_signature` (see `JaxFfi`).
+
+    Disk cache: if the target already exists it is returned as-is, unless `SDOT_FORCE_BUILD`
+    says otherwise (the dev/test override) -- see `force_build_level`. Since the file name is a
+    hash of the *generated* source, a changed kernel body naturally produces a new name and a
+    rebuild on its own; `SDOT_FORCE_BUILD` only matters for the hand-written headers/sources
+    that name can't see (level 1: rebuild only if their content hash moved since the last build
+    of *this* name; level 2: always). Returns the path to the built library.
+    """
+    return _build( lib_name, src_paths, device, extra_flags, "shared" )
+
+
+def make_executable( exe_name, src_paths, device, *, extra_flags = None ):
+    """Compile & link `src_paths` into an executable (the C++ tests). Same cache as
+    `make_library`."""
+    return _build( exe_name, src_paths, device, extra_flags, "binary" )

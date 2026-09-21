@@ -11,9 +11,8 @@ namespace sdot {
 /// on threads, not items. A generated body's LAMBDA cannot carry the hook, and a LOCAL struct cannot
 /// have the templated `operator()`/`max_nb_threads` a kernel needs (C++ forbids member templates in a
 /// local class); hence this wrapper lives at namespace scope. Stateless but for the int cap -> cheap
-/// to capture by value into the SYCL kernel. `operator()` just forwards to the wrapped functor (plain,
-/// non-`HD`, exactly like the generated lambda it wraps), so the optional `thread_index`/`nb_threads`
-/// args (see `_do_submit`) pass straight through.
+/// to copy into a kernel. `operator()` just forwards to the wrapped functor, so the optional
+/// `thread_index`/`nb_threads` args (see the queue's `submit_kernel`) pass straight through.
 template<class Func>
 struct MaxThreads {
     int  cap;
@@ -27,15 +26,15 @@ MaxThreads<std::decay_t<Func>> with_max_threads( int cap, Func &&func ) {
 }
 
 /// Same idea as `MaxThreads`, one level up: each launched work-ITEM becomes a work-GROUP of
-/// `group_size` cooperating work-items (a `sycl::nd_range` launch instead of a flat range) --
-/// `cap` still bounds the number of GROUPS (`max_nb_threads`, unchanged meaning: a body's
-/// per-group scratch is sized on concurrent groups, not items). `local_elems` sizes a raw
-/// `int32` `sycl::local_accessor` (`_do_submit` builds it from the handler, see run_parallel.cxx)
-/// that the body gets as `local_scratch` -- deliberately a raw SYCL local view, not wrapped in a
-/// `Tensor`: the cooperative algorithm (histogram/scan/scatter) lives entirely in the C++ body,
-/// this facility only has to launch the nd_range and hand it the group + local memory. `func`'s
-/// optional `local_index`/`local_size`/`group`/`local_scratch` params (see `_do_submit`) pass
-/// straight through, same opt-in `if constexpr(requires{...})` mechanism as `thread_index`.
+/// `group_size` cooperating lanes (a cooperative launch instead of a flat one, see the queue's
+/// `submit_kernel_grouped`) -- `cap` still bounds the number of GROUPS (`max_nb_threads`,
+/// unchanged meaning: a body's per-group scratch is sized on concurrent groups, not items).
+/// `local_elems` sizes a raw `int32` scratch SHARED by the group's lanes, that the body gets as
+/// `local_scratch` -- deliberately a raw pointer-like view, not wrapped in a `Tensor`: the
+/// cooperative algorithm (histogram/scan/scatter) lives entirely in the C++ body, this facility
+/// only has to launch the groups and hand them the group handle + local memory. The body's
+/// `group_index`/`local_index`/`local_size`/`group`/`local_scratch`/`sub_group` params pass
+/// straight through.
 template<class Func>
 struct GroupKernel {
     int  cap;
@@ -55,7 +54,7 @@ GroupKernel<std::decay_t<Func>> with_group_kernel( int cap, int group_size, int 
 /// call func for each list item, parallel way.
 ///   func may define directly (in method) or indirectly (via surdefinitions) the limits in terms of nb threads, ...
 ///
-/// On sélectionne la sycl::queue en fonction des arguments
+/// On sélectionne la queue en fonction des arguments
 ///
 /// On transforme tous les objets en LocalMemory pour le kernel
 ///

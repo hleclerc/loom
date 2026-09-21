@@ -485,7 +485,7 @@ def _run_entries(kind, entries, file_modules, env_name):
 
     # The kernel build cache keys on the GENERATED .cpp alone -- the hand-written headers it
     # includes (sdot/include, loom/include) are not part of the hash (see
-    # `compilation.adaptive_cpp.make_library`). So editing one of those and re-running the
+    # `compilation.make_library`). So editing one of those and re-running the
     # tests would silently reuse the previous .dylib, and the run would say nothing about the
     # new code. Tests are where that matters most, so they default to level 1 (rebuild only
     # when those sources actually changed, via `_cpp_sources_hash` -- cheap on a cache hit)
@@ -632,8 +632,11 @@ def _run_cpp_tests(filters):
     """Returns (nb_files_matched, failures) -- the count lets the caller tell
     "nothing matched" apart from "matched, ran, all passed" (both look like
     an empty failures list otherwise)."""
-    from loom.compilation.adaptive_cpp import make_executable
+    from loom.compilation import make_executable
     from loom.devices.Device import Device
+    # same rebuild policy as the Python entries (see `_run_entries`): an executable is named after
+    # the test file, so only the source hash can tell "the headers changed" from "nothing changed".
+    os.environ.setdefault("SDOT_FORCE_BUILD", "1")
     cpp_dir = ROOT / "loom" / "tests" / "cpp"
     if not cpp_dir.is_dir(): return 0, []
     files = sorted(cpp_dir.glob("test_*.*"))

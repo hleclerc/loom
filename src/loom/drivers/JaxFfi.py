@@ -1,12 +1,12 @@
 """Compile C++ kernels into XLA-FFI handlers and expose them to Jax.
 
 Pipeline (see `JaxDriver.call`): a C++ *body* is wrapped into a self-registering XLA FFI
-handler, compiled to a shared library with AdaptiveCpp (`make_library`), `dlopen`ed, and
+handler, compiled to a shared library with the device's compiler (`make_library`), `dlopen`ed, and
 registered with `jax.ffi.register_ffi_target`. The returned target name feeds
 `jax.ffi.ffi_call`, which inserts the call into the XLA program (works eager and under
 `jax.jit`, on CPU and — later — CUDA).
 
-Two caches, both keyed by a content hash of (source + compilation target):
+Two caches, both keyed by a content hash of (source + the compiler's build signature):
 * disk : the compiled `.so`/`.dylib` (handled by `make_library`; a changed source yields a
          new hash, hence a new file and a rebuild).
 * RAM  : `_loaded` keeps the `ctypes` handle mapped and marks the target as already
@@ -28,8 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy
 
-from ..compilation.adaptive_cpp import make_library, resolve_targets, build_signature, ACPP_VERSION
-from ..compilation import build_dir
+from ..compilation import build_dir, make_library
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
 
@@ -67,10 +66,9 @@ def _lib_suffix() -> str:
 
 
 def _ffi_include_flags() -> list:
-    # jaxlib ships the header-only XLA FFI C++ API (xla/ffi/api/ffi.h) under this dir; the shared
-    # generated headers (`sdot/generated/...`) live under the build tree, on their own `-I` root.
-    from ..compilation.generated_headers import include_root
-    return [ "-I", jax.ffi.include_dir(), "-I", str( include_root() ) ]
+    # jaxlib ships the header-only XLA FFI C++ API (xla/ffi/api/ffi.h) under this dir. `-isystem`,
+    # not `-I`: its headers do not compile warning-free, and those warnings are not ours to read.
+    return [ "-isystem", jax.ffi.include_dir() ]
 
 
 def render_source( body: str ) -> str:
@@ -92,16 +90,11 @@ def compile_and_register( source: str, device, prefix: str = "" ) -> str:
     # Dropping the device OBJECT from the key is safe because the source always carries the
     # device anyway (`_CALL_TEMPLATE` substitutes `device.cpp_queue_type`), so a CPU and a CUDA
     # handler can never hash to the same name -- which matters, since this name is also the Jax
-    # target and registration is per platform. What we gain: `str( CudaGpu:1 )` used to compile
-    # the very same library twice on a two-GPU node, while conversely it never mentioned the
-    # compute capability -- so under the ahead-of-time targets a cache shared between machines
-    # (a cluster home, a baked container image) could hand an sm_75 binary to an sm_90 card.
-    # Naming the target fixes both, and under `generic` the architecture stops being part of
-    # the question at all.
-    # ... et les FLAGS, avec la machine quand `-march=native` en fait partie (`build_signature`) :
-    # un reglage de compilation change le binaire autant que le source.
-    targets, _, _ = resolve_targets( device )
-    name = prefix + encode_base_62( f"{ source }|{ targets }|{ ACPP_VERSION }|{ build_signature( targets ) }" )
+    # target and registration is per platform. (`str( CudaGpu:1 )` used to compile the very same
+    # library twice on a two-GPU node.) How it is compiled = the compiler's `build_signature`:
+    # the flags, and the machine when `-march=native` is among them -- a compilation setting
+    # changes the binary as much as the source does, and a GPU architecture belongs there too.
+    name = prefix + encode_base_62( f"{ source }|{ device.compiler.build_signature }" )
     if name in _loaded:
         return name
 
@@ -114,13 +107,7 @@ def compile_and_register( source: str, device, prefix: str = "" ) -> str:
         extra_flags = _ffi_include_flags(),
     )
 
-    # RTLD_GLOBAL, deliberately: under the `generic` target the kernel is JIT-compiled at run
-    # time into a SEPARATE shared library, which the AdaptiveCpp runtime dlopens. Any host
-    # symbol that library needs (libstdc++, libm, ...) has to be resolvable in the process's
-    # global namespace, and python itself brings none of them. Loading our handler globally
-    # publishes them (the flag propagates to its dependencies). With RTLD_LOCAL the JIT'd
-    # library fails to load with an `undefined symbol` — at run time, long after compiling fine.
-    lib = ctypes.CDLL( str( lib_path ), mode = ctypes.RTLD_GLOBAL )
+    lib = ctypes.CDLL( str( lib_path ) )
     handler = getattr( lib, _HANDLER_SYMBOL )
     jax.ffi.register_ffi_target(
         name, jax.ffi.pycapsule( handler ), platform = device.ffi_platform,
@@ -145,6 +132,7 @@ def call_body( body: str, device ):
 # body can read and write `cell.<field>`.
 _CALL_TEMPLATE = """\
 #include "xla/ffi/api/ffi.h"
+#include <{queue_include}>
 #define SDOT_QUEUE {queue_type}
 #include <sdot/Queue.h>
 #include <loom/support/algorithms/CartesianIndices.h>
@@ -172,13 +160,17 @@ using namespace sdot;
 // pulls in its own generated macros), then whatever the body listed for itself.
 {extra_includes}
 
+// what the body runs per item: a NAMED functor at namespace scope (never a lambda -- a device
+// compiler is happier with a plain struct), rendered by the code object from the call's arguments.
+{preamble}
+
 {stream_decls}
 static ffi::Error sdot_ffi_impl( {params} ) {{
 {stream_sync}
-    // the one execution context of this call. A `sycl::queue` is expensive to create, and this
-    // handler always runs on the same device (the device is in the TYPE of everything below), so
-    // there is exactly one, made on first use -- and never destroyed: the SYCL runtime is torn
-    // down before the statics of a dlopen'ed handler are, and a queue outliving it deadlocks.
+    // the one execution context of this call. A queue is expensive to create (a thread pool, a
+    // stream), and this handler always runs on the same device (the device is in the TYPE of
+    // everything below), so there is exactly one, made on first use -- and never destroyed: it
+    // may still own threads when the process tears down its dlopen'ed handlers.
     static Queue &queue = *new Queue();
 
     // what the body iterates over: the multi-indices of the batch axes. Unmapped, that is a single
@@ -262,7 +254,7 @@ def _render_call( code, ca, device ):
     # then attributes.
     # `LOOM_XLA_STREAM_SYNC=1` : recevoir le FLUX de XLA et l'attendre avant de commencer.
     #
-    # Ce handler lance son travail sur SA PROPRE queue SYCL, que XLA ne connaît pas. Il attend bien
+    # Ce handler lance son travail sur SA PROPRE queue, que XLA ne connaît pas. Il attend bien
     # la sienne avant de rendre la main (`QueueEvent` est RAII), mais rien ne l'ordonne par rapport
     # à celle de XLA : quand on démarre, XLA peut ENCORE ÊTRE EN TRAIN de produire nos entrées, et
     # dès qu'on rend la main il peut recycler la mémoire de nos sorties. Un `cudaStreamSynchronize`
@@ -271,7 +263,7 @@ def _render_call( code, ca, device ):
     # Les types CUDA sont déclarés à la main plutôt qu'inclus : l'image non-AOT retire le toolkit,
     # donc `cuda_runtime.h` n'y existe pas. `cudaStream_t` EST `struct CUstream_st *`.
     #
-    # Ce n'est qu'une EXPÉRIENCE : la vraie correction serait de bâtir la queue SYCL SUR le flux de
+    # Ce n'est qu'une EXPÉRIENCE : la vraie correction serait de bâtir la queue SUR le flux de
     # XLA, pas de synchroniser en gros.
     want_stream = ( getattr( device, "is_cuda_gpu", False )
                     and os.environ.get( "LOOM_XLA_STREAM_SYNC", "" ).strip().lower() in ( "1", "true", "yes", "on" ) )
@@ -308,7 +300,9 @@ def _render_call( code, ca, device ):
     source = _CALL_TEMPLATE.format(
         stream_decls  = stream_decls,
         stream_sync   = stream_sync,
+        queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
+        preamble      = code.preamble_for( "fwd", ca ),
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'
                                  for n in ca.axis_names ),

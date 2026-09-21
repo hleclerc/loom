@@ -80,18 +80,20 @@ class TorchDriver:
 
     @staticmethod
     def default_device_for( ftype ):
-        # cuda
+        # cuda -- only if we can compile for it (see `JaxDriver.default_device_for`)
         if torch.cuda.is_available():
-            from .CudaGpu import CudaGpu
-            return CudaGpu( 0 )
+            from ..devices.CudaGpu import CudaGpu
+            gpu = CudaGpu( 0 )
+            if gpu.device_is_present:
+                return gpu
 
         # Metal (MPS) only supports FP32
         if torch.backends.mps.is_available() and ftype == "FP32":
-            from .AppleGpu import AppleGpu
+            from ..devices.AppleGpu import AppleGpu
             return AppleGpu()
 
         # cpu
-        from .Cpu import Cpu
+        from ..devices.Cpu import Cpu
         return Cpu()
 
     @staticmethod

@@ -4,7 +4,7 @@
 #include "../kernels/transfer_cost.h"
 #include "../common_types.h"
 #include "../Ct.h"
-#include <SYCL/sycl.hpp>
+#include "../atomic_add.h"
 #include <cstdint>
 
 namespace sdot {
@@ -36,14 +36,7 @@ struct ErrorBuffer {
     SI   max_records;
 
     void record( std::int32_t kind, std::int32_t id, SI value ) const {
-        sycl::atomic_ref<
-            std::int32_t,
-            sycl::memory_order::relaxed,
-            sycl::memory_scope::device,
-            sycl::access::address_space::generic_space
-        > nb_records( view( 0 ).ref() );
-
-        const std::int32_t num = nb_records.fetch_add( 1 );
+        const std::int32_t num = atomic_fetch_add( view( 0 ).ref(), std::int32_t( 1 ) );
         if ( num >= max_records )
             return;
 

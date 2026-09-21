@@ -6,7 +6,7 @@ n'oriente vers rien. Ces tests-ci vérifient le CONTRAT, en trois assertions sé
 
     1. chaque voie du groupe s'exécute (`local_index` couvre bien `0..local_size-1`) ;
     2. `local_scratch` est PARTAGÉ par le groupe -- ce qu'une voie y écrit, une autre le lit ;
-    3. `sycl::group_barrier` ordonne ces écritures avant ces lectures.
+    3. `group_barrier` ordonne ces écritures avant ces lectures.
 
 Un backend qui rend `local_scratch` privé par voie, ou qui n'exécute qu'une voie sur deux, tombe
 ici, à un endroit qui le nomme.
@@ -33,7 +33,7 @@ def _sum_over_lanes( group_size ):
         FfiCodeParallel( name = f"test_group_kernel_{ group_size }",
             fwd_code = """
                 local_scratch[ local_index ] = local_index;
-                sycl::group_barrier( group );
+                group_barrier( group );
                 if ( local_index == 0 ) {
                     int s = 0;
                     for ( int k = 0; k < local_size; ++k )
@@ -72,7 +72,7 @@ def _runtime_subgroup_width( group_size ):
         FfiCodeParallel( name = f"test_group_sgw_{ group_size }",
             fwd_code = """
                 if ( local_index == 0 )
-                    res( group_index ) = SI( sub_group.get_local_range()[ 0 ] );
+                    res( group_index ) = SI( sub_group.get_local_linear_range() );
             """,
             thread_cap = "res.shape( 0 )",
             group_size = str( group_size ),

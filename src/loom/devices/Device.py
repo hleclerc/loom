@@ -39,12 +39,16 @@ class Device:
     def default() -> 'Device':
         if Device._default_device is None:
             from ..drivers.driver import driver
+            from .Cpu import Cpu
+            Device._default_device = Cpu()
             if driver.available_gpus:
+                # the card is there, but it is only a device for us if we can compile for it
+                # (`device_is_present` asks the compiler): until the CUDA backend is ported, a GPU
+                # machine works on its CPU.
                 from .CudaGpu import CudaGpu
-                Device._default_device = CudaGpu( 0 )
-            else:
-                from .Cpu import Cpu
-                Device._default_device = Cpu()
+                gpu = CudaGpu( 0 )
+                if gpu.device_is_present:
+                    Device._default_device = gpu
         return Device._default_device
 
     @property
@@ -75,42 +79,20 @@ class Device:
         """Codegen context tag for per-context FfiCode selectors ( see FfiCode.select_for )."""
         raise NotImplementedError
 
-    # ── AdaptiveCpp / Jax-FFI mapping ─────────────────────────────────────────
-    # Consumed by sdot.compilation.adaptive_cpp (make_executable / make_library) and by the
-    # Jax FFI registration. Defaults describe a device NOT reachable through acpp (e.g. Apple
-    # GPU / Metal): `acpp_reachable` False makes the acpp builders raise. Reachable devices
-    # override these.
-    #
-    # NOTE: the *target* is normally NOT a property of the device. The default compilation
-    # path is `generic` (AdaptiveCpp's SSCP flow): one target-independent binary, JIT-compiled
-    # for whatever hardware is present at run time. What lives here is only what genuinely
-    # depends on the device: whether acpp can reach it, which backend the acpp *build* must
-    # enable, and the ahead-of-time fallback used when the SSCP toolchain is unavailable.
-    # The policy itself is `compilation.adaptive_cpp.resolve_targets`.
     @property
-    def acpp_reachable( self ) -> bool:
-        """Whether AdaptiveCpp can target this device at all (False for e.g. Apple GPU / Metal)."""
-        return False
+    def cpp_queue_include( self ) -> str:
+        """The header that defines `cpp_queue_type` ("loom/support/kernels/CpuQueue.h" | ...).
+        Included by the generated source BEFORE `sdot/Queue.h`, so the queue is the device's --
+        each queue header is self-contained, none includes another device's toolkit."""
+        raise NotImplementedError
 
+    # ── how the device compiles ───────────────────────────────────────────────
+    # A device compiles with ITS compiler (`compilation.Compiler`): the host C++ compiler for the
+    # CPU, nvcc around it for CUDA. `make_library` asks the compiler for a command and handles the
+    # disk cache, the same for every device -- this property is the whole dispatch.
     @property
-    def acpp_aot_targets( self ):
-        """`--acpp-targets` for the AHEAD-OF-TIME fallback ("omp", "cuda:sm_80"); None if there
-        is none. This is the ONLY place a GPU architecture is ever named — under `generic` the
-        architecture is a run-time detail, which is exactly the point."""
-        return None
-
-    @property
-    def acpp_aot_profile( self ):
-        """AdaptiveCpp feature profile the AOT fallback needs ("minimal" | "full")."""
-        return "minimal"
-
-    @property
-    def acpp_backends( self ):
-        """GPU backends to enable when BUILDING acpp (e.g. ("cuda",)); () for CPU-only.
-
-        Needed even under `generic`: the SSCP JIT emits PTX, but talking to the card still
-        goes through the compiled-in CUDA backend plugin (which only dlopens the driver)."""
-        return ()
+    def compiler( self ):
+        raise NotImplementedError( f"{ self.name }: no compiler for this device" )
 
     @property
     def ffi_platform( self ) -> str:
@@ -119,11 +101,9 @@ class Device:
 
     @property
     def device_is_present( self ) -> bool:
-        """Whether this device is actually usable here (hardware present AND acpp-reachable).
-
-        Default: reachable iff acpp can target it (covers Cpu -> True, Apple GPU / Metal ->
-        False). Devices whose hardware may be absent (CUDA) refine this."""
-        return self.acpp_reachable
+        """Whether this device is actually usable here (hardware present AND a compiler for it).
+        Default False; each device says for itself."""
+        return False
 
     def __eq__( self, value, / ) -> bool:
         if not isinstance( value, Device ):
@@ -190,16 +170,16 @@ class Device:
         raise NotImplementedError
 
     def group_size( self, **per_group_item ) -> int:
-        """How many work-items cooperate in ONE SYCL work-group (the second level of parallelism:
+        """How many lanes cooperate in ONE work-group (the second level of parallelism:
         `nb_threads` sizes how many CONCURRENT items/groups run, this sizes how many work-items
         attack EACH one). A SEPARATE, orthogonal decision from `nb_threads`/`_hw_thread_cap` (that
         one is a whole-device/global-memory occupancy question; this one is a per-block/local-memory
         one) -- do not try to unify them.
 
         Default `1`: a work-group of size 1 makes the cooperative code path degenerate EXACTLY to
-        the single-work-item algorithm it generalizes (a `sycl::group` of size 1 hitting
-        `group_barrier`/a `local_accessor` is well-defined and cheap) -- so any device that does not
-        override this is automatically safe, at the cost of no actual cooperation."""
+        the single-lane algorithm it generalizes (a group of size 1 hitting `group_barrier` / its
+        `local_scratch` is well-defined and cheap) -- so any device that does not override this is
+        automatically safe, at the cost of no actual cooperation."""
         return 1
 
     def driver_version_for_jax( self, devices ):
@@ -207,9 +187,9 @@ class Device:
 
     @property
     def subgroup_size( self ) -> int:
-        """Warp/wavefront width: how many work-items of a work-group execute in lockstep and can
-        cheaply share a value via `sycl::group_broadcast`/`sycl::sub_group` collectives, one level
-        BELOW `group_size` (a work-group is `group_size / subgroup_size` sub-groups). Default `1`
+        """Warp/wavefront width: how many lanes of a work-group execute in lockstep and can
+        cheaply share a value via sub-group collectives, one level BELOW `group_size` (a work-group
+        is `group_size / subgroup_size` sub-groups). Default `1`
         (no sub-group cooperation, matching `group_size`'s own default degeneration) -- a body using
         `sub_group` (see `FfiCode`'s docstring) must degenerate correctly at `subgroup_size == 1`
         exactly like it must at `group_size == 1`, see `OtPlan1d.cxx::sort_diracs`."""

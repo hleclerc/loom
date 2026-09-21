@@ -221,7 +221,7 @@ TEST_CASE( "TensorView — indices_of intersection (formes différentes)", "" ) 
     CHECK( a[ 3 ] == 34 && a[ 4 ] == 45 && a[ 5 ] == 6 );  // ligne 1 : 4+30, 5+40, 6 (intact)
 }
 
-TEST_CASE( "TensorView — réductions sum/max (SYCL reduction)", "" ) {
+TEST_CASE( "TensorView — réductions sum/max (RedList)", "" ) {
     auto ql = tuple( CpuQueue() );
     double d[] = { 1, 2, 3, 4, 5, 6 };
     auto t = tensor_view( d, tuple( 2, 3 ) );

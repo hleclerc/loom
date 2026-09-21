@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 jax = ["jax"]
 torch = ["torch"]
+# le compilateur CUDA de pip, epingle : le frontend de 13.4 s'effondre sur nos noyaux, 13.3 passe
+cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.4"]
 
 [project.scripts]
 loom-toolchain = "loom.toolchain:main"

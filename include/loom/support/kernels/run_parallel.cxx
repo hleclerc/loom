@@ -1,13 +1,10 @@
 #pragma once
 
-#include "../algorithms/for_each_item.h"
 #include "../algorithms/min.h"
 #include <loom/support/common_macros.h>
-#include "transfer_cost.h"
 #include "make_avaiable.h"
 #include "run_parallel.h"
 #include "QueueEvent.h"
-#include "kernel_cost.h"
 #include "IoCategory.h"
 #include "../Ct.h"
 #include <tuple>
@@ -15,17 +12,20 @@
 namespace sdot {
 
 namespace detail::RunParallel {
-    template<int nb_args>
-    auto _map_reduce_run_arg( const auto &map, const auto &reduce, auto io_category, Ct<int,nb_args>, auto &&head, auto &&...tail ) {
-        if constexpr ( nb_args == 0 )
-            return reduce( FORWARD( head ), FORWARD( tail )... );
-        else if constexpr ( is_io_category<DECAYED_TYPE_OF( head )> )
-            return _map_reduce_run_arg( map, reduce, head, Ct<int,nb_args-1>(), FORWARD( tail )... );
-        else {
-            return map( io_category, FORWARD( head ), [&]( auto &&mapped ) {
-                return _map_reduce_run_arg( map, reduce, io_category, Ct<int,nb_args-1>(), FORWARD( tail )..., FORWARD( mapped ) );
-            } );
-        }
+    /// La forme noyau de chaque argument, dans un `std::tuple` : `( io, a, io, b, c, ... )` ->
+    /// `( map( io, a ), map( io, b ), map( io, c ) )`, une catégorie valant pour ce qui la suit.
+    /// Un pli sur la liste, sans compteur ni continuation -- `kernel_form` rend une VALEUR, et la
+    /// forme d'origine (compteur `Ct<int,n>` + continuations, les valeurs tournées en fin de
+    /// liste) faisait s'effondrer le frontend de nvcc 13.4 dès que le compteur était dépendant.
+    auto _map_args( const auto &/*map*/, auto /*io_category*/ ) {
+        return std::tuple<>();
+    }
+
+    auto _map_args( const auto &map, auto io_category, auto &&head, auto &&...tail ) {
+        if constexpr ( is_io_category<DECAYED_TYPE_OF( head )> )
+            return _map_args( map, head, FORWARD( tail )... );
+        else
+            return std::tuple_cat( std::make_tuple( map( io_category, FORWARD( head ) ) ), _map_args( map, io_category, FORWARD( tail )... ) );
     }
 
     /// Pèle les `ReductionTarget` (forcément en tête des args : les accumulateurs suivent
@@ -87,52 +87,37 @@ namespace detail::RunParallel {
         }
     }
 
-    // corps de run_parallel, avec dépendances explicites `deps` (peut être Dependencies<0>)
-    auto _run_parallel( auto &&queue_list, auto &&deps, auto &&item_list, auto &&func, auto &&...args ) {
-        // costs
-        auto costs = apply_values( FORWARD( queue_list ), [&]( auto &&...queues ) {
-            auto cost_for = [&]( auto &&queue ) {
-                return _map_reduce_run_arg( [&]( auto io_category, const auto &arg, auto &&cont ) {
-                    return cont( transfer_cost( queue, io_category, arg ) );
-                }, [&]( auto &&...map_out ) {
-                    return ( map_out + ... + kernel_cost( func, queue, item_list, args... ) );
-                }, InpList(), Ct<int,sizeof...(args)+2>(), item_list, UndefList(), args... );
-            };
-            return tuple( cost_for( queues )... );
-        } );
-
-        // first cost == min cost
-        double min_cost = costs.apply_values( []( auto...values ) { return min( values... ); } );
-        int index_in_queue = 0;
-        bool done = false;
-        QueueEvent result; ///< event du contexte choisi (RAII : wait à la destruction si non consommé)
-        for_each_item( queue_list, [&]( auto &&queue ) {
-            double cost = costs[ index_in_queue++ ];
-            if ( done || cost > min_cost )
-                return;
-            done = true;
-
-            result = _map_reduce_run_arg( [&]( auto io_category, auto &&arg, auto &&cont ) {
-                // une cible de réduction n'est pas « rendue disponible » (c'est un scalaire hôte) :
-                // on la transforme en `ReductionTarget` (op + pointeur hôte), traitée par `_submit_kernel`.
-                if constexpr ( is_red_list<DECAYED_TYPE_OF( io_category )> )
-                    return cont( ReductionTarget{ io_category.op, &arg } );
-                else
-                    return cont( kernel_form( queue, io_category, FORWARD( arg ) ) );
-            }, [&]( auto &&...args ) {
-                return _run_kernel( queue, deps, FORWARD( func ), FORWARD( args )... );
-            }, InpList(), Ct<int,sizeof...(args)+2>(), item_list, UndefList(), args... );
-        } );
-        return result;
+    // corps de run_parallel, avec dépendances explicites `deps` (peut être Dependencies<0>).
+    //
+    // UNE queue. La forme d'origine prenait une LISTE de queues et choisissait la moins coûteuse
+    // (transferts compris) dans une boucle `for_each_item` à lambda générique -- un choix que rien
+    // n'exerce (un appel a UN contexte, celui de son device), et une construction sur laquelle le
+    // frontend de nvcc 13.4 (EDG) s'effondre (« Segmentation fault » sur tout noyau, quand 13.3
+    // passait). Le jour où deux contextes se disputent un appel, la sélection se fera ICI, avant
+    // la chaîne de continuations, pas dedans.
+    template<class Queue,class Deps,class ItemList,class Func,class... Args>
+    auto _run_parallel( Queue &&queue, Deps &&deps, ItemList &&item_list, Func &&func, Args &&...args ) {
+        auto mapped = _map_args( [&]( auto io_category, auto &&arg ) {
+            // une cible de réduction n'est pas « rendue disponible » (c'est un scalaire hôte) :
+            // on la transforme en `ReductionTarget` (op + pointeur hôte), traitée par `_submit_kernel`.
+            if constexpr ( is_red_list<DECAYED_TYPE_OF( io_category )> )
+                return ReductionTarget{ io_category.op, &arg };
+            else
+                return kernel_form( queue, io_category, FORWARD( arg ) );
+        }, InpList(), item_list, UndefList(), args... );
+        return std::apply( [&]( auto &&...m ) {
+            return _run_kernel( queue, deps, FORWARD( func ), FORWARD( m )... );
+        }, std::move( mapped ) );
     }
 }
 
 // `second` = soit un Dependencies (déps explicites via after(...)), soit l'item_list (pas de déps).
 auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest ) {
-    // une queue seule vaut une liste d'une queue (une queue est un contexte d'exécution, pas un Tuple)
-    if constexpr ( requires { typename DECAYED_TYPE_OF( queue_list )::DefaultKernelMemorySpace; } )
-        return run_parallel( tuple( FORWARD( queue_list ) ), FORWARD( second ), FORWARD( rest )... );
-    else if constexpr ( is_dependencies<DECAYED_TYPE_OF( second )> )
+    // une liste d'UNE queue vaut la queue (l'ancienne forme à choix de contexte, voir `_run_parallel`)
+    if constexpr ( ! requires { typename DECAYED_TYPE_OF( queue_list )::DefaultKernelMemorySpace; } ) {
+        static_assert( DECAYED_TYPE_OF( queue_list )::ct_size == 1, "run_parallel : une seule queue" );
+        return run_parallel( queue_list[ Ct<int,0>() ], FORWARD( second ), FORWARD( rest )... );
+    } else if constexpr ( is_dependencies<DECAYED_TYPE_OF( second )> )
         return detail::RunParallel::_run_parallel( FORWARD( queue_list ), FORWARD( second ), FORWARD( rest )... );
     else
         return detail::RunParallel::_run_parallel( FORWARD( queue_list ), Dependencies<0>{}, FORWARD( second ), FORWARD( rest )... );

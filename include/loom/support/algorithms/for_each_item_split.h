@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../common_types.h"
 #include "for_each_item.h"
 
@@ -11,7 +13,7 @@ namespace detail {
 }
 
 
-T_TA constexpr auto for_each_item_split( T &&list, PI rel, PI mod, A &&func ) -> std::enable_if_t<detail::has_for_each_item_split_method<T>::value || detail::has_for_each_item_method<T>::value> {
+T_TA    constexpr auto for_each_item_split( T &&list, PI rel, PI mod, A &&func ) -> std::enable_if_t<detail::has_for_each_item_split_method<T>::value || detail::has_for_each_item_method<T>::value> {
     if constexpr ( detail::has_for_each_item_split_method<T>::value ) {
         list.for_each_item_split( rel, mod, FORWARD( func ) );
     } else {

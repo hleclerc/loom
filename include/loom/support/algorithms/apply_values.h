@@ -4,7 +4,7 @@
 
 namespace sdot {
 
-auto apply_values( auto &&list, auto &&func ) requires requires { list.apply_values( FORWARD( func ) ); } {
+HD auto apply_values( auto &&list, auto &&func ) requires requires { list.apply_values( FORWARD( func ) ); } {
     return list.apply_values( FORWARD( func ) );
 }
 

@@ -229,7 +229,8 @@ class CallArg_Aggregate( CallArg ):
         (the members lost an axis), deduced, not spelled; the qualified name reaches the template
         rather than the current instantiation (see `_cpp_make_available`)."""
         values = ", ".join( f"{ c.name }( index... )" for c in fields )
-        return ( "    auto operator()( const auto &...index ) const {\n"
+        # `HD` : indexé depuis un noyau (`scratch( batch_index )`), donc device aussi
+        return ( "    HD auto operator()( const auto &...index ) const {\n"
                  f"        return ::sdot::{ self.type_name }{{ { values } }};\n"
                  "    }" )
 

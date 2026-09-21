@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../kernels/make_avaiable.h"
 #include "../kernels/transfer_cost.h"
 #include "../common_types.h"
@@ -35,7 +37,7 @@ struct ErrorBuffer {
     View view;         ///< rank 1, `std::int32_t`
     SI   max_records;
 
-    void record( std::int32_t kind, std::int32_t id, SI value ) const {
+    HD void record( std::int32_t kind, std::int32_t id, SI value ) const {
         const std::int32_t num = atomic_fetch_add( view( 0 ).ref(), std::int32_t( 1 ) );
         if ( num >= max_records )
             return;
@@ -45,13 +47,13 @@ struct ErrorBuffer {
         view( 1 + 3 * num + 2 ).ref() = std::int32_t( value );
     }
 
-    void fill_with( auto &&queue, auto v ) { view.fill_with( FORWARD( queue ), v ); }
+       void fill_with( auto &&queue, auto v ) { view.fill_with( FORWARD( queue ), v ); }
 
-    auto transfer_cost( const auto &queue, auto io_category ) const {
+       auto transfer_cost( const auto &queue, auto io_category ) const {
         return sdot::transfer_cost( queue, io_category, view );
     }
 
-    auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
+       auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
         return sdot::make_available( queue, io_category, view, [&]( auto &&kernel_view ) {
             return cont( ErrorBuffer<DECAYED_TYPE_OF( kernel_view )>{ FORWARD( kernel_view ), max_records } );
         } );
@@ -62,12 +64,12 @@ struct ErrorBuffer {
 /// the kernel. A TYPE, so the whole thing compiles away -- as `NoneTensor` does for a tensor that
 /// is not there.
 struct NoErrorBuffer {
-    constexpr void record        ( std::int32_t /*kind*/, std::int32_t /*id*/, SI /*value*/ ) const {}
-    constexpr auto transfer_cost ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-    constexpr auto make_available( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+    HD constexpr void record     ( std::int32_t /*kind*/, std::int32_t /*id*/, SI /*value*/ ) const {}
+       constexpr auto transfer_cost ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
+       constexpr auto make_available( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
 };
 
 template<class View>
-auto make_error_buffer( View view, SI max_records ) { return ErrorBuffer<View>{ view, max_records }; }
+HD auto make_error_buffer( View view, SI max_records ) { return ErrorBuffer<View>{ view, max_records }; }
 
 } // namespace sdot

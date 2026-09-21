@@ -59,7 +59,20 @@ class CudaGpu( Device ):
     @property
     def compiler( self ):
         from ..compilation.Compiler import Nvcc
-        return Nvcc()
+        return Nvcc( arch = self.sm_arch )
+
+    # ── the generated source, CUDA-side ─────────────────────────────────────
+    # The queue is XLA's stream for this call: what XLA launched before us on it is done when we
+    # start, and what we launch is done when XLA reads our outputs -- ordered by the stream, no
+    # synchronization. Hence a stream parameter, bound as the platform stream.
+    def cpp_stream_param( self ):
+        return "cudaStream_t xla_stream"
+
+    def cpp_stream_bind( self ):
+        return ".Ctx<ffi::PlatformStream<cudaStream_t>>()"
+
+    def cpp_queue_decl( self ):
+        return "Queue queue( xla_stream );"
 
     @property
     def sm_arch( self ):

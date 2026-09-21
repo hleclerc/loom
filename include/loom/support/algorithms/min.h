@@ -5,11 +5,11 @@
 
 namespace sdot {
 
-constexpr auto min( auto &&a ) {
+HD constexpr auto min( auto &&a ) {
     return FORWARD( a );
 }
 
-constexpr auto min( auto &&a, auto &&b ) {
+HD constexpr auto min( auto &&a, auto &&b ) {
     auto ieq = a <= b;
     if constexpr ( requires { DECAYED_TYPE_OF( ieq )::value; } ) {
         if constexpr ( DECAYED_TYPE_OF( ieq )::value )
@@ -22,7 +22,7 @@ constexpr auto min( auto &&a, auto &&b ) {
     }
 }
 
-constexpr auto min( auto &&a, auto &&b, auto &&...tail ) {
+HD constexpr auto min( auto &&a, auto &&b, auto &&...tail ) {
     return min( min( FORWARD( a ), FORWARD( b ) ), FORWARD( tail )... );
 }
 

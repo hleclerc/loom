@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../common_types.h"
 #include "../Ct.h"
 
@@ -23,20 +25,20 @@ struct NoneTensor {
     using            AxisNames              = _AxisNames;
     SCInt            ct_rank                = Shape::ct_size;
 
-    constexpr auto   is_valid               () const { return Ct<bool,false>(); } ///< no data at all
-    constexpr auto   surely_null            () const { return Ct<bool,true >(); } ///< nothing to read: reads nothing but zero
+    HD constexpr auto   is_valid            () const { return Ct<bool,false>(); } ///< no data at all
+    HD constexpr auto   surely_null         () const { return Ct<bool,true >(); } ///< nothing to read: reads nothing but zero
 
     /// selecting axes on something that is not there gives... something that is not there. What
     /// this buys is that a batch index applies to a WHOLE aggregate (`cell( batch_index )`) even
     /// when one of its attributes is unbound: absence stays absence, and stays a compile-time fact.
-    constexpr auto   operator()             ( auto &&.../*index*/ ) const { return *this; }
+    HD constexpr auto   operator()          ( auto &&.../*index*/ ) const { return *this; }
 
     // as a `run_parallel` argument: there is no storage to make available anywhere, so it
     // crosses into the kernel unchanged, at no cost, whatever the queue and the io category.
-    constexpr auto   transfer_cost          ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-    constexpr auto   make_available         ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
+       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
 
-    void             display                ( auto &ds ) const { ds << "NoneTensor"; }
+    HD void          display                ( auto &ds ) const { ds << "NoneTensor"; }
 };
 
 } // namespace sdot

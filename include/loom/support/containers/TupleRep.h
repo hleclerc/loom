@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "Tuple.h"  // IWYU pragma: export
 
 namespace sdot {
@@ -9,20 +11,20 @@ namespace sdot {
 template<class... Types>
 class TupleRep {
 public:
-    /* */           TupleRep           ( Function, auto &&func, auto index ) : data( Function{}, FORWARD( func ), index ) {}
-    /* */           TupleRep           ( Function, auto &&func ) : TupleRep( FORWARD( func ), 0_c ) {}
+    /* */           HD TupleRep        ( Function, auto &&func, auto index ) : data( Function{}, FORWARD( func ), index ) {}
+    /* */           HD TupleRep        ( Function, auto &&func ) : TupleRep( FORWARD( func ), 0_c ) {}
 
-    /* */           TupleRep           ( Values, auto &&...values ) : data( Values{}, FORWARD( values )... ) {}
+    /* */           HD TupleRep        ( Values, auto &&...values ) : data( Values{}, FORWARD( values )... ) {}
 
-    /* */           TupleRep           ( const TupleRep &that ) = default;
-    /* */           TupleRep           () = default;
+    /* */              TupleRep        ( const TupleRep &that ) = default;
+    /* */              TupleRep        () = default;
 
-    auto            operator[]         ( auto &&index ) const { return data[ min( index, Ct<int,sizeof...( Types )-1>() ) ]; }
+    HD auto         operator[]         ( auto &&index ) const { return data[ min( index, Ct<int,sizeof...( Types )-1>() ) ]; }
 
     Tuple<Types...> data;
 };
 
-T_VT constexpr auto tuple_rep( T &&...a ) {
+T_VT HD constexpr auto tuple_rep( T &&...a ) {
     return TupleRep<DECAYED_TYPE_OF( a )...>( Values(), a... );
 }
 

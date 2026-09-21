@@ -9,7 +9,7 @@ namespace sdot {
 
 namespace detail {
     // unravel d'un index plat en multi-indice (ordre colonne) pour `shape`
-    auto unravel_index( auto flat, auto &&res_so_far, auto &&shape ) {
+    HD auto unravel_index( auto flat, auto &&res_so_far, auto &&shape ) {
         auto coeff = shape.apply_values( []( auto &&...values ) { return ( 1_c * ... * values ); } );
         auto res   = res_so_far.with_appended_value( flat / coeff );
         if constexpr ( DECAYED_TYPE_OF( shape )::ct_size )
@@ -22,7 +22,7 @@ namespace detail {
     // as `indices_of` produces for a plain shape); a named one becomes `name = coordinate`, and
     // an OPTIONAL one at that: an argument not mapped along that axis lets it through untouched
     // (see AxisNames.h), which is what lets a batched and an unbatched call share one body.
-    auto attach_axis_names( auto &&raw, auto &&names, auto &&res ) {
+    HD auto attach_axis_names( auto &&raw, auto &&names, auto &&res ) {
         if constexpr ( DECAYED_TYPE_OF( raw )::ct_size == 0 )
             return res;
         else {
@@ -54,8 +54,8 @@ namespace detail {
 /// multi-index is empty and indexing by it is a no-op.
 template<class Shape, class AxisNames = DECAYED_TYPE_OF( unnamed_axes( Shape{} ) )>
 struct CartesianIndices {
-    auto size          () const { return product( shape ); }
-    auto operator[]    ( auto flat ) const {
+    HD auto size       () const { return product( shape ); }
+    HD auto operator[] ( auto flat ) const {
         if constexpr ( Shape::ct_size == 0 )
             return tuple();
         else {
@@ -63,10 +63,10 @@ struct CartesianIndices {
             return detail::attach_axis_names( raw, AxisNames{}, tuple() );
         }
     }
-    auto make_available( auto &&/*queue*/, auto &&/*io_category*/, auto &&cont ) const { return cont( *this ); }
+       auto make_available( auto &&/*queue*/, auto &&/*io_category*/, auto &&cont ) const { return cont( *this ); }
 
     /// intersection des parcours : min terme à terme des formes (mêmes rangs).
-    auto intersection  ( const auto &other ) const {
+    HD auto intersection  ( const auto &other ) const {
         auto s = shape.apply_values( [&]( auto &&...as ) {
             return other.shape.apply_values( [&]( auto &&...bs ) {
                 return tuple( min( as, bs )... );

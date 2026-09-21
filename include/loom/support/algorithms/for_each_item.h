@@ -1,11 +1,13 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "apply_values.h" // FORWARD
 #include <iterator>
 
 namespace sdot {
 
-auto for_each_item( auto &&list, auto &&func )
+HD auto for_each_item( auto &&list, auto &&func )
         requires (
             requires { apply_values( FORWARD( list ), detail::AnyFunc<>() ); } ||
             requires { list.for_each_item( FORWARD( func ) ); } ||

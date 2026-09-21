@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 namespace sdot {
 
 /// Mémoire vue depuis l'intérieur d'un kernel CUDA : aucun attribut runtime, trivialement copiable.
@@ -10,8 +12,8 @@ struct CudaKernelMemorySpace {
     static constexpr bool kernel_context      = true; ///< ce Ptr vit dans un kernel
     static constexpr bool directly_accessible = true; ///< donnée locale au kernel (mémoire device) -> déréf direct
 
-    bool operator==( const CudaKernelMemorySpace & ) const = default;
-    void display    ( auto &os ) const { os << "CudaKernelMemorySpace"; }
+       bool operator==( const CudaKernelMemorySpace & ) const = default;
+    HD void display ( auto &os ) const { os << "CudaKernelMemorySpace"; }
 };
 
 } // namespace sdot

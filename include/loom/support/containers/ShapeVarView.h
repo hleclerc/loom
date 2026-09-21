@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../kernels/make_avaiable.h"
 #include "../kernels/transfer_cost.h"
 #include "../kernels/IoCategory.h"
@@ -33,7 +35,7 @@ struct ShapeVarView {
     /// looping over the count read back stays inside the buffers -- then returns `false`, which
     /// lets the caller STOP GROWING / skip work instead of silently truncating. This is the one
     /// place a capacity is tested: the tensors stay dumb, unchecked views (see the class doc).
-    bool set( auto v ) {
+    HD bool set( auto v ) {
         const SI wanted = SI( v );
         if ( max >= 0 && wanted > max ) {
             errors.record( ErrorKind::capacity_overflow, id, wanted );
@@ -51,7 +53,7 @@ struct ShapeVarView {
     //     return *this;
     // }
 
-    operator SI() const { return view.value(); }
+    HD operator SI() const { return view.value(); }
 
     /// Select axes, by name or by position, exactly as on a tensor: a ShapeVar has axes too as
     /// soon as something gives it some -- a `vmap` makes it one count PER BATCH ITEM. The `max`
@@ -61,23 +63,23 @@ struct ShapeVarView {
     /// Indexing by an empty multi-index is a no-op, so `nb_vertices( batch_index ) = 1` is the
     /// single spelling: unbatched, `batch_index` is the empty tuple and this gives back the very
     /// same view.
-    auto operator()( auto &&...index ) const {
+    HD auto operator()( auto &&...index ) const {
         return make_shape_var_view( view( FORWARD( index )... ), max, errors, id );
     }
 
     /// remise à zéro d'un compteur de sortie. Passe par la queue (donc par un kernel) : sur un
     /// device, le buffer n'est pas accessible depuis l'hôte -- ce n'est pas une boucle hôte.
-    void fill_with( auto &&queue, auto v ) { view.fill_with( FORWARD( queue ), v ); }
+       void fill_with( auto &&queue, auto v ) { view.fill_with( FORWARD( queue ), v ); }
 
     // comme argument de `run_parallel` : on rend la vue disponible, et on reconstruit la même
     // `ShapeVarView` autour (`max` et `id` sont des constantes, elles suivent la vue dans le
     // kernel). Le buffer d'erreurs est lu ET écrit (un compteur atomique) -> MutList.
-    auto transfer_cost ( const auto &queue, auto io_category ) const {
+       auto transfer_cost ( const auto &queue, auto io_category ) const {
         return sdot::transfer_cost( queue, io_category, view )
              + sdot::transfer_cost( queue, MutList(), errors );
     }
 
-    auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
+       auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
         return sdot::make_available( queue, io_category, view, [&]( auto &&kernel_view ) {
             return sdot::make_available( queue, MutList(), errors, [&]( auto &&kernel_errors ) {
                 return cont( ShapeVarView<DECAYED_TYPE_OF( kernel_view ),DECAYED_TYPE_OF( kernel_errors )>{
@@ -89,7 +91,7 @@ struct ShapeVarView {
 };
 
 template<class View,class ErrBuf>
-auto make_shape_var_view( View view, SI max, ErrBuf errors, SI id ) {
+HD auto make_shape_var_view( View view, SI max, ErrBuf errors, SI id ) {
     return ShapeVarView<View,ErrBuf>{ view, max, errors, id };
 }
 

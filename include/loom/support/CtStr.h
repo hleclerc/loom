@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include <cstddef>
 
 namespace sdot {
@@ -11,9 +13,9 @@ template<std::size_t N>
 struct FixedStr {
     char data[ N ] {};
 
-    constexpr FixedStr( const char (&s)[ N ] ) { for ( std::size_t i = 0; i < N; ++i ) data[ i ] = s[ i ]; }
+    HD constexpr FixedStr( const char (&s)[ N ] ) { for ( std::size_t i = 0; i < N; ++i ) data[ i ] = s[ i ]; }
 
-    constexpr bool operator==( const FixedStr & ) const = default;
+       constexpr bool operator==( const FixedStr & ) const = default;
 
     static constexpr std::size_t size = N; ///< inclut le '\0' final
 };
@@ -23,7 +25,7 @@ template<FixedStr S>
 struct CtStr {
     static constexpr auto str = S;
 
-    void display( auto &os ) const { os << S.data; }
+    HD void display( auto &os ) const { os << S.data; }
 };
 
 } // namespace sdot

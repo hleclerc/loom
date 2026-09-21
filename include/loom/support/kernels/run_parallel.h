@@ -18,7 +18,7 @@ struct MaxThreads {
     int  cap;
     Func func;
     int  max_nb_threads( auto &&... ) const { return cap; }
-    void operator()( auto &&...args ) const { func( FORWARD( args )... ); }
+    HD void operator()( auto &&...args ) const { func( FORWARD( args )... ); }
 };
 template<class Func>
 MaxThreads<std::decay_t<Func>> with_max_threads( int cap, Func &&func ) {
@@ -44,7 +44,7 @@ struct GroupKernel {
     int  max_nb_threads( auto &&... ) const { return cap; }
     int  group_size( auto &&... )     const { return size; }
     int  local_mem_elems( auto &&... ) const { return local_elems; }
-    void operator()( auto &&...args ) const { func( FORWARD( args )... ); }
+    HD void operator()( auto &&...args ) const { func( FORWARD( args )... ); }
 };
 template<class Func>
 GroupKernel<std::decay_t<Func>> with_group_kernel( int cap, int group_size, int local_elems, Func &&func ) {

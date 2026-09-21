@@ -25,24 +25,24 @@ struct Ptr {
     using            MemorySpace     = _MemorySpace;
     using            value_type      = T;
 
-    explicit         Ptr             ( T *raw = nullptr, MemorySpace memory_space = {} ) : memory_space( memory_space ), raw( raw ) {}
+    HD explicit      Ptr             ( T *raw = nullptr, MemorySpace memory_space = {} ) : memory_space( memory_space ), raw( raw ) {}
 
     // arithmétique en octets (T vaut typiquement std::byte / const std::byte pour les vues stridées)
-    auto             operator+       ( auto off ) const { return Ptr( raw + off, memory_space ); }
-    auto             operator-       ( auto off ) const { return Ptr( raw - off, memory_space ); }
+    HD auto          operator+       ( auto off ) const { return Ptr( raw + off, memory_space ); }
+    HD auto          operator-       ( auto off ) const { return Ptr( raw - off, memory_space ); }
 
-    void             operator++      () { ++raw; }
+    HD void          operator++      () { ++raw; }
 
     // réinterprétation vers un autre type d'élément, en gardant la zone mémoire
-    T_U U*           as              () const { return reinterpret_cast<U *>( raw ); }
+    T_U HD U*        as              () const { return reinterpret_cast<U *>( raw ); }
 
-    explicit         operator bool   () const { return raw != nullptr; }
-    bool             operator==      ( const Ptr &o ) const { return memory_space == o.memory_space && raw == o.raw; }
-    bool             operator!=      ( const Ptr &o ) const { return ! operator==( o ); }
+    HD explicit      operator bool   () const { return raw != nullptr; }
+    HD bool          operator==      ( const Ptr &o ) const { return memory_space == o.memory_space && raw == o.raw; }
+    HD bool          operator!=      ( const Ptr &o ) const { return ! operator==( o ); }
 
-    T&               operator*       () const { static_assert( MemorySpace::directly_accessible, "operator* sur une zone non accessible directement : utiliser value() (transfert) ou make_available" ); return *raw; }
+    HD T&            operator*       () const { static_assert( MemorySpace::directly_accessible, "operator* sur une zone non accessible directement : utiliser value() (transfert) ou make_available" ); return *raw; }
 
-    T                value           () const {
+    HD T             value           () const {
         if constexpr ( MemorySpace::directly_accessible )
             return *raw;
         else { // zone hôte non accessible -> on rapatrie un élément sur la pile
@@ -53,7 +53,7 @@ struct Ptr {
         }
     }
 
-    void             set             ( auto &&value ) const {
+    HD void          set             ( auto &&value ) const {
         if constexpr ( MemorySpace::directly_accessible ) {
             *raw = value;
         } else {

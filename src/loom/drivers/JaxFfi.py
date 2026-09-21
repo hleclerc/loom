@@ -102,7 +102,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = () ) 
 
     # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes would
     # look like a change to it (one recompilation per process, for nothing).
-    src_path = build_dir() / f"{ name }.cpp"
+    src_path = build_dir() / f"{ name }{ device.compiler.source_suffix() }"
     src_path.parent.mkdir( parents = True, exist_ok = True )
     if not ( src_path.exists() and src_path.read_text() == source ):
         src_path.write_text( source )
@@ -169,14 +169,10 @@ using namespace sdot;
 // compiler is happier with a plain struct), rendered by the code object from the call's arguments.
 {preamble}
 
-{stream_decls}
 static ffi::Error sdot_ffi_impl( {params} ) {{
-{stream_sync}
-    // the one execution context of this call. A queue is expensive to create (a thread pool, a
-    // stream), and this handler always runs on the same device (the device is in the TYPE of
-    // everything below), so there is exactly one, made on first use -- and never destroyed: it
-    // may still own threads when the process tears down its dlopen'ed handlers.
-    static Queue &queue = *new Queue();
+    // the execution context of this call (the device is in the TYPE of everything below; how the
+    // queue is obtained is the device's business, see `Device.cpp_queue_decl`).
+    {queue_decl}
 
     // what the body iterates over: the multi-indices of the batch axes. Unmapped, that is a single
     // item -- the EMPTY multi-index -- and a `vmap` is what gives it axes. Named ones: the body
@@ -267,41 +263,17 @@ def _render_call( code, ca, device ):
         if item not in sources:
             sources.append( item )
 
-    # XLA FFI binds in this order, and the handler's parameters must follow it: args, results,
-    # then attributes.
-    # `LOOM_XLA_STREAM_SYNC=1` : recevoir le FLUX de XLA et l'attendre avant de commencer.
-    #
-    # Ce handler lance son travail sur SA PROPRE queue, que XLA ne connaît pas. Il attend bien
-    # la sienne avant de rendre la main (`QueueEvent` est RAII), mais rien ne l'ordonne par rapport
-    # à celle de XLA : quand on démarre, XLA peut ENCORE ÊTRE EN TRAIN de produire nos entrées, et
-    # dès qu'on rend la main il peut recycler la mémoire de nos sorties. Un `cudaStreamSynchronize`
-    # à l'entrée referme la première moitié de la fenêtre.
-    #
-    # Les types CUDA sont déclarés à la main plutôt qu'inclus : l'image non-AOT retire le toolkit,
-    # donc `cuda_runtime.h` n'y existe pas. `cudaStream_t` EST `struct CUstream_st *`.
-    #
-    # Ce n'est qu'une EXPÉRIENCE : la vraie correction serait de bâtir la queue SUR le flux de
-    # XLA, pas de synchroniser en gros.
-    want_stream = ( getattr( device, "is_cuda_gpu", False )
-                    and os.environ.get( "LOOM_XLA_STREAM_SYNC", "" ).strip().lower() in ( "1", "true", "yes", "on" ) )
-    # L'en-tête s'il existe, une déclaration à la main sinon. Les deux cas se produisent : l'image
-    # AOT garde le toolkit CUDA (clang inclut alors `cuda_runtime.h` tout seul, et une déclaration
-    # concurrente en `int` entre en CONFLIT avec le vrai `cudaError_t`), l'image JIT ne le garde pas.
-    stream_decls = ( "#if __has_include( <cuda_runtime.h> )\n"
-                     "#  include <cuda_runtime.h>\n"
-                     "#else\n"
-                     "   typedef struct CUstream_st *cudaStream_t;\n"
-                     "   extern \"C\" int cudaStreamSynchronize( cudaStream_t );\n"
-                     "#endif\n" ) if want_stream else ""
-    stream_sync = ( "    // voir `LOOM_XLA_STREAM_SYNC` : nos entrées peuvent encore être en cours d'écriture\n"
-                    "    cudaStreamSynchronize( xla_stream );\n" ) if want_stream else ""
-
-    params = [ "cudaStream_t xla_stream" ] if want_stream else []
+    # XLA FFI binds in this order, and the handler's parameters must follow it: the platform
+    # stream if the device runs on one (CUDA: the queue is BUILT on XLA's stream, so the call is
+    # ordered with the rest of the program by the stream itself, see `CudaQueue.h`), then args,
+    # results, and attributes.
+    stream_param = device.cpp_stream_param()
+    params = [ stream_param ] if stream_param else []
     params += [ f"{ b.jax_ffi_type() } { b.ffi_name }" for b in inputs ]
     params += [ f"ffi::Result<{ b.jax_ffi_type() }> { b.ffi_name }" for b in outputs ]
     params += [ f"{ cpp_type } { name }" for name, cpp_type, _ in attrs ]
 
-    binds = "\n        .Ctx<ffi::PlatformStream<cudaStream_t>>()" if want_stream else ""
+    binds = ( "\n        " + device.cpp_stream_bind() ) if stream_param else ""
     binds += "".join( f"\n        .Arg<{ b.jax_ffi_type() }>()" for b in inputs )
     binds += "".join( f"\n        .Ret<{ b.jax_ffi_type() }>()" for b in outputs )
     binds += "".join( f'\n        .Attr<{ cpp_type }>( "{ name }" )' for name, cpp_type, _ in attrs )
@@ -315,8 +287,7 @@ def _render_call( code, ca, device ):
 
     from ..tensor.AbstractAxis import AbstractAxis
     source = _CALL_TEMPLATE.format(
-        stream_decls  = stream_decls,
-        stream_sync   = stream_sync,
+        queue_decl    = device.cpp_queue_decl(),
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
         preamble      = code.preamble_for( "fwd", ca ),

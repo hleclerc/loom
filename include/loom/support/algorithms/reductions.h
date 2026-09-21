@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../kernels/run_parallel.h" // run_parallel, RedList, InpList
 #include "indices_of.h"
 #include "../kernels/Reducer.h"
@@ -12,7 +14,7 @@ namespace sdot {
 /// Le `QueueEvent` temporaire renvoyé par `run_parallel` est détruit en fin d'expression : il attend
 /// la fin du kernel puis exécute ses finalizers -> `res` est prêt au `return`.
 
-auto sum( auto &&queue_list, auto &&a ) {
+HD auto sum( auto &&queue_list, auto &&a ) {
     using TF = typename DECAYED_TYPE_OF( a )::TF;
     TF res = 0;
     run_parallel( FORWARD( queue_list ), indices_of( a ),
@@ -21,7 +23,7 @@ auto sum( auto &&queue_list, auto &&a ) {
     return res;
 }
 
-auto max( auto &&queue_list, auto &&a ) {
+HD auto max( auto &&queue_list, auto &&a ) {
     using TF = typename DECAYED_TYPE_OF( a )::TF;
     TF res = std::numeric_limits<TF>::lowest();
     run_parallel( FORWARD( queue_list ), indices_of( a ),

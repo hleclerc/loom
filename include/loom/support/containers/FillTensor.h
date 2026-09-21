@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../common_types.h"
 #include "Tuple.h"
 #include "../Ct.h"
@@ -26,23 +28,23 @@ struct FillTensor {
     const TF        *data;                  ///< points at the ONE scalar every element reads as
     Shape            _shape;                ///< logical extents (filled from a sibling real buffer)
 
-    constexpr auto   is_valid               () const { return Ct<bool,true>(); } ///< a real value, storageless
+    HD constexpr auto   is_valid            () const { return Ct<bool,true>(); } ///< a real value, storageless
 
-    auto             shape                  ( auto d ) const { return _shape[ d ]; }
-    Shape            shape                  () const { return _shape; }
-    auto             size                   () const { static_assert( ct_rank == 1, "size() is for rank 1" ); return _shape[ Ct<int,0>() ]; }
+    HD auto          shape                  ( auto d ) const { return _shape[ d ]; }
+    HD Shape         shape                  () const { return _shape; }
+    HD auto          size                   () const { static_assert( ct_rank == 1, "size() is for rank 1" ); return _shape[ Ct<int,0>() ]; }
 
     // indexing yields a rank-0 fill over the same scalar; reading it yields the value.
-    constexpr auto   operator()             ( auto &&... ) const { return FillTensor<TF, Tuple<>, Tuple<>>{ data, {} }; }
-    TF               value                  () const { return *data; }
-    /* */            operator TF            () const { return *data; }
+    HD constexpr auto   operator()          ( auto &&... ) const { return FillTensor<TF, Tuple<>, Tuple<>>{ data, {} }; }
+    HD TF            value                  () const { return *data; }
+    /* */            HD operator TF         () const { return *data; }
 
     // as a `run_parallel` argument: the scalar is already where the kernel runs (an FFI input XLA put
     // on the device), so it crosses unchanged, like `ZeroTensor`.
-    constexpr auto   transfer_cost          ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-    constexpr auto   make_available         ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
+       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
 
-    void             display                ( auto &ds ) const { ds << "FillTensor(" << *data << ")"; }
+    HD void          display                ( auto &ds ) const { ds << "FillTensor(" << *data << ")"; }
 };
 
 } // namespace sdot

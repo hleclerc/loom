@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include <type_traits>
 
 namespace sdot {
@@ -15,7 +17,7 @@ struct MutList   { void display( auto &ds ) const { ds << "MutList"; } };
 template<class Op>
 struct RedList {
     Op   op;
-    void display( auto &ds ) const { ds << "RedList"; }
+    HD void display( auto &ds ) const { ds << "RedList"; }
 };
 template<class Op> RedList( Op ) -> RedList<Op>;
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../util/TypePromote.h"
 #include "Tuple.h"
 // #include <utility>
@@ -16,14 +18,14 @@ namespace TupleDetail {
     struct PrependApply {
         CB   cb;
         Head head;
-        T_VT auto operator()( T &&...tail ) const { return cb( head, FORWARD( tail )... ); }
+        T_VT HD auto operator()( T &&...tail ) const { return cb( head, FORWARD( tail )... ); }
     };
 
     /// calls tuple( values..., extra ) — used by with_appended_value
     template<class Extra>
     struct AppendValue {
         Extra extra;
-        T_VT auto operator()( T &&...values ) const { return tuple( FORWARD( values )..., extra ); }
+        T_VT HD auto operator()( T &&...values ) const { return tuple( FORWARD( values )..., extra ); }
     };
 }
 
@@ -31,33 +33,33 @@ namespace TupleDetail {
 #define UTP template<class Head,class... Tail>
 #define DTP Tuple<Head,Tail...>
 
-UTP T_TA DTP::Tuple( Function, T &&func, A index ) : head( func( index ) ), tail( Function(), FORWARD( func ), index + Ct<int,1>() ) {
+UTP T_TA HD DTP::Tuple( Function, T &&func, A index ) : head( func( index ) ), tail( Function(), FORWARD( func ), index + Ct<int,1>() ) {
 }
 
-UTP T_T DTP::Tuple( Function, T &&func ) : Tuple( Function(), func, Ct<int,0>() ) {
+UTP T_T HD DTP::Tuple( Function, T &&func ) : Tuple( Function(), func, Ct<int,0>() ) {
 }
 
-UTP T_VT DTP::Tuple( const Tuple<T...> &that ) : head( that.head ), tail( that.tail ) {
+UTP T_VT HD DTP::Tuple( const Tuple<T...> &that ) : head( that.head ), tail( that.tail ) {
 }
 
-UTP T_Tv DTP::Tuple( Values, T head, V... tail ) : head( head ), tail( Values(), tail... ) {
+UTP T_Tv HD DTP::Tuple( Values, T head, V... tail ) : head( head ), tail( Values(), tail... ) {
 }
 
-UTP T_T void DTP::for_each_item( T &&cb ) const {
+UTP T_T HD void DTP::for_each_item( T &&cb ) const {
      cb( head );
      tail.for_each_item( FORWARD( cb ) );
 }
 
-UTP T_T void DTP::for_each_item( T &&cb ) {
+UTP T_T HD void DTP::for_each_item( T &&cb ) {
      cb( head );
      tail.for_each_item( FORWARD( cb ) );
 }
 
-UTP T_T auto DTP::apply_values( T &&cb ) const {
+UTP T_T HD auto DTP::apply_values( T &&cb ) const {
     return tail.apply_values( TupleDetail::PrependApply<DECAYED_TYPE_OF( cb ),Head>{ FORWARD( cb ), head } );
 }
 
-UTP T_T auto DTP::operator[]( T &&index ) const {
+UTP T_T HD auto DTP::operator[]( T &&index ) const {
     if constexpr ( HAS_STATIC_VALUE( index ) ) { //  requires { DECAYED_TYPE_OF( index )::value; }
         if constexpr ( DECAYED_TYPE_OF( index )::value )
             return tail[ index - Ct<int,1>() ];
@@ -74,7 +76,7 @@ UTP T_T auto DTP::operator[]( T &&index ) const {
     }
 }
 
-UTP T_TA void DTP::set( T &&index, A &&value ) {
+UTP T_TA HD void DTP::set( T &&index, A &&value ) {
     if constexpr ( HAS_STATIC_VALUE( index ) ) { // requires { DECAYED_TYPE_OF( index )::value; }
         if constexpr ( DECAYED_TYPE_OF( index )::value )
             tail[ index - Ct<int,1>() ].set( FORWARD( value ) );
@@ -90,7 +92,7 @@ UTP T_TA void DTP::set( T &&index, A &&value ) {
     }
 }
 
-UTP T_T auto DTP::operator==( const T &that ) const {
+UTP T_T HD auto DTP::operator==( const T &that ) const {
     return apply_values( [&]( const auto &...a ) {
         return that.apply_values( [&]( const auto &...b ) {
             if constexpr ( sizeof...( a ) == sizeof...( b ) )
@@ -101,15 +103,15 @@ UTP T_T auto DTP::operator==( const T &that ) const {
     } );
 }
 
-UTP auto DTP::size() {
+UTP HD auto DTP::size() {
     return Ct<int,1 + sizeof...( Tail )>();
 }
 
-UTP T_T auto DTP::with_appended_value( T &&new_value ) const {
+UTP T_T HD auto DTP::with_appended_value( T &&new_value ) const {
     return apply_values( TupleDetail::AppendValue<DECAYED_TYPE_OF( new_value )>{ FORWARD( new_value ) } );
 }
 
-UTP T_T auto DTP::without_index( T index ) const {
+UTP T_T HD auto DTP::without_index( T index ) const {
     if constexpr ( HAS_STATIC_VALUE( index ) ) {
         if constexpr ( DECAYED_TYPE_OF( index )::value )
             return concat( tuple( head ), tail.without_index( index - Ct<int,1>() ) );
@@ -133,38 +135,38 @@ UTP T_T auto DTP::without_index( T index ) const {
 #define UTP // template<>
 #define DTP Tuple<>
 
-UTP T_TA DTP::Tuple( Function, T &&/*func*/, A /*index*/ ) {
+UTP T_TA HD DTP::Tuple( Function, T &&/*func*/, A /*index*/ ) {
 }
 
-UTP T_T DTP::Tuple( Function, T &&/*func*/ ) {
+UTP T_T HD DTP::Tuple( Function, T &&/*func*/ ) {
 }
 
-UTP DTP::Tuple( Values ) {
+UTP HD DTP::Tuple( Values ) {
 }
 
-UTP T_T void DTP::for_each_item( T &&/* cb */ ) const {
+UTP T_T HD void DTP::for_each_item( T &&/* cb */ ) const {
 }
 
-UTP T_T auto DTP::apply_values( T &&cb ) const {
+UTP T_T HD auto DTP::apply_values( T &&cb ) const {
     return cb();
 }
 
-UTP T_T Void DTP::operator[]( T ) const {
+UTP T_T HD Void DTP::operator[]( T ) const {
     return {};
 }
 
-UTP T_TA void DTP::set( T &&/* index */, A &&/* value */ ) {
+UTP T_TA HD void DTP::set( T &&/* index */, A &&/* value */ ) {
 }
 
-UTP T_T auto DTP::operator==( const T &that ) const {
+UTP T_T HD auto DTP::operator==( const T &that ) const {
     return that.size() == 0_c;
 }
 
-UTP T_T auto DTP::with_appended_value( T &&new_value ) const {
+UTP T_T HD auto DTP::with_appended_value( T &&new_value ) const {
     return tuple( new_value );
 }
 
-UTP auto DTP::size() {
+UTP HD auto DTP::size() {
     return Ct<int,0>();
 }
 

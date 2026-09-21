@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 namespace sdot {
 
 /// mémoire globale du GPU, telle que vue depuis l'hôte : une adresse device, qu'on ne peut pas
@@ -10,8 +12,8 @@ struct CudaGlobalMemorySpace {
     static constexpr bool directly_accessible = false; ///< adresse device : pas de déréf hôte
     static constexpr bool kernel_context      = false; ///< vue hôte, pas un tag kernel
 
-    bool operator==( const CudaGlobalMemorySpace & ) const = default;
-    void display    ( auto &os ) const { os << "CudaGlobalMemorySpace"; }
+       bool operator==( const CudaGlobalMemorySpace & ) const = default;
+    HD void display ( auto &os ) const { os << "CudaGlobalMemorySpace"; }
 };
 
 } // namespace sdot

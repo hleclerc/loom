@@ -1,4 +1,5 @@
-from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, FfiCode, RealTensor, IntTensor
+from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, RealTensor, IntTensor
+from loom.compilation.FfiCode import FfiCodeParallel
 from loom.testing import test
 
 # An `@aggregate` instance is built BEFORE the call and passed as a plain kwarg. Inputs and
@@ -54,10 +55,10 @@ if test( "basic" ):
     # its size). `nb_vertices` has no count yet -- the kernel is what writes it.
     cell = Cell1( nb_dims = 2 )
 
-    # the body runs on a DEVICE. `queue` is the call's execution context (a `sdot::Queue`, chosen
-    # by the device -- a typedef, since the memory space a pointer lives in is part of its type),
-    # and `global_batch_indices` is what the kernel iterates over: by default a single item, the
-    # empty multi-index (a `vmap` is what will give it axes).
+    # the body runs on a DEVICE, once per item of the call's batch (a single item here: a `vmap`
+    # is what will give it axes). `FfiCodeParallel` wraps it in a named functor and a
+    # `run_parallel` over every argument of the call, on the device's queue (a typedef, since the
+    # memory space a pointer lives in is part of its type).
     #
     # An object handed to the kernel is an ARGUMENT of `run_parallel`, not a capture: that is
     # what lets `make_available` retype its pointers into the memory space the kernel reads. It
@@ -69,17 +70,10 @@ if test( "basic" ):
     # mapped along that axis ignores it. Unbatched, it is the EMPTY multi-index, and indexing by
     # it is a no-op. Hence one body, batched or not.
     driver.call(
-        FfiCode( name = "test_call_basic", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto cell ) {
-                cell.nb_vertices( batch_index ).set( 1 );
-                cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
-                cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
-            },
-            cell_io, cell
-        );
+        FfiCodeParallel( name = "test_call_basic", fwd_code = """
+        cell.nb_vertices( batch_index ).set( 1 );
+        cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
+        cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
         """ ),
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
@@ -103,15 +97,8 @@ if test( "basic" ):
     res = RealTensor[ cell.num_vertex ]()
 
     driver.call(
-        FfiCode( name = "test_call_basic_res", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto cell, auto res ) {
-                res( batch_index, num_vertex = 0 ) = cell.nb_vertices( batch_index );
-            },
-            cell_io, cell, OutList(), res
-        );
+        FfiCodeParallel( name = "test_call_basic_res", fwd_code = """
+        res( batch_index, num_vertex = 0 ) = cell.nb_vertices( batch_index );
         """ ),
         cell = cell,
         res = res,
@@ -145,24 +132,17 @@ if test( "partial_init" ):
     cell = Cell2( nb_dims = 2 )
 
     driver.call(
-        FfiCode( name = "test_partial_init", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto cell ) {
-                cell.nb_vertices( batch_index ).set( 1 );
-                // a fresh output buffer is NOT guaranteed zero-initialized (see
-                // `ProjectedSumOfDiracs::zero_position_grad`'s docstring for the general fact) --
-                // write every element the assertion below reads, rather than relying on a
-                // leftover-memory default.
-                cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
-                cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
-
-                static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 1 );
-                static_assert( DECAYED_TYPE_OF( cell.vertex_indices  .is_valid() )::value == 0 );
-            },
-            cell_io, cell
-        );
+        FfiCodeParallel( name = "test_partial_init", fwd_code = """
+        cell.nb_vertices( batch_index ).set( 1 );
+        // a fresh output buffer is NOT guaranteed zero-initialized (see
+        // `ProjectedSumOfDiracs::zero_position_grad`'s docstring for the general fact) --
+        // write every element the assertion below reads, rather than relying on a
+        // leftover-memory default.
+        cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
+        cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
+        
+        static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 1 );
+        static_assert( DECAYED_TYPE_OF( cell.vertex_indices  .is_valid() )::value == 0 );
         """ ),
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
@@ -197,17 +177,10 @@ if test( "input_exceptions" ):
     cell = Cell3( nb_dims = 2 )
 
     driver.call(
-        FfiCode( name = "test_input_exceptions_init", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto cell ) {
-                cell.nb_vertices( batch_index ).set( 1 );
-                cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
-                cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
-            },
-            cell_io, cell
-        );
+        FfiCodeParallel( name = "test_input_exceptions_init", fwd_code = """
+        cell.nb_vertices( batch_index ).set( 1 );
+        cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
+        cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
         """ ),
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
@@ -215,15 +188,8 @@ if test( "input_exceptions" ):
     )
 
     driver.call(
-        FfiCode( name = "test_input_exceptions_use", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto cell ) {
-                static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 0 );
-            },
-            cell_io, cell
-        );
+        FfiCodeParallel( name = "test_input_exceptions_use", fwd_code = """
+        static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 0 );
         """ ),
         cell = cell,
         input_exceptions = [ "cell.vertex_positions" ],
@@ -251,27 +217,20 @@ if test( "two_instances" ):
     volu = Cell3( nb_dims = 3 )
 
     driver.call(
-        FfiCode( name = "two_instances", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto flat, auto volu ) {
-                // an index applies to a whole aggregate just as well as to one of its members:
-                // `f( batch_index ).nb_vertices` and `flat.nb_vertices( batch_index )` are the
-                // same thing. Handy when every member takes the same index.
-                auto f = flat( batch_index );
-                f.nb_vertices.set( 1 );
-                f.vertex_positions( num_vertex = 0, dim = 0 ) = 1;
-                f.vertex_positions( num_vertex = 0, dim = 1 ) = 2;
-
-                volu.nb_vertices( batch_index ).set( 1 );
-                // see `partial_init`'s comment above: write every dim, not just the nonzero one.
-                volu.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
-                volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
-                volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
-            },
-            flat_io, flat, volu_io, volu
-        );
+        FfiCodeParallel( name = "two_instances", fwd_code = """
+        // an index applies to a whole aggregate just as well as to one of its members:
+        // `f( batch_index ).nb_vertices` and `flat.nb_vertices( batch_index )` are the
+        // same thing. Handy when every member takes the same index.
+        auto f = flat( batch_index );
+        f.nb_vertices.set( 1 );
+        f.vertex_positions( num_vertex = 0, dim = 0 ) = 1;
+        f.vertex_positions( num_vertex = 0, dim = 1 ) = 2;
+        
+        volu.nb_vertices( batch_index ).set( 1 );
+        // see `partial_init`'s comment above: write every dim, not just the nonzero one.
+        volu.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
+        volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
+        volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
         """ ),
         flat = flat,
         volu = volu,
@@ -314,28 +273,21 @@ if test( "nested" ):
     pair = Pair( left = { "nb_dims": 2 }, right = { "nb_dims": 3 } )
 
     driver.call(
-        FfiCode( name = "test_call_nested", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto pair ) {
-                // indexing an aggregate indexes its members -- a nested one included, recursively.
-                auto p = pair( batch_index );
-
-                // every coordinate of the one written row is set explicitly: a fresh output buffer
-                // is NOT guaranteed zero-initialized on every device (XLA's GPU allocator does not
-                // zero fresh device memory, unlike a first-touch CPU page).
-                p.left.nb_vertices.set( 1 );
-                p.left.vertex_positions( num_vertex = 0, dim = 0 ) = 0;
-                p.left.vertex_positions( num_vertex = 0, dim = 1 ) = 1;
-
-                p.right.nb_vertices.set( 1 );
-                p.right.vertex_positions( num_vertex = 0, dim = 0 ) = 0;
-                p.right.vertex_positions( num_vertex = 0, dim = 1 ) = 0;
-                p.right.vertex_positions( num_vertex = 0, dim = 2 ) = 2;
-            },
-            pair_io, pair
-        );
+        FfiCodeParallel( name = "test_call_nested", fwd_code = """
+        // indexing an aggregate indexes its members -- a nested one included, recursively.
+        auto p = pair( batch_index );
+        
+        // every coordinate of the one written row is set explicitly: a fresh output buffer
+        // is NOT guaranteed zero-initialized on every device (XLA's GPU allocator does not
+        // zero fresh device memory, unlike a first-touch CPU page).
+        p.left.nb_vertices.set( 1 );
+        p.left.vertex_positions( num_vertex = 0, dim = 0 ) = 0;
+        p.left.vertex_positions( num_vertex = 0, dim = 1 ) = 1;
+        
+        p.right.nb_vertices.set( 1 );
+        p.right.vertex_positions( num_vertex = 0, dim = 0 ) = 0;
+        p.right.vertex_positions( num_vertex = 0, dim = 1 ) = 0;
+        p.right.vertex_positions( num_vertex = 0, dim = 2 ) = 2;
         """ ),
         pair = pair,
         output_attributes = [ "pair" ],   # a whole subtree can be named at once
@@ -363,18 +315,11 @@ if test( "vmap" ):
 
 
 
-    code = FfiCode( name = "test_call_vmap", fwd_code = """
-    run_parallel(
-        queue,
-        global_batch_indices,
-        []( auto batch_index, auto cell, auto scale ) {
-            auto c = cell( batch_index );
-            c.nb_vertices.set( 1 );
-            c.vertex_positions( num_vertex = 0, dim = 0 ) = scale( batch_index, dim = 0 );
-            c.vertex_positions( num_vertex = 0, dim = 1 ) = scale( batch_index, dim = 1 );
-        },
-        cell_io, cell, InpList(), scale
-    );
+    code = FfiCodeParallel( name = "test_call_vmap", fwd_code = """
+    auto c = cell( batch_index );
+    c.nb_vertices.set( 1 );
+    c.vertex_positions( num_vertex = 0, dim = 0 ) = scale( batch_index, dim = 0 );
+    c.vertex_positions( num_vertex = 0, dim = 1 ) = scale( batch_index, dim = 1 );
     """ )
 
     def positions_of( raw_scale ):
@@ -424,21 +369,14 @@ if test( "capacity_overflow" ):
 
 
 
-    code = FfiCode( name = "test_call_overflow", fwd_code = """
-    run_parallel(
-        queue,
-        global_batch_indices,
-        []( auto batch_index, auto cell ) {
-            auto c = cell( batch_index );
-
-            // the count may not fit -- and then what one READS BACK is the capacity, never more,
-            // which is what makes the loop below safe whatever happens.
-            c.nb_vertices.set( c.nb_wanted );
-            for ( SI n = 0; n < SI( c.nb_vertices ); ++n )
-                c.vertex_positions( num_vertex = n, dim = 0 ) = n;
-        },
-        cell_io, cell
-    );
+    code = FfiCodeParallel( name = "test_call_overflow", fwd_code = """
+    auto c = cell( batch_index );
+    
+    // the count may not fit -- and then what one READS BACK is the capacity, never more,
+    // which is what makes the loop below safe whatever happens.
+    c.nb_vertices.set( c.nb_wanted );
+    for ( SI n = 0; n < SI( c.nb_vertices ); ++n )
+        c.vertex_positions( num_vertex = n, dim = 0 ) = n;
     """ )
 
     def cell_of( nb_wanted, capacity ):
@@ -486,25 +424,13 @@ if test( "der" ):
     # is a compile-time true), and a non-perturbed input gradient to a `NoneTensor`
     # (`grad_for_inp.is_valid()` a compile-time false) -- either lets the body drop a term at
     # compile time rather than move or multiply a buffer of zeros.
-    code = FfiCode( name = "test_call_der",
+    code = FfiCodeParallel( name = "test_call_der",
         fwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto out, auto inp ) {
-                    out = 2 * inp + 100;
-                },
-                OutList{}, out,
-                InpList{}, inp
-            );
+            out = 2 * inp + 100;
         """,
         bwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto grad_for_inp, auto grad_for_out ) {
-                    if ( ! grad_for_out.surely_null() && grad_for_inp.is_valid() )
-                        grad_for_inp = 2 * grad_for_out;
-                },
-                OutList{}, grad_for_inp,
-                InpList{}, grad_for_out
-            );
+            if ( ! grad_for_out.surely_null() && grad_for_inp.is_valid() )
+                grad_for_inp = 2 * grad_for_out;
         """,
     )
 
@@ -527,25 +453,13 @@ if test( "der_symbolic_zero" ):
     # two outputs, and a loss that uses only one of them: the cotangent of the UNUSED output is a
     # symbolic zero, so `grad_for_out_b` reaches the backward kernel as a `ZeroTensor` -- read as
     # 0, no buffer. The body multiplies by it and the term simply vanishes.
-    code = FfiCode( name = "test_call_der_sz",
+    code = FfiCodeParallel( name = "test_call_der_sz",
         fwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto out_a, auto out_b, auto inp ) {
-                    out_a = 2 * inp;
-                    out_b = 3 * inp;
-                },
-                OutList{}, out_a, out_b,
-                InpList{}, inp
-            );
+            out_a = 2 * inp;
+            out_b = 3 * inp;
         """,
         bwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto grad_for_inp, auto grad_for_out_a, auto grad_for_out_b ) {
-                    grad_for_inp = 2 * grad_for_out_a + 3 * grad_for_out_b;
-                },
-                OutList{}, grad_for_inp,
-                InpList{}, grad_for_out_a, grad_for_out_b
-            );
+            grad_for_inp = 2 * grad_for_out_a + 3 * grad_for_out_b;
         """,
     )
 
@@ -568,34 +482,22 @@ if test( "der_non_perturbed" ):
     # constant, so Jax does not perturb it. Its gradient is never requested, so `grad_for_bias`
     # reaches the backward kernel as a `NoneTensor` -- `is_valid()` is a compile-time false, and
     # the body simply does not compute it (nor is a buffer allocated for it).
-    code = FfiCode( name = "test_call_der_np",
+    code = FfiCodeParallel( name = "test_call_der_np",
         fwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto out, auto inp, auto bias ) {
-                    out = inp + bias;
-                },
-                OutList{}, out,
-                InpList{}, inp, bias
-            );
+            out = inp + bias;
         """,
         bwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto grad_for_inp, auto grad_for_bias, auto grad_for_out ) {
-                    // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
-                    // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
-                    static_assert( DECAYED_TYPE_OF( grad_for_inp .is_valid() )::value == 1 );
-                    static_assert( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value == 0 );
-
-                    // a `NoneTensor` has no `operator=`, so its write must be dropped at COMPILE
-                    // time -- `if constexpr` on `is_valid()`, not a runtime `if`.
-                    if constexpr ( DECAYED_TYPE_OF( grad_for_inp.is_valid() )::value )
-                        grad_for_inp = grad_for_out;
-                    if constexpr ( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value )
-                        grad_for_bias = grad_for_out;
-                },
-                OutList{}, grad_for_inp, grad_for_bias,
-                InpList{}, grad_for_out
-            );
+            // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
+            // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
+            static_assert( DECAYED_TYPE_OF( grad_for_inp .is_valid() )::value == 1 );
+            static_assert( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value == 0 );
+            
+            // a `NoneTensor` has no `operator=`, so its write must be dropped at COMPILE
+            // time -- `if constexpr` on `is_valid()`, not a runtime `if`.
+            if constexpr ( DECAYED_TYPE_OF( grad_for_inp.is_valid() )::value )
+                grad_for_inp = grad_for_out;
+            if constexpr ( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value )
+                grad_for_bias = grad_for_out;
         """,
     )
 
@@ -622,28 +524,16 @@ if test( "der_shape_var" ):
     ax = Axis( n )
     ax.name = "n"   # a standalone axis: stamp the name the generated C++ uses (`DEFINE_AXIS( n )`)
 
-    code = FfiCode( name = "test_call_der_sv",
+    code = FfiCodeParallel( name = "test_call_der_sv",
         fwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto out, auto vec ) {
-                    out( n = 0 ) = 2 * vec( n = 0 );
-                    out( n = 1 ) = 3 * vec( n = 1 );
-                },
-                OutList{}, out,
-                InpList{}, vec
-            );
+            out( n = 0 ) = 2 * vec( n = 0 );
+            out( n = 1 ) = 3 * vec( n = 1 );
         """,
         bwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto grad_for_vec, auto grad_for_out ) {
-                    if ( grad_for_vec.is_valid() && ! grad_for_out.surely_null() ) {
-                        grad_for_vec( n = 0 ) = 2 * grad_for_out( n = 0 );
-                        grad_for_vec( n = 1 ) = 3 * grad_for_out( n = 1 );
-                    }
-                },
-                OutList{}, grad_for_vec,
-                InpList{}, grad_for_out
-            );
+            if ( grad_for_vec.is_valid() && ! grad_for_out.surely_null() ) {
+                grad_for_vec( n = 0 ) = 2 * grad_for_out( n = 0 );
+                grad_for_vec( n = 1 ) = 3 * grad_for_out( n = 1 );
+            }
         """,
     )
 
@@ -672,27 +562,15 @@ if test( "der_aggregate" ):
         nn   : CtShapeVar
 
 
-    code = FfiCode( name = "test_call_der_agg",
+    code = FfiCodeParallel( name = "test_call_der_agg",
         fwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto out, auto cell ) {
-                    out = 2 * cell.data( n = 0 ) + 3 * cell.data( n = 1 );
-                },
-                OutList{}, out,
-                InpList{}, cell
-            );
+            out = 2 * cell.data( n = 0 ) + 3 * cell.data( n = 1 );
         """,
         bwd_code = """
-            run_parallel( queue, global_batch_indices,
-                []( auto batch_index, auto grad_for_out, auto grad_for_cell ) {
-                    if ( ! grad_for_out.surely_null() && grad_for_cell.data.is_valid() ) {
-                        grad_for_cell.data( n = 0 ) = 2 * grad_for_out;
-                        grad_for_cell.data( n = 1 ) = 3 * grad_for_out;
-                    }
-                },
-                InpList{}, grad_for_out,
-                OutList{}, grad_for_cell
-            );
+            if ( ! grad_for_out.surely_null() && grad_for_cell.data.is_valid() ) {
+                grad_for_cell.data( n = 0 ) = 2 * grad_for_out;
+                grad_for_cell.data( n = 1 ) = 3 * grad_for_out;
+            }
         """,
     )
 
@@ -732,18 +610,11 @@ if test( "batch_alignment_forced" ):
         nb_dims          : CtShapeVar
 
 
-    code = FfiCode( name = "test_call_batch_align", fwd_code = """
-    run_parallel(
-        queue,
-        global_batch_indices,
-        []( auto batch_index, auto cell ) {
-            auto c = cell( batch_index );
-            c.nb_vertices.set( 1 );
-            c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
-            c.vertex_positions( num_vertex = 0, dim = 1 ) = c.scale( dim = 1 );
-        },
-        cell_io, cell
-    );
+    code = FfiCodeParallel( name = "test_call_batch_align", fwd_code = """
+    auto c = cell( batch_index );
+    c.nb_vertices.set( 1 );
+    c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
+    c.vertex_positions( num_vertex = 0, dim = 1 ) = c.scale( dim = 1 );
     """ )
 
     def run( alignment ):
@@ -783,16 +654,11 @@ if test( "physical_axis_reorder" ):
     from loom.tensor import Storage
     from loom import Axis, ShapeVar, Tensor
 
-    code = FfiCode( name = "test_call_phys_reorder", fwd_code = """
-    run_parallel( queue, global_batch_indices,
-        []( auto batch_index, auto m, auto out ) {
-            out( batch_index, row = 0, col = 0 ) = m( batch_index, row = 0, col = 0 );
-            out( batch_index, row = 0, col = 1 ) = m( batch_index, row = 0, col = 1 );
-            out( batch_index, row = 1, col = 0 ) = m( batch_index, row = 1, col = 0 );
-            out( batch_index, row = 1, col = 1 ) = m( batch_index, row = 1, col = 1 );
-        },
-        InpList(), m, OutList(), out
-    );
+    code = FfiCodeParallel( name = "test_call_phys_reorder", fwd_code = """
+    out( batch_index, row = 0, col = 0 ) = m( batch_index, row = 0, col = 0 );
+    out( batch_index, row = 0, col = 1 ) = m( batch_index, row = 0, col = 1 );
+    out( batch_index, row = 1, col = 0 ) = m( batch_index, row = 1, col = 0 );
+    out( batch_index, row = 1, col = 1 ) = m( batch_index, row = 1, col = 1 );
     """ )
 
     row = Axis( ShapeVar( 2 ), name = "row" )
@@ -834,22 +700,15 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
     out = RealTensor[ num ]()
 
     driver.call(
-        FfiCode( name = "test_call_fill", fwd_code = """
-        run_parallel(
-            queue,
-            global_batch_indices,
-            []( auto batch_index, auto x, auto f, auto out ) {
-                // the same scalar whatever the index -- indexing a fill ignores the index
-                out( batch_index, num = 0 ) = x( batch_index, num = 0 ) * f( batch_index, num = 0 );
-                out( batch_index, num = 1 ) = x( batch_index, num = 1 ) * f( batch_index, num = 3 );
-                // its logical extent, filled in from the sibling buffer that carries `num`
-                out( batch_index, num = 2 ) = f.size();
-                // and it is a distinct TYPE, not a TensorView the kernel has to test
-                static_assert( ! std::is_same_v< decltype( f ), decltype( x ) > );
-                out( batch_index, num = 3 ) = 0;
-            },
-            InpList(), x, InpList(), f, OutList(), out
-        );
+        FfiCodeParallel( name = "test_call_fill", fwd_code = """
+        // the same scalar whatever the index -- indexing a fill ignores the index
+        out( batch_index, num = 0 ) = x( batch_index, num = 0 ) * f( batch_index, num = 0 );
+        out( batch_index, num = 1 ) = x( batch_index, num = 1 ) * f( batch_index, num = 3 );
+        // its logical extent, filled in from the sibling buffer that carries `num`
+        out( batch_index, num = 2 ) = f.size();
+        // and it is a distinct TYPE, not a TensorView the kernel has to test
+        static_assert( ! std::is_same_v< decltype( f ), decltype( x ) > );
+        out( batch_index, num = 3 ) = 0;
         """ ),
         x = x, f = f, out = out,
         output_attributes = [ "out" ],
@@ -876,24 +735,17 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
         nb_out    : ShapeVar     # written by the kernel -> a buffer: it is the result
         nb_wanted : ShapeVar     # prescribed, only read   -> crosses by value
 
-    code = FfiCode( name = "test_call_scalar_count", fwd_code = """
-    run_parallel(
-        queue,
-        global_batch_indices,
-        []( auto batch_index, auto cnt ) {
-            auto c = cnt( batch_index );
-
-            static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
-                           "a host-known, read-only count must cross by value" );
-            static_assert( ! std::is_same_v< std::decay_t< decltype( c.nb_out.view ) >, ScalarValue<SI> >,
-                           "a count the kernel writes needs a real buffer" );
-
-            c.nb_out.set( c.nb_wanted );
-            for ( SI n = 0; n < SI( c.nb_out ); ++n )
-                c.out( num = n ) = 10 * n;
-        },
-        cnt_io, cnt
-    );
+    code = FfiCodeParallel( name = "test_call_scalar_count", fwd_code = """
+    auto c = cnt( batch_index );
+    
+    static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
+                   "a host-known, read-only count must cross by value" );
+    static_assert( ! std::is_same_v< std::decay_t< decltype( c.nb_out.view ) >, ScalarValue<SI> >,
+                   "a count the kernel writes needs a real buffer" );
+    
+    c.nb_out.set( c.nb_wanted );
+    for ( SI n = 0; n < SI( c.nb_out ); ++n )
+        c.out( num = n ) = 10 * n;
     """ )
 
     cnt = Counter( nb_wanted = 3 )

@@ -17,11 +17,11 @@ namespace sdot {
 template <typename T> struct Is_TensorView : std::false_type {};
 UTP struct Is_TensorView<DTP> : std::true_type {};
 
-UTP DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
+UTP HD DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
         _strides( strides ), _shape( shape ), _data( reinterpret_cast<RawByte *>( data.raw ), data.memory_space ) {
 }
 
-UTP auto DTP::make_available( auto &&queue, auto io_category, auto &&cont ) const {
+UTP    auto DTP::make_available( auto &&queue, auto io_category, auto &&cont ) const {
     using KMS = typename DECAYED_TYPE_OF( queue )::DefaultKernelMemorySpace;
 
     // un argument doit être catégorisé (Inp/Out/Mut) ; sinon l'utilisateur a oublié un tag
@@ -37,7 +37,7 @@ UTP auto DTP::make_available( auto &&queue, auto io_category, auto &&cont ) cons
     }
 }
 
-UTP auto DTP::operator()( const auto &index, auto ...rem ) const {
+UTP HD auto DTP::operator()( const auto &index, auto ...rem ) const {
     using I = DECAYED_TYPE_OF( index );
     if constexpr ( IsAxisIndex<I>::value )
         // index = (nom = valeur) -> squeeze de l'axe nommé, puis on continue
@@ -54,7 +54,7 @@ UTP auto DTP::operator()( const auto &index, auto ...rem ) const {
 }
 
 // 2 arguments : sélecteur (position `Ct<int,N>` ou nom d'axe) + valeur (`index`, possiblement un Ct)
-UTP auto DTP::squeeze( auto axis, auto index ) const {
+UTP HD auto DTP::squeeze( auto axis, auto index ) const {
     using A = DECAYED_TYPE_OF( axis );
     if constexpr ( is_axis<A> ) {
         // axis = nom d'axe -> on résout sa position puis on squeeze positionnellement
@@ -75,7 +75,7 @@ UTP auto DTP::squeeze( auto axis, auto index ) const {
 }
 
 // 1 argument : un indice nommé `dim = i` -> on en extrait nom + valeur
-UTP auto DTP::squeeze( auto axis_index ) const {
+UTP HD auto DTP::squeeze( auto axis_index ) const {
     using A = DECAYED_TYPE_OF( axis_index );
     static_assert( IsAxisIndex<A>::value, "squeeze a 1 argument attend un indice nomme (nom = valeur)" );
     constexpr int pos = AxisPos<typename A::axis_type, AxisNames>::value;
@@ -89,11 +89,11 @@ UTP auto DTP::squeeze( auto axis_index ) const {
         return squeeze( Ct<int,pos>(), axis_index.index );
 }
 
-UTP auto DTP::row( auto index ) const {
+UTP HD auto DTP::row( auto index ) const {
     return squeeze( Ct<int,0>(), index );
 }
 
-UTP auto DTP::offset( const auto &index, auto ...rem ) const {
+UTP HD auto DTP::offset( const auto &index, auto ...rem ) const {
     if constexpr ( HAS_CONSTEXPR_SIZE( index ) ) {
         // `index` est un multi-indice (taille connue à la compilation) -> on déplie ses composantes
         if constexpr ( DECAYED_TYPE_OF( index.size() )::value )
@@ -170,11 +170,11 @@ UTP auto DTP::offset( const auto &index, auto ...rem ) const {
 //     TODO;
 // }
 
-UTP void DTP::operator=( const TensorView &that ) {
+UTP HD void DTP::operator=( const TensorView &that ) {
     copy_elements_from( that );
 }
 
-UTP void DTP::operator=( const auto &that ) {
+UTP HD void DTP::operator=( const auto &that ) {
     copy_elements_from( that );
 }
 
@@ -183,21 +183,21 @@ UTP void DTP::operator=( const auto &that ) {
 //     return TensorView<TF,MemorySpace,Shape,Strides,Tags...,ExtraTags...>( data().raw, _shape, _strides, _memory_space );
 // }
 
-UTP auto DTP::data() const {
+UTP HD auto DTP::data() const {
     return DataPtr( _data.template as<TF>(), _data.memory_space );
 }
 
-UTP TF DTP::value() const {
+UTP HD TF DTP::value() const {
     static_assert( ct_rank == 0 );
     return data().value();
 }
 
-UTP TF &DTP::ref() const {
+UTP HD TF &DTP::ref() const {
     static_assert( ct_rank == 0 );
     return *data();
 }
 
-UTP void DTP::for_each_scalar( auto &&func ) const {
+UTP HD void DTP::for_each_scalar( auto &&func ) const {
     if constexpr ( ct_rank == 0 )
         func( *this );
     else
@@ -205,18 +205,18 @@ UTP void DTP::for_each_scalar( auto &&func ) const {
             operator[]( i ).for_each_scalar( func );
 }
 
-UTP auto DTP::nb_items() const {
+UTP HD auto DTP::nb_items() const {
     return product( _shape );
 }
 
 // coût (secondes) pour rendre cette vue accessible depuis `queue` = coût/octet * nb octets
-UTP auto DTP::transfer_cost( const auto &queue, auto /*io_category*/ ) const {
+UTP    auto DTP::transfer_cost( const auto &queue, auto /*io_category*/ ) const {
     return transfer_cost_per_byte( queue, memory_space() ) * ( nb_items() * Ct<int,sizeof( TF )>() );
 }
 
 // variante « boucle simple » : nécessite que la zone soit accessible depuis l'hôte
 // (sinon, passer un tuple de contextes d'exécution -> surcharge run_parallel ci-dessous)
-UTP void DTP::fill_with( TF value ) {
+UTP    void DTP::fill_with( TF value ) {
     static_assert(
         MemorySpace::directly_accessible,
         "fill_with sans contexte : zone non accessible depuis l'hote ; passez un tuple de contextes d'execution"
@@ -235,7 +235,7 @@ namespace detail::TensorViewFill {
     struct Strided    { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out( out.indices_col_ordering( id ) ) = v; } };
 }
 
-UTP auto DTP::_fill_with( TF value, auto &&run ) {
+UTP    auto DTP::_fill_with( TF value, auto &&run ) {
     if constexpr ( ct_rank == 0 )
         return run( range( 1 ), detail::TensorViewFill::Scalar{}, OutList(), *this, InpList(), value );
     else if ( items_are_contiguous() )
@@ -244,11 +244,11 @@ UTP auto DTP::_fill_with( TF value, auto &&run ) {
         return run( range( nb_items() ), detail::TensorViewFill::Strided{}, OutList(), *this, InpList(), value );
 }
 
-UTP auto DTP::fill_with( auto &&queue_list, TF value ) {
+UTP    auto DTP::fill_with( auto &&queue_list, TF value ) {
     return _fill_with( value, [&]( auto &&...a ) { return run_parallel( FORWARD( queue_list ), FORWARD( a )... ); } );
 }
 
-UTP auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {
+UTP    auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {
     return _fill_with( value, [&]( auto &&...a ) { return run_parallel( FORWARD( queue_list ), FORWARD( deps ), FORWARD( a )... ); } );
 }
 
@@ -274,7 +274,7 @@ UTP auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {
 
 // Primitive boucle simple (hôte) : applique op( ref_scalaire_de_this, scalaire_de_that ) sur chaque
 // élément. `that` de même rang -> élémentaire ; tenseur rang 0 ou scalaire -> broadcast.
-UTP void DTP::_zip_apply( auto op, const auto &that ) const {
+UTP HD void DTP::_zip_apply( auto op, const auto &that ) const {
     static_assert( MemorySpace::directly_accessible,
                    "operation sans contexte : zone non accessible depuis l'hote ; passez un tuple de contextes d'execution" );
     using That = DECAYED_TYPE_OF( that );
@@ -296,14 +296,14 @@ UTP void DTP::_zip_apply( auto op, const auto &that ) const {
     }
 }
 
-UTP void DTP::copy_elements_from( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a  = b; }, that ); }
-UTP void DTP::operator+=        ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a += b; }, that ); }
-UTP void DTP::operator-=        ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a -= b; }, that ); }
-UTP void DTP::operator*=        ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a *= b; }, that ); }
-UTP void DTP::operator/=        ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a /= b; }, that ); }
+UTP HD void DTP::copy_elements_from( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a  = b; }, that ); }
+UTP HD void DTP::operator+=     ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a += b; }, that ); }
+UTP HD void DTP::operator-=     ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a -= b; }, that ); }
+UTP HD void DTP::operator*=     ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a *= b; }, that ); }
+UTP HD void DTP::operator/=     ( const auto &that ) { _zip_apply( []( auto &a, auto b ) { a /= b; }, that ); }
 
 namespace detail {
-    auto indices_rec( auto index, auto &&res_so_far, auto &&shape ) {
+    HD auto indices_rec( auto index, auto &&res_so_far, auto &&shape ) {
         auto coeff = shape.apply_values( []( auto&&...values ) { return ( 1_c * ... * values ); } );
         auto res = res_so_far.with_appended_value( index / coeff );
         if constexpr ( DECAYED_TYPE_OF( shape )::ct_size )
@@ -313,11 +313,11 @@ namespace detail {
     };
 }
 
-UTP auto DTP::indices_col_ordering( auto index ) const {
+UTP HD auto DTP::indices_col_ordering( auto index ) const {
     return detail::indices_rec( index, tuple(), _shape.without_index( 0_c ) );
 }
 
-UTP auto DTP::items_are_contiguous() const {
+UTP HD auto DTP::items_are_contiguous() const {
     // TODO: sort items
     return _strides == contiguous_strides<TF>( _shape );
 }
@@ -332,7 +332,7 @@ UTP auto DTP::items_are_contiguous() const {
 //     } );
 // }
 
-UTP auto DTP::size() const {
+UTP HD auto DTP::size() const {
     static_assert( ct_rank == 1, "..." );
     return shape( Ct<int,0>() );
 }

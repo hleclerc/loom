@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 // #include "../hardware/Ptr.h"
 
 #include "internal/contiguous_strides.h" // IWYU pragma: export
@@ -45,85 +47,85 @@ public:
     using            DataPtr                = Ptr<TF,MemorySpace>;      ///< pointeur typé renvoyé par data()
     SCInt            ct_rank                = Shape::ct_size;
 
-    /* */            TensorView             ( DataPtr data, Shape shape, Strides strides ); ///< pointeur typé ; stocké en interne comme BytePtr (strides en octets)
-    /* */            TensorView             ( const TensorView & ) = default; ///< Eigen-like view semantics: copy-construction shares the data (shallow), while operator= copies the elements (deep). The defaulted copy-ctor also silences -Wdeprecated-copy.
-    /* */            TensorView             () = default;
+    /* */            HD TensorView          ( DataPtr data, Shape shape, Strides strides ); ///< pointeur typé ; stocké en interne comme BytePtr (strides en octets)
+    /* */               TensorView          ( const TensorView & ) = default; ///< Eigen-like view semantics: copy-construction shares the data (shallow), while operator= copies the elements (deep). The defaulted copy-ctor also silences -Wdeprecated-copy.
+    /* */               TensorView          () = default;
 
     // generic info. A view HAS data, and says so in its type: the answer is a `Ct`, known at
     // compile time, so a kernel branches with `if constexpr` and never tests a pointer. The
     // storageless cases are distinct TYPES (see NoneTensor.h -- unbound, and ZeroTensor.h --
     // symbolically zero), not a TensorView in a degenerate state.
-    constexpr auto   is_valid               () const { return Ct<bool,true >(); }
-    constexpr auto   surely_null            () const { return Ct<bool,false>(); }
+    HD constexpr auto   is_valid            () const { return Ct<bool,true >(); }
+    HD constexpr auto   surely_null         () const { return Ct<bool,false>(); }
 
-    MemorySpace      memory_space           () const { return _data.memory_space; }
+    HD MemorySpace   memory_space           () const { return _data.memory_space; }
     // (pas de membre display : le display() générique de display.h gère TensorView via shape()/value()/operator[])
 
     //
-    Strides          strides                () const;
-    auto             stride                 ( auto d ) const;
-    auto             rank                   () const;
+    HD Strides       strides                () const;
+    HD auto          stride                 ( auto d ) const;
+    HD auto          rank                   () const;
 
     // shape
     // for_each_index / for_each_item : à migrer (dépendent de cartesian_product/range)
-    auto             indices_col_ordering   ( auto index ) const;
-    auto             items_are_contiguous   () const; ///<
-    void             for_each_scalar        ( auto &&func ) const; ///< appelle func( vue_rang_0 ) pour chaque élément (boucle simple récursive)
-    auto             all_indices            () const;
-    auto             nb_items               () const;
-    auto             shape                  ( auto d ) const { return _shape[ d ]; }
-    Shape            shape                  () const { return _shape; }
-    auto             empty                  () const;
-    auto             size                   () const;
+    HD auto          indices_col_ordering   ( auto index ) const;
+    HD auto          items_are_contiguous   () const; ///<
+    HD void          for_each_scalar        ( auto &&func ) const; ///< appelle func( vue_rang_0 ) pour chaque élément (boucle simple récursive)
+    HD auto          all_indices            () const;
+    HD auto          nb_items               () const;
+    HD auto          shape                  ( auto d ) const { return _shape[ d ]; }
+    HD Shape         shape                  () const { return _shape; }
+    HD auto          empty                  () const;
+    HD auto          size                   () const;
 
     // content
-    auto             data                   () const;
+    HD auto          data                   () const;
 
-    auto             begin                  () const;
-    auto             end                    () const;
+    HD auto          begin                  () const;
+    HD auto          end                    () const;
 
     // operator() and operator[] produce a new tensor
-    auto             operator()             ( const auto &index, auto ...rem ) const;
-    auto             operator[]             ( const auto &index ) const { return operator()( index ); }
-    auto             operator()             () const { return *this; }
+    HD auto          operator()             ( const auto &index, auto ...rem ) const;
+    HD auto          operator[]             ( const auto &index ) const { return operator()( index ); }
+    HD auto          operator()             () const { return *this; }
 
-    auto             offset                 ( const auto &index, auto ...rem ) const;
-    auto             offset                 () const { return *this; }
+    HD auto          offset                 ( const auto &index, auto ...rem ) const;
+    HD auto          offset                 () const { return *this; }
 
     // scalar value/reference for a rank 1 tensor
-    /* */            operator TF           () const { return value(); }
-    TF               value                 () const;
-    TF&              ref                   () const;
+    /* */            HD operator TF        () const { return value(); }
+    HD TF            value                 () const;
+    HD TF&           ref                   () const;
 
     // reassign
-    void             _zip_apply             ( auto op, const auto &that ) const; ///< op( ref_scalaire, scalaire_de_that ) sur chaque élément (même rang -> élémentaire ; rang 0/scalaire -> broadcast)
-    void             copy_elements_from     ( const auto &that );
-    void             operator-=             ( const auto &that );
-    void             operator+=             ( const auto &that );
-    void             operator*=             ( const auto &that );
-    void             operator/=             ( const auto &that );
-    void             operator=              ( const auto &that );
-    void             operator=              ( const TensorView &that );
-    void             spill_to               ( TensorView &that ); ///< copy data of *this to that, and use data from that
+    HD void          _zip_apply             ( auto op, const auto &that ) const; ///< op( ref_scalaire, scalaire_de_that ) sur chaque élément (même rang -> élémentaire ; rang 0/scalaire -> broadcast)
+    HD void          copy_elements_from     ( const auto &that );
+    HD void          operator-=             ( const auto &that );
+    HD void          operator+=             ( const auto &that );
+    HD void          operator*=             ( const auto &that );
+    HD void          operator/=             ( const auto &that );
+    HD void          operator=              ( const auto &that );
+    HD void          operator=              ( const TensorView &that );
+    HD void          spill_to               ( TensorView &that ); ///< copy data of *this to that, and use data from that
 
     // data copy / transfer
-    auto             transfer_cost          ( const auto &queue, auto io_category ) const;
+       auto          transfer_cost          ( const auto &queue, auto io_category ) const;
 
     // rend la vue accessible depuis le contexte d'exécution `queue` : si le coût de transfert
     // est nul on retype simplement le Ptr vers la zone kernel cible, sinon on transfère
     // (alloc + copy selon io_category). Appelle ensuite cont( vue_kernel ).
-    auto             make_available         ( auto &&queue, auto io_category, auto &&cont ) const;
+       auto          make_available         ( auto &&queue, auto io_category, auto &&cont ) const;
 
-    auto             fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
-    auto             fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)
-    void             fill_with              ( TF value );                                 ///< boucle simple côté hôte (gardée par directly_accessible)
-    auto             _fill_with             ( TF value, auto &&run );                     ///< impl partagée : choix item_list/kernel ; `run` = appel run_parallel (avec ou sans déps)
+       auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
+       auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)
+       void          fill_with              ( TF value );                                 ///< boucle simple côté hôte (gardée par directly_accessible)
+       auto          _fill_with             ( TF value, auto &&run );                     ///< impl partagée : choix item_list/kernel ; `run` = appel run_parallel (avec ou sans déps)
 
     //
-    auto             unsqueeze              ( auto axis ) const; ///< append a trailing dimension of size 1 (preserves strides)
-    auto             squeeze                ( auto axis, auto index ) const; ///< axis = position (Ct) ou nom d'axe, + valeur
-    auto             squeeze                ( auto axis_index ) const;       ///< axis_index = (nom = valeur)
-    auto             row                    ( auto index ) const;
+    HD auto          unsqueeze              ( auto axis ) const; ///< append a trailing dimension of size 1 (preserves strides)
+    HD auto          squeeze                ( auto axis, auto index ) const; ///< axis = position (Ct) ou nom d'axe, + valeur
+    HD auto          squeeze                ( auto axis_index ) const;       ///< axis_index = (nom = valeur)
+    HD auto          row                    ( auto index ) const;
 
     Strides          _strides;              ///< strides en octets
     Shape            _shape;                ///<
@@ -135,16 +137,16 @@ public:
 // généré d'un `driver.call` sur GPU la construit sur `CudaGlobalMemorySpace`, puisque c'est là
 // que XLA lui remet ses buffers.
 template<class MemorySpace = CpuHostMemorySpace>
-auto tensor_view( auto *ptr, auto &&shape, auto &&axis_names, auto &&strides ) {
+HD auto tensor_view( auto *ptr, auto &&shape, auto &&axis_names, auto &&strides ) {
     using TF = DECAYED_TYPE_OF( *ptr );
     return TensorView<TF,DECAYED_TYPE_OF( shape ),MemorySpace,DECAYED_TYPE_OF( axis_names ),DECAYED_TYPE_OF( strides )>(
         Ptr<TF,MemorySpace>( ptr ), FORWARD( shape ), FORWARD( strides )
     );
 }
 template<class MemorySpace = CpuHostMemorySpace>
-auto tensor_view( auto *ptr, auto &&shape, auto &&axis_names ) { return tensor_view<MemorySpace>( ptr, shape, FORWARD( axis_names ), contiguous_strides<DECAYED_TYPE_OF( *ptr )>( shape ) ); }
+HD auto tensor_view( auto *ptr, auto &&shape, auto &&axis_names ) { return tensor_view<MemorySpace>( ptr, shape, FORWARD( axis_names ), contiguous_strides<DECAYED_TYPE_OF( *ptr )>( shape ) ); }
 template<class MemorySpace = CpuHostMemorySpace>
-auto tensor_view( auto *ptr, auto &&shape ) { return tensor_view<MemorySpace>( ptr, FORWARD( shape ), unnamed_axes( shape ) ); }
+HD auto tensor_view( auto *ptr, auto &&shape ) { return tensor_view<MemorySpace>( ptr, FORWARD( shape ), unnamed_axes( shape ) ); }
 
 
 

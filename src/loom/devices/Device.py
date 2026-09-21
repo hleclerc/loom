@@ -86,6 +86,22 @@ class Device:
         each queue header is self-contained, none includes another device's toolkit."""
         raise NotImplementedError
 
+    # ── the generated source's execution context ─────────────────────────────
+    # How a handler gets its queue. Default: one per handler, made on first use and never
+    # destroyed (a thread pool may still own threads when the process tears down its dlopen'ed
+    # handlers). A device whose runtime hands the call a stream (CUDA) builds the queue on it
+    # instead, and says which FFI parameter carries it.
+    def cpp_stream_param( self ):
+        """The handler parameter that receives the platform stream, or None."""
+        return None
+
+    def cpp_stream_bind( self ):
+        """The `ffi::Ffi::Bind()` clause that binds it, or ""."""
+        return ""
+
+    def cpp_queue_decl( self ):
+        return "static Queue &queue = *new Queue();"
+
     # ── how the device compiles ───────────────────────────────────────────────
     # A device compiles with ITS compiler (`compilation.Compiler`): the host C++ compiler for the
     # CPU, nvcc around it for CUDA. `make_library` asks the compiler for a command and handles the

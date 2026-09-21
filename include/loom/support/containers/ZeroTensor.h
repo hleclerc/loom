@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../common_types.h"
 #include "../Ct.h"
 
@@ -19,21 +21,21 @@ struct ZeroTensor {
     using            AxisNames              = _AxisNames;
     SCInt            ct_rank                = Shape::ct_size;
 
-    constexpr auto   is_valid               () const { return Ct<bool,true>(); } ///< a real value, merely a storageless one
-    constexpr auto   surely_null            () const { return Ct<bool,true>(); }
+    HD constexpr auto   is_valid            () const { return Ct<bool,true>(); } ///< a real value, merely a storageless one
+    HD constexpr auto   surely_null         () const { return Ct<bool,true>(); }
 
     // indexing a zero tensor yields a zero tensor (of rank 0 once fully indexed); reading it
     // yields 0. There is no `operator=`: a zero tensor is not somewhere one writes.
-    constexpr auto   operator()             ( auto &&...  ) const { return ZeroTensor<TF, Tuple<>, Tuple<>>(); }
-    constexpr TF     value                  () const { return 0; }
-    constexpr        operator TF            () const { return 0; }
+    HD constexpr auto   operator()          ( auto &&...  ) const { return ZeroTensor<TF, Tuple<>, Tuple<>>(); }
+    HD constexpr TF  value                  () const { return 0; }
+    HD constexpr     operator TF            () const { return 0; }
 
     // as a `run_parallel` argument: no storage backs it, so it crosses into the kernel
     // unchanged, at no cost, whatever the queue and the io category.
-    constexpr auto   transfer_cost          ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-    constexpr auto   make_available         ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
+       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
 
-    void             display                ( auto &ds ) const { ds << "ZeroTensor"; }
+    HD void          display                ( auto &ds ) const { ds << "ZeroTensor"; }
 };
 
 } // namespace sdot

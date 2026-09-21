@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include "../common_types.h"
 #include "../Ct.h"
 
@@ -27,18 +29,18 @@ template<class T>
 struct ScalarValue {
     T                v;
 
-    T                value                  () const { return v; }
+    HD T             value                  () const { return v; }
 
     /// selecting axes on a value that has none: nothing to select, so it gives back itself --
     /// which is what lets a batch index be applied uniformly (`cell.nb_dims( batch_index )`).
-    constexpr auto   operator()             ( auto &&.../*index*/ ) const { return *this; }
+    HD constexpr auto   operator()          ( auto &&.../*index*/ ) const { return *this; }
 
     /// as a `run_parallel` argument: the value is in the argument itself, so there is nothing in
     /// memory to make accessible -- it crosses into the kernel untouched, at zero cost.
-    constexpr auto   transfer_cost          ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-    constexpr auto   make_available         ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
+       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
 
-    void             display                ( auto &ds ) const { ds << "ScalarValue(" << v << ")"; }
+    HD void          display                ( auto &ds ) const { ds << "ScalarValue(" << v << ")"; }
 };
 
 } // namespace sdot

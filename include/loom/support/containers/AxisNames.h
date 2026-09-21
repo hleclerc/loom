@@ -11,7 +11,7 @@ struct AxisBase {};
 
 /// Axe sans nom (placeholder) : valeur par défaut des entrées d'AxisNames.
 struct UnnamedAxis : AxisBase {
-    void display( auto &os ) const { os << "_"; }
+    HD void display( auto &os ) const { os << "_"; }
 };
 
 /// Indice attaché à un axe nommé (résultat de `axis = index`), consommé par
@@ -29,7 +29,7 @@ struct AxisIndex {
 };
 
 /// An index an argument may ignore: what a batch multi-index is made of (see `CartesianIndices`).
-constexpr auto optional_axis_index( auto axis, auto index ) {
+HD constexpr auto optional_axis_index( auto axis, auto index ) {
     return AxisIndex<DECAYED_TYPE_OF( axis ),DECAYED_TYPE_OF( index ),true>{ index };
 }
 
@@ -48,18 +48,18 @@ template<class Name,class Head,class... Tl> struct AxisPos<Name,Tuple<Head,Tl...
 
 /// `Tuple` d'axes « tous non nommés » dimensionné comme `shape` (on n'en prend que le type :
 /// valeur par défaut d'`AxisNames`).
-constexpr auto unnamed_axes( auto shape ) {
+HD constexpr auto unnamed_axes( auto shape ) {
     return map( shape, []( auto ) { return UnnamedAxis{}; } );
 }
 
 /// Définit un type d'axe nommé + un objet utilisable comme `t( NAME = i )` / `squeeze( NAME, i )`.
 #define DEFINE_AXIS( NAME )                                                                 \
     struct _##NAME : ::sdot::AxisBase {                                                     \
-        constexpr auto operator=( auto index ) const {                                     \
+        HD constexpr auto operator=( auto index ) const {                                  \
             return ::sdot::AxisIndex<_##NAME,DECAYED_TYPE_OF( index )>{ FORWARD( index ) }; \
         }                                                                                  \
         void display( auto &os ) const { os << #NAME; }                                    \
     };                                                                                     \
-    inline constexpr _##NAME NAME{}
+    LOOM_TAG( _##NAME, NAME )
 
 } // namespace sdot

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <loom/support/common_macros.h> // HD
+
 #include <barrier>
 
 namespace sdot {
@@ -12,13 +14,13 @@ namespace sdot {
 /// `get_local_linear_range`. La version CUDA (`CudaGroup`) exposera le même contrat sur
 /// `__syncthreads`.
 struct CpuGroup {
-    int get_local_linear_range() const { return size; }
+    HD int get_local_linear_range() const { return size; }
 
     std::barrier<> *barrier; ///< nul si `size == 1`
     int             size;
 };
 
-inline void group_barrier( const CpuGroup &group ) {
+HD inline void group_barrier( const CpuGroup &group ) {
     if ( group.barrier )
         group.barrier->arrive_and_wait();
 }
@@ -28,14 +30,14 @@ inline void group_barrier( const CpuGroup &group ) {
 /// corps qui coopère par sous-groupe doit dégénérer correctement à cette largeur (voir
 /// `OtPlan1d.cxx::sort_diracs`).
 struct CpuSubGroup {
-    int get_local_linear_id   () const { return 0; }
-    int get_local_linear_range() const { return size; }
-    int get_group_linear_id   () const { return lane; }
+    HD int get_local_linear_id   () const { return 0; }
+    HD int get_local_linear_range() const { return size; }
+    HD int get_group_linear_id   () const { return lane; }
 
     int lane;
     int size;
 };
 
-inline void group_barrier( const CpuSubGroup & ) {}
+HD inline void group_barrier( const CpuSubGroup & ) {}
 
 } // namespace sdot

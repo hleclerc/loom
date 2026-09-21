@@ -301,7 +301,16 @@ class Nvcc( Compiler ):
         # `--Werror cross-execution-space-call` : appeler une fonction hôte depuis du code device est
         # une ERREUR de compilation, pas un avertissement -- nvcc en fait sinon un piège qui se
         # manifeste à l'exécution en « illegal memory access », loin de la ligne fautive
-        return [ "-std=c++20", f"-ccbin={ self.host.cxx }", f"-arch={ self.arch }", "-O3", *defines,
+        # une architecture : `-arch=sm_75` ; plusieurs (`SDOT_CUDA_ARCH=sm_70,sm_80,sm_90`, le
+        # catalogue) : un `-gencode` par architecture, plus le PTX de la plus haute pour ce qui
+        # viendra après
+        archs = [ a.strip() for a in self.arch.split( "," ) if a.strip() ]
+        if len( archs ) == 1:
+            arch_flags = [ f"-arch={ archs[ 0 ] }" ]
+        else:
+            arch_flags = [ f"-gencode=arch=compute_{ a[ 3: ] },code=sm_{ a[ 3: ] }" for a in archs ]
+            arch_flags.append( f"-gencode=arch=compute_{ archs[ -1 ][ 3: ] },code=compute_{ archs[ -1 ][ 3: ] }" )
+        return [ "-std=c++20", f"-ccbin={ self.host.cxx }", *arch_flags, "-O3", *defines,
                  "--expt-relaxed-constexpr", "--extended-lambda", "--Werror", "cross-execution-space-call",
                  "-Xcompiler", ",".join( host_flags ),
                  *( [ "-lineinfo" ] if os.environ.get( "LOOM_LINEINFO" ) else [] ) ]

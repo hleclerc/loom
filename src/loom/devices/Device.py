@@ -102,6 +102,15 @@ class Device:
     def cpp_queue_decl( self ):
         return "static Queue &queue = *new Queue();"
 
+    # ── the catalogue (precompiled kernels in a wheel, see compilation/catalogue.py) ──────
+    def catalogue_kind( self ) -> str:
+        """Under which kind a recorded source is filed ("cpu" | "cuda")."""
+        raise NotImplementedError
+
+    def catalogue_tags( self ) -> list:
+        """The catalogue tags this machine can run, best first (`cpu-x86-64-v4`, then `v3`, ...)."""
+        raise NotImplementedError
+
     # ── how the device compiles ───────────────────────────────────────────────
     # A device compiles with ITS compiler (`compilation.Compiler`): the host C++ compiler for the
     # CPU, nvcc around it for CUDA. `make_library` asks the compiler for a command and handles the

@@ -74,6 +74,13 @@ class CudaGpu( Device ):
     def cpp_queue_decl( self ):
         return "Queue queue( xla_stream );"
 
+    def catalogue_kind( self ):
+        return "cuda"
+
+    def catalogue_tags( self ):
+        # one CUDA catalogue: a fat binary for several architectures (`SDOT_CUDA_ARCH` at build)
+        return [ "cuda" ]
+
     @property
     def sm_arch( self ):
         """`sm_75`-style architecture of the card, read off the driver (None if no card)."""

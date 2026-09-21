@@ -219,7 +219,11 @@ class Build:
                 for i in self.manifest.edges.get( t, {} ).get( "inputs", [] ):
                     if i.endswith( ".o" ):
                         Path( i ).unlink( missing_ok = True )
-        cmd = [ ninja_path(), "-C", str( self.root ), "-f", str( ninja_file ), *targets ]
+        # `SDOT_BUILD_JOBS` : le parallélisme (défaut : celui de ninja, tous les coeurs) -- un
+        # catalogue CUDA compile cent unités d'un gigaoctet chacune, on ne les veut pas toutes en
+        # même temps sur une machine partagée
+        jobs = os.getenv( "SDOT_BUILD_JOBS" )
+        cmd = [ ninja_path(), "-C", str( self.root ), "-f", str( ninja_file ), *( [ "-j", jobs ] if jobs else [] ), *targets ]
         r = subprocess.run( cmd, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, text = True )
         out = r.stdout or ""
         # ninja's own line for a no-op build is noise; a real compilation is worth seeing

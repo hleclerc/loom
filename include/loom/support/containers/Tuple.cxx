@@ -132,6 +132,9 @@ UTP T_T HD auto DTP::without_index( T index ) const {
 #undef DTP
 
 // ---- rank 0 ------------------------------------------------------------------------
+// les membres NON template de la spécialisation `Tuple<>` sont `inline` : ce sont des définitions
+// ordinaires, une par unité de compilation -- et un catalogue lie des centaines d'unités dans une
+// même bibliothèque
 #define UTP // template<>
 #define DTP Tuple<>
 
@@ -141,7 +144,7 @@ UTP T_TA HD DTP::Tuple( Function, T &&/*func*/, A /*index*/ ) {
 UTP T_T HD DTP::Tuple( Function, T &&/*func*/ ) {
 }
 
-UTP HD DTP::Tuple( Values ) {
+UTP inline HD DTP::Tuple( Values ) {
 }
 
 UTP T_T HD void DTP::for_each_item( T &&/* cb */ ) const {
@@ -166,7 +169,7 @@ UTP T_T HD auto DTP::with_appended_value( T &&new_value ) const {
     return tuple( new_value );
 }
 
-UTP HD auto DTP::size() {
+UTP inline HD auto DTP::size() {
     return Ct<int,0>();
 }
 

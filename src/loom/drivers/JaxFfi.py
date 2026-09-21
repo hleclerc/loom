@@ -69,7 +69,11 @@ def _lib_suffix() -> str:
 def _ffi_include_flags() -> list:
     # jaxlib ships the header-only XLA FFI C++ API (xla/ffi/api/ffi.h) under this dir. `-isystem`,
     # not `-I`: its headers do not compile warning-free, and those warnings are not ours to read.
-    return [ "-isystem", jax.ffi.include_dir() ]
+    return [ "-isystem", ffi_include_dir() ]
+
+
+def ffi_include_dir() -> str:
+    return jax.ffi.include_dir()
 
 
 def render_source( body: str ) -> str:
@@ -100,20 +104,33 @@ def compile_and_register( source: str, device, prefix: str = "", sources = () ) 
     if name in _loaded:
         return name
 
-    # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes would
-    # look like a change to it (one recompilation per process, for nothing).
-    src_path = build_dir() / f"{ name }{ device.compiler.source_suffix() }"
-    src_path.parent.mkdir( parents = True, exist_ok = True )
-    if not ( src_path.exists() and src_path.read_text() == source ):
-        src_path.write_text( source )
+    # a precompiled kernel first (a wheel's catalogue, see `compilation/catalogue.py`): the same
+    # source, compiled for a CPU level this machine can run -- nothing to compile, nothing to
+    # check. Recording (a catalogue being built) sees every source that goes by.
+    from ..compilation import catalogue
+    catalogue.record( source, sources, device )
+    found = catalogue.lookup( source, sources, device )
+    if found is not None:
+        lib, handler = found
+    else:
+        if catalogue.policy() == "catalogue":
+            raise RuntimeError( f"sdot: kernel `{ name }` is not in the catalogue and SDOT_KERNELS=catalogue forbids compiling it" )
 
-    lib_path = make_library(
-        name + _lib_suffix(), [ src_path ], device,
-        extra_flags = _ffi_include_flags(), sources = sources,
-    )
+        # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes
+        # would look like a change to it (one recompilation per process, for nothing).
+        src_path = build_dir() / f"{ name }{ device.compiler.source_suffix() }"
+        src_path.parent.mkdir( parents = True, exist_ok = True )
+        if not ( src_path.exists() and src_path.read_text() == source ):
+            src_path.write_text( source )
 
-    lib = ctypes.CDLL( str( lib_path ) )
-    handler = getattr( lib, _HANDLER_SYMBOL )
+        lib_path = make_library(
+            name + _lib_suffix(), [ src_path ], device,
+            extra_flags = _ffi_include_flags(),
+            sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
+        )
+        lib = ctypes.CDLL( str( lib_path ) )
+        handler = getattr( lib, _HANDLER_SYMBOL )
+
     jax.ffi.register_ffi_target(
         name, jax.ffi.pycapsule( handler ), platform = device.ffi_platform,
     )
@@ -190,9 +207,14 @@ static ffi::Error sdot_ffi_impl( {params} ) {{
 }}
 
 // the ONE exported symbol (everything else is hidden, see `HostCxx`): the declaration carries the
-// visibility, the macro below defines it.
-extern "C" LOOM_EXPORT XLA_FFI_Error *sdot_ffi_entry( XLA_FFI_CallFrame * );
-XLA_FFI_DEFINE_HANDLER_SYMBOL( sdot_ffi_entry, sdot_ffi_impl,
+// visibility, the macro below defines it. Its NAME is a define, not part of the source (the source
+// is hashed into the kernel's name): `sdot_ffi_entry` in a library of its own, a unique name when a
+// catalogue links many kernels into one library (see `compilation/catalogue.py`).
+#ifndef SDOT_FFI_ENTRY
+#define SDOT_FFI_ENTRY sdot_ffi_entry
+#endif
+extern "C" LOOM_EXPORT XLA_FFI_Error *SDOT_FFI_ENTRY( XLA_FFI_CallFrame * );
+XLA_FFI_DEFINE_HANDLER_SYMBOL( SDOT_FFI_ENTRY, sdot_ffi_impl,
     ffi::Ffi::Bind(){binds} );
 """
 
@@ -258,10 +280,12 @@ def _render_call( code, ca, device ):
 
     # the units to LINK, collected the same blind way: `( path, defines )`, resolved against the
     # C++ source roots. Compiled once per (source, defines, compiler) by the build graph.
+    # kept AS GIVEN (`sdot/x.cpp`, relative to the C++ roots): the path is part of the kernel's
+    # key, and a catalogue key must be the same on every machine. Resolved at compile time.
     sources = []
     for src in [ s for arg_ca in ca.args.values() for s in getattr( arg_ca, "cpp_sources", lambda: () )() ] + list( code.sources ):
         path, defines = ( src if isinstance( src, tuple ) else ( src, {} ) )
-        item = ( str( _resolve_source( path ) ), tuple( sorted( dict( defines ).items() ) ) )
+        item = ( str( path ), tuple( sorted( dict( defines ).items() ) ) )
         if item not in sources:
             sources.append( item )
 

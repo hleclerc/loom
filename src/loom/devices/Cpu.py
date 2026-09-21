@@ -43,6 +43,18 @@ class Cpu( Device ):
     def device_is_present( self ):
         return self.compiler.is_available()
 
+    def catalogue_kind( self ):
+        return "cpu"
+
+    def catalogue_tags( self ):
+        # every level at or below what the machine carries: a v4 machine loads a v3 catalogue
+        from ..compilation.Compiler import cpu_variant, X86_LEVELS
+        mine = cpu_variant()
+        levels = [ level for level, _ in X86_LEVELS ] + [ "x86-64" ]
+        if mine in levels:
+            return [ f"cpu-{ l }" for l in levels[ levels.index( mine ): ] ]
+        return [ f"cpu-{ mine }" ]
+
     @property
     def ffi_platform( self ):
         return "cpu"

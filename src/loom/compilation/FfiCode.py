@@ -122,7 +122,7 @@ class FfiCodeParallel( FfiCode ):
     The body becomes the `operator()` of a NAMED functor at namespace scope (`preamble_for`), not
     a lambda: a device compiler (nvcc) is at ease with a plain struct whose `operator()` is an
     explicit member template, and balks at lambdas crossing into device code. The parameter types
-    are template parameters, deduced at the call -- what `make_available` hands the kernel is
+    are template parameters, deduced at the call -- what `kernel_form` hands the kernel is
     decided in C++ (the kernel-side memory space), so the functor does not spell them.
 
     Three names are RESERVED (injected by the scaffold, not call arguments): `batch_index` (the

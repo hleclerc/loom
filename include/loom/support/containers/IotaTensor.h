@@ -34,7 +34,7 @@ struct IotaTensor {
     // as a `run_parallel` argument: no storage backs it, so it crosses into the kernel unchanged,
     // at no cost, whatever the queue and the io category (mirrors `ZeroTensor`/`NoneTensor`).
        constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   kernel_form         ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 
     HD void          display                ( auto &ds ) const { ds << "IotaTensor"; }
 };

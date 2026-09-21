@@ -63,7 +63,7 @@ struct CartesianIndices {
             return detail::attach_axis_names( raw, AxisNames{}, tuple() );
         }
     }
-       auto make_available( auto &&/*queue*/, auto &&/*io_category*/, auto &&cont ) const { return cont( *this ); }
+       auto kernel_form   ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 
     /// intersection des parcours : min terme à terme des formes (mêmes rangs).
     HD auto intersection  ( const auto &other ) const {

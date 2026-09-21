@@ -21,20 +21,19 @@ UTP HD DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
         _strides( strides ), _shape( shape ), _data( reinterpret_cast<RawByte *>( data.raw ), data.memory_space ) {
 }
 
-UTP    auto DTP::make_available( auto &&queue, auto io_category, auto &&cont ) const {
+UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
     using KMS = typename DECAYED_TYPE_OF( queue )::DefaultKernelMemorySpace;
 
     // un argument doit être catégorisé (Inp/Out/Mut) ; sinon l'utilisateur a oublié un tag
     static_assert( ! std::is_same_v<DECAYED_TYPE_OF( io_category ), UndefList>,
                    "argument passe a run_parallel sans categorie Inp/Out/Mut" );
 
-    if constexpr ( DECAYED_TYPE_OF( transfer_cost_per_byte( queue, _data.memory_space ) )::value == 0 ) {
-        // coût nul -> donnée déjà accessible depuis le contexte cible -> on retype le Ptr
-        using KTensor = TensorView<TF,Shape,KMS,AxisNames,Strides>;
-        return cont( KTensor( typename KTensor::DataPtr( _data.template as<TF>() ), _shape, _strides ) );
-    } else {
-        TODO; // chemin avec transfert (alloc USM + copy selon io_category) -> point SYCL
-    }
+    // coût nul -> donnée déjà accessible depuis le contexte cible -> on retype le Ptr. Un device
+    // qui devrait transférer n'existe pas encore (voir `kernel_form` dans make_avaiable.h)
+    static_assert( DECAYED_TYPE_OF( transfer_cost_per_byte( queue, _data.memory_space ) )::value == 0,
+                   "TensorView::kernel_form : cette queue ne voit pas cette zone memoire, et le transfert n'est pas ecrit" );
+    using KTensor = TensorView<TF,Shape,KMS,AxisNames,Strides>;
+    return KTensor( typename KTensor::DataPtr( _data.template as<TF>() ), _shape, _strides );
 }
 
 UTP HD auto DTP::operator()( const auto &index, auto ...rem ) const {

@@ -42,7 +42,7 @@ struct FillTensor {
     // as a `run_parallel` argument: the scalar is already where the kernel runs (an FFI input XLA put
     // on the device), so it crosses unchanged, like `ZeroTensor`.
        constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   kernel_form         ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 
     HD void          display                ( auto &ds ) const { ds << "FillTensor(" << *data << ")"; }
 };

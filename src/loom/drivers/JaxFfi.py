@@ -138,8 +138,10 @@ def call_body( body: str, device ):
 _CALL_TEMPLATE = """\
 #include "xla/ffi/api/ffi.h"
 #include <{queue_include}>
+// the device is in the TYPE of everything below: the queue decides the memory space the kernel
+// dereferences. `SDOT_QUEUE` is also what a hand-written header may read (`sdot/Queue.h`).
 #define SDOT_QUEUE {queue_type}
-#include <sdot/Queue.h>
+namespace sdot {{ using Queue = SDOT_QUEUE; }}
 #include <loom/support/algorithms/CartesianIndices.h>
 #include <loom/support/kernels/run_parallel.h>
 #include <loom/support/common_types.h>
@@ -306,11 +308,11 @@ def _render_call( code, ca, device ):
 
 def _resolve_source( path ):
     """A kernel source, as given (`sdot/density/gaussians.cpp`, like an include) or absolute."""
-    from ..compilation import cpp_include_root, additional_include_dirs
+    from ..compilation import include_roots
     p = Path( path )
     if p.is_absolute():
         return p
-    for root in [ cpp_include_root(), *additional_include_dirs() ]:
+    for root in include_roots():
         if ( Path( root ) / p ).is_file():
             return Path( root ) / p
     raise FileNotFoundError( f"kernel source `{ path }` not found under the C++ source roots" )

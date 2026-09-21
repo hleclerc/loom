@@ -16,7 +16,11 @@ Réglages d'environnement, communs :
   * `SDOT_CXX`     : le compilateur hôte (sinon `CXX`, sinon `c++` / `clang++` / `g++` sur PATH).
   * `SDOT_CXXFLAGS`: des flags de plus, découpés en mots -- l'échappatoire pour essayer un réglage
                      sans toucher au code. Ils entrent dans la signature.
-  * `SDOT_NO_MARCH_NATIVE=1` : revenir au x86-64 de base (un `.so` à emporter ailleurs).
+  * `SDOT_CPU_VARIANT` : compiler pour un NIVEAU d'architecture nommé (`x86-64-v2` / `v3` / `v4`,
+                     `armv8-a`) au lieu de `-march=native` -- un binaire à emporter ailleurs, et ce
+                     que le catalogue des wheels bâtit, une variante par niveau (`cpu_variant()`
+                     dit lequel la machine présente peut charger). `SDOT_NO_MARCH_NATIVE=1` :
+                     le x86-64 de base.
   * `LOOM_LINEINFO=1`     : `-g`, pour qu'un profileur / sanitizer nomme la ligne.
   * `LOOM_BOUNDS_CHECK=1` : arme la vérification de bornes de `TensorView::squeeze` (voir
                             `common_macros.h`). Un test par accès, réservé au diagnostic.
@@ -45,6 +49,45 @@ def cpu_model() -> str:
     except OSError:
         pass
     return platform.processor() or platform.machine()
+
+
+# les niveaux d'architecture, du plus riche au plus pauvre, et ce que chacun exige : le catalogue
+# d'un wheel en bâtit une variante par niveau, l'import charge le plus riche que la machine porte
+X86_LEVELS = (
+    ( "x86-64-v4", ( "AVX512F", "AVX512BW", "AVX512CD", "AVX512DQ", "AVX512VL" ) ),
+    ( "x86-64-v3", ( "AVX2", "FMA3", "BMI2", "F16C", "LZCNT", "MOVBE" ) ),
+    ( "x86-64-v2", ( "SSE42", "SSSE3", "POPCNT" ) ),
+)
+
+
+def cpu_variant() -> str:
+    """Le niveau d'architecture le plus riche que cette machine porte (`x86-64-v3`, `armv8-a`...) :
+    la clé sous laquelle un catalogue précompilé range ses variantes. numpy sait lire le CPU
+    (`__cpu_features__`) ; à défaut, `/proc/cpuinfo`."""
+    machine = platform.machine().lower()
+    if machine in ( "aarch64", "arm64" ):
+        return "armv8-a"
+    if machine not in ( "x86_64", "amd64" ):
+        return machine
+    features = None
+    try:
+        from numpy.core._multiarray_umath import __cpu_features__ as f
+        features = { k for k, v in f.items() if v }
+    except Exception:
+        try:
+            with open( "/proc/cpuinfo" ) as fh:
+                flags = { w.upper() for line in fh if line.startswith( "flags" ) for w in line.split() }
+            features = { "AVX512F": "AVX512F" in flags, "AVX512BW": "AVX512BW" in flags, "AVX512CD": "AVX512CD" in flags,
+                         "AVX512DQ": "AVX512DQ" in flags, "AVX512VL": "AVX512VL" in flags, "AVX2": "AVX2" in flags,
+                         "FMA3": "FMA" in flags, "BMI2": "BMI2" in flags, "F16C": "F16C" in flags, "LZCNT": "ABM" in flags,
+                         "MOVBE": "MOVBE" in flags, "SSE42": "SSE4_2" in flags, "SSSE3": "SSSE3" in flags, "POPCNT": "POPCNT" in flags }
+            features = { k for k, v in features.items() if v }
+        except OSError:
+            features = set()
+    for level, needs in X86_LEVELS:
+        if all( n in features for n in needs ):
+            return level
+    return "x86-64"
 
 
 def find_host_cxx() -> str | None:
@@ -121,8 +164,10 @@ class HostCxx( Compiler ):
 
     name = "host c++"
 
-    def __init__( self, cxx: str | None = None ):
+    def __init__( self, cxx: str | None = None, variant: str | None = None ):
         self.cxx = cxx or find_host_cxx()
+        # `None` = cette machine (`-march=native`) ; un niveau nommé = un binaire portable
+        self.variant = variant or os.getenv( "SDOT_CPU_VARIANT" ) or None
 
     def is_available( self ) -> bool:
         return self.cxx is not None
@@ -132,6 +177,8 @@ class HostCxx( Compiler ):
             return []
         if any( f.startswith( "-march" ) or f.startswith( "-mcpu" ) for f in env_cxxflags() ):
             return []
+        if self.variant:
+            return [ f"-march={ self.variant }" ]
         return [ "-march=native" ]
 
     def opt_flags( self ) -> list:
@@ -197,7 +244,8 @@ class HostCxx( Compiler ):
         return f"-Wl,-install_name,@rpath/{ Path( out ).name }" if sys.platform == "darwin" else ""
 
     def describe( self ):
-        return [ ( "c++ hôte", self.cxx or "introuvable" ), ( "flags", " ".join( self.flags() ) ) ]
+        return [ ( "c++ hôte", self.cxx or "introuvable" ), ( "flags", " ".join( self.flags() ) ),
+                 ( "variante", f"{ self.variant or 'native' } (la machine porte { cpu_variant() })" ) ]
 
 
 def find_nvcc() -> str | None:

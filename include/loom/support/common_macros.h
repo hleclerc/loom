@@ -30,16 +30,19 @@
 #endif
 #define HD_INLINE HD inline
 
-// `LOOM_TAG( Type, name )` : un objet global VIDE et constant (une étiquette : un nom d'axe,
-// `num_vertex = i`) utilisable des deux côtés. Un `constexpr` de portée globale n'est pas
-// utilisable dans du code device dès qu'on appelle une méthode dessus avec une valeur non
-// constante (ODR-use) ; nvcc compile la même source deux fois, et la passe device veut un
-// `__device__` -- ce qu'on lui donne, là et seulement là.
+// `LOOM_CONSTANT( déclaration )` : une constante globale utilisable des deux côtés -- une table
+// de quadrature lue avec un indice de boucle, l'étiquette d'un axe sur laquelle on appelle
+// `num_vertex = i`. Un `constexpr` de portée globale n'est pas utilisable dans du code device dès
+// qu'il est ODR-utilisé (indice non constant, `this` d'une méthode) ; nvcc compile la même source
+// deux fois, et la passe device veut un `__device__` -- ce qu'on lui donne, là et seulement là.
+//     LOOM_CONSTANT( double gl8_x[ 4 ] ) = { ... };
+//     LOOM_TAG( _num_vertex, num_vertex );
 #ifdef __CUDA_ARCH__
-#define LOOM_TAG( Type, name ) static __device__ const Type name{}
+#define LOOM_CONSTANT( ... ) static __device__ const __VA_ARGS__
 #else
-#define LOOM_TAG( Type, name ) inline constexpr Type name{}
+#define LOOM_CONSTANT( ... ) inline constexpr __VA_ARGS__
 #endif
+#define LOOM_TAG( Type, name ) LOOM_CONSTANT( Type name ){}
 
 // `LOOM_EXPORT` : un symbole qu'une bibliothèque PUBLIE (tout est caché par défaut,
 // `-fvisibility=hidden`) -- le point d'entrée d'un noyau, la file de threads du runtime.

@@ -9,7 +9,7 @@ namespace sdot {
 template<class TI,class TC=PI>
 struct Range {
     T_U     void for_each_item_split( PI rel, PI mod, U &&func ) const { for( TC i = rel; i < TC( end ); i += mod ) func( TI( i ) ); }
-       auto   make_available     ( auto &&queue, auto &&io_category, auto &&cont ) const { return cont( *this ); }
+       auto   kernel_form        ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
     // Une plage ne designe RIEN en memoire : son cout de transfert est nul, quel que soit le type
     // de sa borne. Le dire ici plutot que de compter sur `std::is_trivial_v` dans `transfer_cost`,
     // car une borne compile-time (`Range<Ct<SI,2>>`, ce que rend `range( nb_items() )` sur un

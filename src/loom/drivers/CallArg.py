@@ -90,7 +90,7 @@ class CallArg:
     def cpp_io_list( self ):
         """This member's io category, as the tag `run_parallel` speaks (see kernels/IoCategory.h).
 
-        It is what tells `make_available` how much to move: an input is copied to the device but
+        It is what tells `kernel_form` how much to move: an input is copied to the device but
         not back, an output back but not in. Python already knows it attribute by attribute, so a
         kernel argument is made available MEMBER BY MEMBER -- nothing crosses that has no reason
         to."""

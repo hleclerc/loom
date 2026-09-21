@@ -53,10 +53,9 @@ struct ErrorBuffer {
         return sdot::transfer_cost( queue, io_category, view );
     }
 
-       auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
-        return sdot::make_available( queue, io_category, view, [&]( auto &&kernel_view ) {
-            return cont( ErrorBuffer<DECAYED_TYPE_OF( kernel_view )>{ FORWARD( kernel_view ), max_records } );
-        } );
+       auto kernel_form( auto &&queue, auto io_category ) const {
+        auto kernel_view = sdot::kernel_form( queue, io_category, view );
+        return ErrorBuffer<DECAYED_TYPE_OF( kernel_view )>{ kernel_view, max_records };
     }
 };
 
@@ -66,7 +65,7 @@ struct ErrorBuffer {
 struct NoErrorBuffer {
     HD constexpr void record     ( std::int32_t /*kind*/, std::int32_t /*id*/, SI /*value*/ ) const {}
        constexpr auto transfer_cost ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-       constexpr auto make_available( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto kernel_form   ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 };
 
 template<class View>

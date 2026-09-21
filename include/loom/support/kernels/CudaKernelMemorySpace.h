@@ -5,7 +5,7 @@
 namespace sdot {
 
 /// Mémoire vue depuis l'intérieur d'un kernel CUDA : aucun attribut runtime, trivialement copiable.
-/// `make_available` retype le `MemorySpace` source d'un argument vers ce tag quand le contexte
+/// `kernel_form` retype le `MemorySpace` source d'un argument vers ce tag quand le contexte
 /// d'exécution choisi cible le GPU. Dans le kernel, un `Ptr<T, CudaKernelMemorySpace>` se
 /// déréférence directement : la donnée est déjà locale.
 struct CudaKernelMemorySpace {

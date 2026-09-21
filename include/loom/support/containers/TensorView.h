@@ -114,7 +114,7 @@ public:
     // rend la vue accessible depuis le contexte d'exécution `queue` : si le coût de transfert
     // est nul on retype simplement le Ptr vers la zone kernel cible, sinon on transfère
     // (alloc + copy selon io_category). Appelle ensuite cont( vue_kernel ).
-       auto          make_available         ( auto &&queue, auto io_category, auto &&cont ) const;
+       auto          kernel_form            ( auto &&queue, auto io_category ) const;
 
        auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
        auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)

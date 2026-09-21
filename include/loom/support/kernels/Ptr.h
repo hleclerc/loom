@@ -12,7 +12,7 @@ namespace sdot {
 //
 // Côté kernel le `MemorySpace` est un tag vide (`*KernelMemorySpace`) -> même taille
 // qu'un pointeur nu. Côté hôte il peut porter du runtime (queue/device SYCL, numéro de
-// GPU, affinité...) ; c'est ce contexte qui est retiré par `make_available`.
+// GPU, affinité...) ; c'est ce contexte qui est retiré par `kernel_form`.
 //
 // Le déréférencement se choisit en constexpr depuis `MemorySpace::directly_accessible` :
 //   - directly_accessible (zone kernel locale, ou CpuRam côté hôte) -> déréf direct
@@ -40,7 +40,7 @@ struct Ptr {
     HD bool          operator==      ( const Ptr &o ) const { return memory_space == o.memory_space && raw == o.raw; }
     HD bool          operator!=      ( const Ptr &o ) const { return ! operator==( o ); }
 
-    HD T&            operator*       () const { static_assert( MemorySpace::directly_accessible, "operator* sur une zone non accessible directement : utiliser value() (transfert) ou make_available" ); return *raw; }
+    HD T&            operator*       () const { static_assert( MemorySpace::directly_accessible, "operator* sur une zone non accessible directement : utiliser value() (transfert) ou kernel_form" ); return *raw; }
 
     HD T             value           () const {
         if constexpr ( MemorySpace::directly_accessible )

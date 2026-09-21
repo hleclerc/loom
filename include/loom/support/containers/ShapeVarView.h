@@ -79,14 +79,10 @@ struct ShapeVarView {
              + sdot::transfer_cost( queue, MutList(), errors );
     }
 
-       auto make_available( auto &&queue, auto io_category, auto &&cont ) const {
-        return sdot::make_available( queue, io_category, view, [&]( auto &&kernel_view ) {
-            return sdot::make_available( queue, MutList(), errors, [&]( auto &&kernel_errors ) {
-                return cont( ShapeVarView<DECAYED_TYPE_OF( kernel_view ),DECAYED_TYPE_OF( kernel_errors )>{
-                    FORWARD( kernel_view ), max, FORWARD( kernel_errors ), id
-                } );
-            } );
-        } );
+       auto kernel_form( auto &&queue, auto io_category ) const {
+        auto kernel_view   = sdot::kernel_form( queue, io_category, view );
+        auto kernel_errors = sdot::kernel_form( queue, MutList(), errors );
+        return ShapeVarView<DECAYED_TYPE_OF( kernel_view ),DECAYED_TYPE_OF( kernel_errors )>{ kernel_view, max, kernel_errors, id };
     }
 };
 

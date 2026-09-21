@@ -38,7 +38,7 @@ struct ScalarValue {
     /// as a `run_parallel` argument: the value is in the argument itself, so there is nothing in
     /// memory to make accessible -- it crosses into the kernel untouched, at zero cost.
        constexpr auto   transfer_cost       ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
-       constexpr auto   make_available      ( auto &&/*queue*/, auto /*io_category*/, auto &&cont ) const { return cont( *this ); }
+       constexpr auto   kernel_form         ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 
     HD void          display                ( auto &ds ) const { ds << "ScalarValue(" << v << ")"; }
 };

@@ -118,7 +118,7 @@ namespace detail::RunParallel {
                 if constexpr ( is_red_list<DECAYED_TYPE_OF( io_category )> )
                     return cont( ReductionTarget{ io_category.op, &arg } );
                 else
-                    return make_available( queue, io_category, FORWARD( arg ), FORWARD( cont ) );
+                    return cont( kernel_form( queue, io_category, FORWARD( arg ) ) );
             }, [&]( auto &&...args ) {
                 return _run_kernel( queue, deps, FORWARD( func ), FORWARD( args )... );
             }, InpList(), Ct<int,sizeof...(args)+2>(), item_list, UndefList(), args... );

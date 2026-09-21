@@ -17,27 +17,43 @@ def _dev_repo_root():
     return candidate if ( candidate / "loom" / "include" / "loom" ).is_dir() else None
 
 
-def cpp_include_root():
-    """The `-I` root so `#include <sdot/Cell.h>` resolves, from a dev checkout OR an
-    installed wheel.
-
-    Dev: `<repo>/sdot/include` (edit C++ without rebuilding the wheel). Installed: the
-    `sdot/_include` tree the wheel ships next to the package (pure `__file__`-relative,
-    no repo assumption). The generated headers live elsewhere, on their own `-I` root --
-    see generated_headers.include_root().
-    """
+def loom_include_root() -> Path:
+    """The `-I` root so `#include <loom/support/...>` resolves: `<repo>/loom/include` from a dev
+    checkout (edit C++ without rebuilding the wheel), the `loom/_include` tree the wheel ships next
+    to the package otherwise (pure `__file__`-relative, no repo assumption)."""
     dev_root = _dev_repo_root()
     if dev_root is not None:
-        return dev_root / "sdot" / "include"
-
+        return dev_root / "loom" / "include"
     packaged = Path( __file__ ).resolve().parents[ 1 ] / "_include"
-    if ( packaged / "sdot" / "Cell.h" ).is_file():
+    if ( packaged / "loom" / "support" ).is_dir():
         return packaged
+    raise RuntimeError( "loom: cannot locate the C++ header tree (neither a dev checkout's "
+                        "loom/include nor the packaged loom/_include were found) -- broken install?" )
 
-    raise RuntimeError(
-        "sdot: cannot locate the C++ header tree (neither a dev checkout's sdot/include nor "
-        "the packaged sdot/_include were found) -- broken install?"
-    )
+
+# The C++ roots of the packages built ON loom (sdot's `sdot/include`, holding `sdot/` and
+# `asimd/`): each registers its own at import (`register_include_root`), from a checkout or a
+# wheel alike -- loom does not know who uses it. Generated headers live elsewhere, on their own
+# root (`generated_headers.include_root()`).
+_registered_include_roots = []
+
+
+def register_include_root( path ):
+    path = Path( path ).resolve()
+    if path not in _registered_include_roots:
+        _registered_include_roots.append( path )
+
+
+def include_roots() -> list:
+    """The `-I` roots of the HAND-WRITTEN C++ (loom's, then the registered ones), in order."""
+    return [ loom_include_root(), *_registered_include_roots ]
+
+
+def cpp_include_root():
+    """The first registered root -- historically sdot's `sdot/include`. Prefer `include_roots()`."""
+    if _registered_include_roots:
+        return _registered_include_roots[ 0 ]
+    return loom_include_root()
 
 
 def _is_writable_dir( path: Path ):
@@ -132,14 +148,6 @@ def _resolve_build_dir( override ):
     return installed_default
 
 
-def additional_include_dirs():
-    """Extra `-I` roots needed alongside cpp_include_root() — e.g. the loom support headers."""
-    dev_root = _dev_repo_root()
-    if dev_root is not None:
-        return [ str( dev_root / "loom" / "include" ) ]
-    return []
-
-
 def cache_root() -> Path:
     """Le premier répertoire de cache utilisateur inscriptible : `SDOT_CACHE_DIR` s'il est mis,
     sinon la convention de la plateforme (`~/.cache/sdot`, `~/Library/Caches/sdot`,
@@ -166,10 +174,10 @@ def cache_root() -> Path:
 
 
 def include_dirs() -> list:
-    """Tous les `-I` d'une compilation : les sources C++ de sdot, ceux de loom, les en-têtes
-    générés (sous le répertoire de build)."""
+    """Tous les `-I` d'une compilation : les sources C++ (loom, puis les paquets enregistrés), et
+    les en-têtes générés (sous le répertoire de build)."""
     from .generated_headers import include_root
-    return [ cpp_include_root(), *additional_include_dirs(), include_root() ]
+    return [ *include_roots(), include_root() ]
 
 
 def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = () ):

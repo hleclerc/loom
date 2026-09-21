@@ -51,7 +51,7 @@ template<class T> constexpr bool is_io_category =
     is_io_policy<T>;
 
 /// Cible de réduction « mappée » par `run_parallel` : op + pointeur vers la variable hôte
-/// résultat. Produite à la place de `make_available` quand la catégorie courante est un `RedList`.
+/// résultat. Produite à la place de `kernel_form` quand la catégorie courante est un `RedList`.
 template<class Op, class T>
 struct ReductionTarget {
     Op  op;

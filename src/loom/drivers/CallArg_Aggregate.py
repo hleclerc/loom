@@ -33,7 +33,7 @@ class CallArg_Aggregate( CallArg ):
     a member's scalar type, rank, axis names or compile-time value straight off its type.
 
     We never SPELL an instantiation, though: C++20 deduces it from the members we build it with
-    (aggregate CTAD), here and inside `make_available` -- where the deduced type differs anyway,
+    (aggregate CTAD), here and inside `kernel_form` -- where the deduced type differs anyway,
     the kernel's views living in another memory space. A nested aggregate is no exception: it is
     one type parameter too, deduced in turn from its own members. Nothing is forwarded, prefixed,
     or written twice.
@@ -88,7 +88,7 @@ class CallArg_Aggregate( CallArg ):
         return f"{ self.type_name }_io"
 
     # -- driver-agnostic C++ (the same for every driver) --
-    # the support the struct's own methods lean on: `make_available` / `transfer_cost` (found by
+    # the support the struct's own methods lean on: `kernel_form` / `transfer_cost` (found by
     # ADL at instantiation, but their declarations must be visible) and `Ct` for the transfer-cost
     # fold. The MEMBERS are template parameters, so no container header is needed here -- a
     # `TensorView` vs a `NoneTensor` is decided at the instantiation site, not in the definition.
@@ -245,23 +245,17 @@ class CallArg_Aggregate( CallArg ):
         )
 
     def _cpp_make_available( self, fields ):
-        opens = "\n".join(
-            f"        return sdot::make_available( queue, io_of_{ c.name }( io ), { c.name }, "
-            f"[&]( auto &&a_{ c.name } ) {{" for c in fields
-        )
-        values = ", ".join( f"a_{ c.name }" for c in fields )
-        # the members reaching the kernel have other TYPES than ours (a kernel memory space), so
-        # what `cont` receives is another instantiation of the same template -- deduced from the
-        # members it is built with (C++20 aggregate CTAD), never spelled out. Qualified name,
-        # because inside the class our own name means the CURRENT instantiation (the injected
-        # class name), which is exactly the one we are NOT rebuilding. The user defines the struct
-        # in `namespace sdot` (that is the convention the macros assume), so `::sdot::` reaches it.
-        rebuilt = f"::sdot::{ self.type_name }{{ { values } }}"
-        closes = "        " + "} );" * len( fields )
-        return ( "    auto make_available( auto &&queue, auto io, auto &&cont ) const {\n"
-                 f"{ opens }\n"
-                 f"            return cont( { rebuilt } );\n"
-                 f"{ closes }\n"
+        """The kernel form of the aggregate: the same struct, rebuilt from the kernel form of each
+        member (see `kernel_form` in make_avaiable.h). The members reaching the kernel have other
+        TYPES than ours (a kernel memory space), so what is built is another instantiation of the
+        same template -- deduced from the members it is built with (C++20 aggregate CTAD), never
+        spelled out. Qualified name, because inside the class our own name means the CURRENT
+        instantiation (the injected class name), which is exactly the one we are NOT rebuilding.
+        The user defines the struct in `namespace sdot` (that is the convention the macros
+        assume), so `::sdot::` reaches it."""
+        values = ", ".join( f"sdot::kernel_form( queue, io_of_{ c.name }( io ), { c.name } )" for c in fields )
+        return ( "    auto kernel_form( auto &&queue, auto io ) const {\n"
+                 f"        return ::sdot::{ self.type_name }{{ { values } }};\n"
                  "    }" )
 
     def _cpp_transfer_cost( self, fields ):

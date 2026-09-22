@@ -175,10 +175,15 @@ def cache_root() -> Path:
 
 
 def include_dirs() -> list:
-    """Tous les `-I` d'une compilation : les sources C++ (loom, puis les paquets enregistrés), et
-    les en-têtes générés (sous le répertoire de build)."""
+    """Tous les `-I` d'une compilation : les sources C++ (loom, puis les paquets enregistrés), les
+    en-têtes générés (sous le répertoire de build), et les bibliothèques externes déclarées
+    (`externals.py`, téléchargées au besoin)."""
     from .generated_headers import include_root
-    return [ *include_roots(), include_root() ]
+    from .externals import external_include_dirs
+    return [ *include_roots(), include_root(), *external_include_dirs() ]
+
+
+from .externals import register_external as register_external
 
 
 def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = () ):

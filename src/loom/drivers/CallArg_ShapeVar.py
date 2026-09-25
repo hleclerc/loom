@@ -61,7 +61,7 @@ class CallArg_ShapeVar( CallArg ):
         # back -- both sides have to agree on the rank, being the same buffer.
         if self.io_category.is_output or inst.is_kernel_written():
             for axis in reversed( list( getattr( inst, "batch_axes", () ) ) ):
-                self.add_batch_axis( axis.name, int( axis.max ) )
+                self.add_batch_axis( call_args_analysis.cpp_axis_name( axis.name ), int( axis.max ) )
 
         # the bound a written count is checked against; -1 marks "unbounded" (nothing sizes
         # itself on this var, so this call had no reason to be given a capacity for it).

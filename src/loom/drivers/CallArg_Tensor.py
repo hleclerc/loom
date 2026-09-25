@@ -62,7 +62,11 @@ class CallArg_Tensor( CallArg ):
         # about the tensor. Concatenating gives one name per dimension (count == rank), each
         # `DEFINE_AXIS`'d by the aggregate (which folds in `axis_names`). No unrolling logic lives
         # here -- so nothing assumes a single, or any, `AxisList`.
-        self.axis_names = [ n for index, axis in enumerate( inst.axes ) for n in axis.cpp_dim_names( index ) ]
+        # ... sous leur nom CANONIQUE : un axe de batch est nomme par l'appel, pas par l'objet
+        # `Axis` ( voir `CallArgsAnalysis.cpp_axis_name` ), pour que deux appels identiques
+        # rendent la meme source.
+        self.axis_names = [ call_args_analysis.cpp_axis_name( n )
+                            for index, axis in enumerate( inst.axes ) for n in axis.cpp_dim_names( index ) ]
 
         # Et, par dimension, l'extent que le TYPE peut porter : `None` quand il n'est connu qu'a
         # l'execution, l'entier quand il est fige a la COMPILATION -- c'est-a-dire quand l'extent de

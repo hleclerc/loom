@@ -15,25 +15,37 @@ is known in Python, so the outputs can be allocated and displayed without a kern
 `new_batch_axis( size )` mints a fresh, unshared one; passing the SAME axis object to several
 aggregates is how they get JOINED (co-iterated) instead -- which is opt-in, never the default.
 
-= Le NOM d'un axe de batch est une RESSOURCE, pas un compteur
+= Ce nom-ci ne sort PLUS de l'objet : le C++ le reçoit de l'APPEL
 
-Le nom traverse jusqu'à la source C++ (`DEFINE_AXIS( thread_0 )`, le type `_thread_0` que porte
+ATTENTION : cette section décrit un état dépassé, gardé parce qu'il explique le mécanisme ci-dessous.
+Le nom qu'un axe porte ici N'ATTEINT PLUS LA SOURCE C++ : `CallArgsAnalysis` renomme les axes de
+batch d'un appel en `batch_0`, `batch_1`, ... dans l'ordre où ils s'y présentent (voir
+`CallArgsAnalysis.cpp_axis_name`). C'est le remède définitif qui était annoncé en bas de cette
+docstring, et il est en place.
+
+Ce qui suit reste vrai sur un seul point, et il compte encore : deux axes VIVANTS EN MÊME TEMPS
+doivent porter des noms DISTINCTS, sans quoi la collecte par nom de `CallArgsAnalysis` les
+confondrait en un seul. C'est ce que la piscine garantit.
+
+--- l'état d'avant, et pourquoi il ne suffisait pas ---
+
+Le nom traversait jusqu'à la source C++ (`DEFINE_AXIS( thread_0 )`, le type `_thread_0` que porte
 chaque tenseur batché), et la clé du cache de compilation est le HASH DE CETTE SOURCE. Un nom
 frais à chaque appel signifiait donc : deux appels identiques, deux sources différentes, deux
 compilations de ~8 s -- et un cache disque qui grossit sans jamais resservir. Ce n'était pas une
 inefficacité de détail : ça rendait tout chronométrage d'une boucle d'appels impossible à lire.
 
-Ce dont on a réellement besoin d'un nom, c'est qu'il soit DISTINCT DES AUTRES NOMS VIVANTS -- deux
-axes de batch simultanés ne doivent pas se confondre dans `DEFINE_AXIS` ni dans
-`global_batch_indices` (`CallArgsAnalysis` les collecte PAR NOM). Rien n'exige qu'il soit distinct
-de ceux du passé. Un nom est donc EMPRUNTÉ : pris au plus petit indice libre de son préfixe, rendu
-quand l'axe meurt. Une suite d'appels qui se répète retrouve les mêmes noms, donc la même source,
-donc le cache.
+Le remède d'alors était d'EMPRUNTER les noms : pris au plus petit indice libre de son préfixe,
+rendu quand l'axe meurt. Une suite d'appels qui se répète retrouvait alors les mêmes noms, donc la
+même source, donc le cache -- mais SEULEMENT si les axes mouraient entre deux appels. Dès qu'une
+CHAÎNE les tient tous vivants à la fois (dix pas de `examples/diffusion`, que l'adjoint doit
+remonter), chacun prend un indice différent et on repaie tout : TRENTE noyaux mesurés
+(`LOOM_JOURNAL=1`) dont vingt-huit ne différaient que par `cellule_0` ... `cellule_19`, et ça
+croissait linéairement avec la longueur de la chaîne. Renommer à l'abaissement les a ramenés à 3.
 
 Le PRÉFIXE sépare les familles (`thread_0` pour les work-items, `cell_0` pour les cellules) : il
-rend la source engendrée lisible, et surtout il isole les numérotations -- un axe retenu quelque
-part par erreur ne décale plus que sa propre famille. Un axe retenu ne casse d'ailleurs rien : il
-garde son nom, le suivant en prend un autre, et on paie une compilation -- jamais un résultat faux.
+reste lisible dans un affichage Python et isole les numérotations, mais il ne se voit plus dans la
+source engendrée.
 
 = Le `gc.collect()` est un FILET, et il ne devrait plus jamais servir
 
@@ -54,11 +66,21 @@ moment précis où l'on paierait une compilation -- et ne devrait donc plus jama
 rendre. Il reste comme filet : un anneau réintroduit ailleurs coûterait 9 ms au lieu de 9 s, et
 `in_use( prefix )` le dirait.
 
-Le remède définitif serait de nommer les axes AU MOMENT DE L'ABAISSEMENT (`CallArgsAnalysis`
-connaît l'ensemble exact des axes de CET appel et peut les numéroter dans un ordre déterministe) :
-plus de durée de vie à suivre du tout. Ce qui l'en empêche est qu'un axe de batch peut atteindre
-un appel par un tenseur NU et pas seulement par les `batch_axes` d'un agrégat, donc il faudrait
-une pré-passe qui les trouve tous avant que le premier `CallArg` ne soit construit.
+= Le remède définitif : EN PLACE
+
+Nommer les axes au moment de l'ABAISSEMENT -- `CallArgsAnalysis` connaît l'ensemble exact des
+axes de CET appel et les numérote dans un ordre déterministe -- de sorte qu'il n'y a plus aucune
+durée de vie à suivre pour obtenir le cache.
+
+Le blocage annoncé ici (« un axe de batch peut atteindre un appel par un tenseur NU, donc il
+faudrait une pré-passe ») n'en était pas un : l'analyse ne collecte les `batch_axes` que des
+arguments AGRÉGATS, et un tenseur nu portant un axe de batch est simplement ignoré -- le noyau
+reçoit alors un `batch_index` vide et échoue en `static_assert` C++ (voir
+`loom/examples/diffusion/README.md`, friction 3). L'ensemble est donc connu avant que le premier
+`CallArg` ne soit construit, et le renommage se fait là.
+
+Reste à la piscine son autre rôle, qui lui n'a pas bougé : des noms distincts entre axes vivants
+en même temps.
 """
 import gc
 import threading

@@ -83,10 +83,15 @@ zéro silencieux.
 
 6. **Une compilation par taille de grille** (`CtShapeVar` grave l'extent dans la source) — ici
    c'est voulu, le stencil y gagne, mais rien ne le dit — **et une compilation par motif de
-   dérivation**. Le seul test des adjoints a produit **dix noyaux distincts** : quels arguments
-   sont perturbés × si la cotangente est un zéro symbolique, en chaque position de la chaîne. Le
-   `if constexpr` est puissant, mais ~8 s par variante au premier passage, et le compte n'est
-   visible nulle part.
+   dérivation**. **Mesuré, puis réglé** : `LOOM_JOURNAL=1` dit maintenant combien de noyaux ont
+   été fabriqués et *pourquoi chacun était neuf*. Il a immédiatement montré que la chaîne de dix
+   pas en compilait **trente**, dont vingt-huit ne différaient que par le nom de l'axe de batch
+   (`cellule_0` … `cellule_19`) — les axes d'une chaîne sont vivants en même temps, donc chacun
+   empruntait un indice différent, et ça croissait linéairement avec la longueur de la chaîne.
+   Les axes de batch sont désormais nommés **à l'abaissement** (`batch_0`, `batch_1`, …), donc
+   deux appels identiques rendent la même source : **30 noyaux → 3**, 135 s → 17 s. Les deux
+   variantes du backward qui restent sont de vraies variantes (`temperature : out -> in`, selon
+   que le pas lit une entrée perturbée ou une constante).
 
 7. **Un tampon de sortie n'est pas garanti à zéro.** On ne l'apprend que dans un commentaire de
    `loom/tests/test_call.py`. Un étranger qui écrit un backward gardé par

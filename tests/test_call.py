@@ -793,3 +793,41 @@ if test( "une_sortie_nue_est_semee" ):
             del os.environ[ "LOOM_ZERO_OUTPUTS" ]
         else:
             os.environ[ "LOOM_ZERO_OUTPUTS" ] = ancien
+
+
+if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
+    # LE NOM D'UN AXE DE BATCH NE DOIT PAS ATTEINDRE LA SOURCE.
+    #
+    # `CallArgsAnalysis` renomme les axes de batch d'un appel en `batch_0`, `batch_1`, ... dans
+    # l'ordre ou ils s'y presentent. Sans ca, le nom venait de l'objet `Axis`, donc d'une piscine
+    # d'indices empruntes a la VIE des objets : deux appels structurellement identiques rendaient
+    # deux sources differentes des que leurs axes etaient vivants EN MEME TEMPS -- ce que fait
+    # toute chaine d'appels que l'adjoint doit remonter. Mesure avant correction sur une chaine de
+    # dix pas : 30 noyaux compiles au lieu de 3.
+    #
+    # D'ou la forme du test : on RETIENT le premier axe pendant le deuxieme appel. C'est
+    # exactement la situation qui produisait un nom neuf.
+    from loom.compilation import journal
+    from loom.tensor import new_batch_axis
+
+    class Sortie( Aggregate ):
+        val : RealTensor
+
+
+    code = FfiCodeParallel( name = "test_axe_canonique", fwd_code = "res.val( batch_index ) = 1;" )
+
+    def un_appel():
+        axe = new_batch_axis( 3, prefix = "essai" )
+        res = Sortie( batch_axes = [ axe ] )
+        driver.call( code, res = res, output_attributes = [ "res" ] )
+        return axe, res
+
+    vivants = [ un_appel() ]                       # l'axe reste vivant : c'est le point
+    avant = journal.stats()
+    vivants.append( un_appel() )
+    apres = journal.stats()
+
+    assert apres[ "kernels" ] == avant[ "kernels" ], \
+        f"le deuxieme appel a fabrique un noyau de plus ({ avant[ 'kernels' ] } -> { apres[ 'kernels' ] })"
+    assert apres[ "reuses" ] > avant[ "reuses" ], "le deuxieme appel n'a pas resservi la cible du premier"
+    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.raw ] == [ 1.0, 1.0, 1.0 ]

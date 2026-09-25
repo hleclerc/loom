@@ -90,6 +90,31 @@ class CallArgsAnalysis:
                 if axis.name not in self.batch_axes:
                     self.batch_axes.append( axis.name )
 
+        # LE NOM D'UN AXE DE BATCH EST DÉCIDÉ ICI, et il ne sort pas de l'objet `Axis`.
+        #
+        # Il traverse jusqu'à la source C++ (`DEFINE_AXIS( batch_0 )`, le type `_batch_0` que porte
+        # chaque tenseur batché), et la clé du cache de compilation est le HASH DE CETTE SOURCE.
+        # Tant que le nom venait de l'axe, il venait d'une piscine d'indices empruntés à la VIE des
+        # objets : deux appels structurellement identiques rendaient deux sources différentes dès
+        # que leurs axes étaient vivants en même temps. Mesuré (`LOOM_JOURNAL=1`) sur une chaîne de
+        # dix pas de `examples/diffusion` : TRENTE noyaux compilés, dont vingt-huit ne différaient
+        # que par `cellule_0` ... `cellule_19`. Ça croissait linéairement avec la longueur de la
+        # chaîne.
+        #
+        # Ici, l'ensemble exact des axes de CET appel est connu -- ils viennent tous des
+        # `batch_axes` des arguments, et rien n'est encore abaissé -- donc on les numérote dans
+        # l'ordre où ils se présentent, qui ne dépend que de l'appel. Deux appels identiques
+        # rendent la même source, quelles que soient les durées de vie.
+        #
+        # La piscine de `new_batch_axis` reste utile pour autre chose : deux axes VIVANTS EN MÊME
+        # TEMPS doivent porter des noms distincts, sinon la déduplication juste au-dessus les
+        # confondrait. Ce qu'elle ne porte plus, c'est le cache.
+        #
+        # Convention : `batch_N` est réservé aux axes de batch d'un appel. Un axe DÉCLARÉ qui
+        # porterait ce nom se confondrait avec eux dans le C++ engendré.
+        self._canonical_axis = { real: f"batch_{ index }" for index, real in enumerate( self.batch_axes ) }
+        self.batch_axes = list( self._canonical_axis.values() )
+
         for name, inst in args.items():
             # an arg may lower to NOTHING: an `Axis` is a declaration, not data, so `make_CallArg`
             # answers None. Keep it out of the tree -- exactly as `CallArg_Aggregate` does for such
@@ -230,6 +255,17 @@ class CallArgsAnalysis:
                 tensor.add_batch_axis( axis_name, axis_size )
 
         return res
+
+    def cpp_axis_name( self, name ):
+        """Le nom sous lequel un axe est ÉCRIT dans le C++ engendré : le nom canonique d'un axe de
+        batch de cet appel (voir `__init__`), le nom tel quel pour tout autre axe -- un axe déclaré
+        par un agrégat est nommé par la déclaration, qui ne bouge pas d'un appel à l'autre.
+
+        Appelé partout où un nom d'axe ENTRE dans l'abaissement, c'est-à-dire aux deux seuls
+        endroits qui le lisent sur un objet Python : les dimensions d'un tenseur
+        (`CallArg_Tensor`) et les axes de batch d'un compte (`CallArg_ShapeVar`). Un axe ajouté
+        plus tard par un `vmap` porte déjà un nom stable (`vmap_0`) et traverse inchangé."""
+        return self._canonical_axis.get( name, name )
 
     def batch_axis_size( self, axis_name ):
         """How many ITEMS a batch axis holds, read HOST-side off a lowering node's LOGICAL shape.

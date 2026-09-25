@@ -89,20 +89,29 @@ def call_signature( ca ):
     Un argument y entre par sa FORME D'ABAISSEMENT -- un tampon, un `NoneTensor` (non perturbé),
     un `ZeroTensor` (cotangente symboliquement nulle), un `FillTensor` -- plus son type et les
     extents que le type porte. C'est exactement l'axe le long duquel un backward se démultiplie."""
-    def kind( t ):
+    # Un noeud est décrit par CE QU'IL A : `ca.tensors` mélange des tenseurs, des comptes
+    # (`CallArg_ShapeVar` : un `inst`, mais un `ShapeVar` -- ni drapeaux de stockage ni extents de
+    # type) et le tampon d'erreurs de l'appel (ni l'un ni l'autre). C'est un rapport : il décrit ce
+    # qu'il trouve et ne demande rien.
+    def describe( t ):
         if not t.io_category.is_bound:
             return "none"
-        if t.inst.is_symbolic_zero:
+        inst = getattr( t, "inst", None )
+        if getattr( inst, "is_symbolic_zero", False ):
             return "zero"
-        if t.inst.is_fill:
+        if getattr( inst, "is_fill", False ):
             return "fill"
-        return "out" if t.io_category.is_output else "in"
 
-    # `ca.tensors` porte aussi le tampon d'ERREURS de l'appel, qui n'est pas un tenseur déclaré
-    # (pas d'`inst`, pas de dtype) et ne distingue jamais deux variantes : on ne le décrit pas.
-    res = { t.name: f"{ kind( t ) } { t.dtype.cpp_name }"
-                    f"[{ ','.join( '*' if e is None else str( e ) for e in t._dim_ct_extent ) }]"
-            for t in ca.tensors if hasattr( t, "inst" ) }
+        res = "out" if t.io_category.is_output else "in"
+        dtype = getattr( t, "dtype", None )
+        if dtype is not None:
+            res += f" { dtype.cpp_name }"
+        extents = getattr( t, "_dim_ct_extent", None )
+        if extents:
+            res += "[" + ",".join( "*" if e is None else str( e ) for e in extents ) + "]"
+        return res
+
+    res = { t.name: describe( t ) for t in ca.tensors }
     if ca.batch_axes:
         res[ "<batch>" ] = ",".join( ca.batch_axes )
     return res

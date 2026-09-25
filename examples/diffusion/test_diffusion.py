@@ -1,6 +1,6 @@
 """Les tests de l'usager etranger. Rien n'importe sdot ; tout passe par `loom`.
 
-    ./run test test_diffusion --device cpu
+    errand test_diffusion
 """
 import math
 import sys
@@ -8,17 +8,17 @@ from pathlib import Path
 
 sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 
-from loom import driver
+from loom import RealTensor, driver
 from errand import test
 from loom.testing import check_grad
 
-from diffusion import evolution, pas
+from diffusion import axes, evolution, pas
 
 
 def _grille( n, f ):
-    """Un champ `n x n` bati par comprehension : loom n'offre ni `arange` ni `linspace`, et on
-    s'interdit numpy -- voir le README."""
-    return driver.array( [ [ float( f( j, i ) ) for i in range( n ) ] for j in range( n ) ] )
+    """Un champ `n x n` donne cellule par cellule. La CLASSE porte le type ( des reels ), donc
+    il n'y a rien a declarer de plus -- et `driver` n'a pas a apparaitre."""
+    return RealTensor( [ [ float( f( j, i ) ) for i in range( n ) ] for j in range( n ) ] ).raw
 
 
 def _mode_propre( n ):
@@ -42,8 +42,9 @@ if test( "le_mode_propre_decroit_du_facteur_exact" ):
     # a la precision de la machine. C'est le stencil lui-meme qui est teste, pas une tendance.
     n = 17
     coef = 0.2                                     # dt / h^2, sous la limite de stabilite ( 0.25 )
+    y, x = axes( n )
     u = _mode_propre( n )
-    k = _grille( n, lambda j, i: 1.0 )
+    k = RealTensor[ y, x ].ones().raw
 
     attendu = 1 + coef * ( 4 * math.cos( math.pi / ( n - 1 ) ) - 4 )
     v = pas( u, k, coef )
@@ -60,8 +61,10 @@ if test( "le_bord_reste_impose" ):
     # les cellules du bord portent une temperature imposee : un pas ne doit pas y toucher, quoi
     # que fasse l'interieur.
     n = 12
-    u = driver.random( ( n, n ), seed = 3 )
-    k = _grille( n, lambda j, i: 0.5 + 0.5 * ( i + j ) / ( 2 * n ) )
+    y, x = axes( n )
+    u = RealTensor[ y, x ].random( seed = 3 ).raw
+    # une diffusivite qui croit vers le coin bas-droit : la somme des deux coordonnees
+    k = ( 0.5 + 0.25 * ( RealTensor[ y, x ].linspace( 0, 1, x ) + RealTensor[ y, x ].linspace( 0, 1, y ) ) ).raw
     v = pas( u, k, 0.15 )
 
     for j in range( n ):
@@ -100,7 +103,8 @@ if test( "on_retrouve_la_diffusivite" ):
         ecart = evolution( u0, k, coef, nb_pas ) - observee
         return ( ecart * ecart ).sum()
 
-    k = _grille( n, lambda j, i: 1.0 )
+    y, x = axes( n )
+    k = RealTensor[ y, x ].ones().raw
     perte_jit = driver.jit( perte )
     gradient = driver.jit( driver.grad( perte ) )
 

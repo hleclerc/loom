@@ -170,20 +170,43 @@ class TorchDriver:
 
         return res
 
+    # les fabriques. Elles reçoivent un `Dtype` de loom (c'est ce que `Tensor.zeros` & co leur
+    # passent, leur dtype DÉCLARÉ) et le traduisent, comme `astype` : le passer tel quel à torch --
+    # ce que faisait `dtype or self.dtype`, sur un attribut qui n'existe même pas -- faisait échouer
+    # `RealTensor[ ... ].full( 0.0 )` sous ce driver seulement.
+    def _dt( self, dtype, integer = False ):
+        from ..tensor.Dtype import Dtype
+        return Dtype.factory( dtype or ( self.itype if integer else self.ftype ) ).driver_version
+
     def zeros( self, shape, dtype = None ):
-        return torch.zeros( shape, dtype = dtype or self.dtype, device = self.device )
+        return torch.zeros( tuple( shape ), dtype = self._dt( dtype ), device = self.device )
 
     def full( self, shape, value, dtype = None ):
-        return torch.full( tuple( shape ), value, dtype = dtype or self.dtype, device = self.device )
+        return torch.full( tuple( shape ), value, dtype = self._dt( dtype ), device = self.device )
 
     def ones( self, shape, dtype = None ):
-        return torch.ones( shape, dtype = dtype or self.dtype, device = self.device )
+        return torch.ones( tuple( shape ), dtype = self._dt( dtype ), device = self.device )
+
+    def arange( self, nb, dtype = None ):
+        return torch.arange( nb, dtype = self._dt( dtype, integer = True ), device = self.device )
 
     def linspace( self, a, b, n, dtype = None ):
-        return torch.linspace( a, b, n, dtype = dtype or self.dtype, device = self.device )
+        return torch.linspace( a, b, n, dtype = self._dt( dtype ), device = self.device )
+
+    def reshape( self, tensor, shape ):
+        return tensor.reshape( tuple( shape ) )
+
+    def random( self, shape, dtype = None, seed = None ):
+        """Un tirage uniforme, même contrat que `JaxDriver.random` : `seed = None` avance un
+        compteur de process, un seed explicite rend le tirage reproductible."""
+        if seed is None:
+            seed = getattr( self, "_rng_seed", 0 )
+            self._rng_seed = seed + 1
+        generator = torch.Generator( device = self.device ).manual_seed( int( seed ) )
+        return torch.rand( tuple( shape ), generator = generator, dtype = self._dt( dtype ), device = self.device )
 
     def empty( self, shape, dtype = None ):
-        return torch.zeros( shape, dtype = dtype or self.dtype, device = self.device )
+        return torch.zeros( tuple( shape ), dtype = self._dt( dtype ), device = self.device )
 
     def expand_dims( self, tensor, index ):
         return tensor.unsqueeze( index )

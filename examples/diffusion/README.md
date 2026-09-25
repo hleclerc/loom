@@ -15,8 +15,7 @@ test_diffusion.py         les tests
 ```
 
 ```bash
-./run test test_diffusion --device cpu
-./run test test_diffusion --driver torch --device cpu     # les mêmes chiffres
+errand test_diffusion
 ```
 
 ## Ce que ça fait
@@ -50,9 +49,9 @@ zéro silencieux.
   catégories `NoneTensor` / `ZeroTensor` font vraiment tomber les termes à la compilation.
 - **`register_include_root`** : un paquet tiers enregistre son propre `-I`, exactement comme sdot.
   loom ne connaît pas ses usagers par leur nom, et ça se vérifie.
-- **Jax et Torch.** Le même fichier, les mêmes appels, `driver.jit` et `driver.grad` compris :
-  `+18.336847518` des deux côtés, au dernier chiffre. C'est la promesse centrale de loom, et elle
-  tient pour quelqu'un qui n'a jamais ouvert sdot.
+- **Les fabriques de tenseurs.** `IntTensor[ cellule ].iota()`, `RealTensor[ y, x ].ones()`,
+  `.linspace( 0, 1, x )`, `.random( seed = 3 )` : la forme vient des axes, le type vient de la
+  classe, et `driver` n'apparaît plus nulle part sauf `grad` / `jit` / `call`.
 
 ## Les frictions, dans l'ordre où on les rencontre
 
@@ -62,9 +61,9 @@ zéro silencieux.
    `FfiCodeParallel` sans nom s'appelle `sdot_fwd_kernel`. On installe loom et on reçoit sdot. Un
    simple renommage — mais c'est la première chose que l'étranger voit.
 
-2. **`driver.array( [ 0, 1, 2 ] )` rend des flottants.** `dtype or self.ftype` : une liste
-   d'entiers devient FP64, et l'erreur ne tombe qu'à l'affectation (`cannot bind a FP64 value to a
-   TI tensor`). Le type naturel de la donnée devrait gagner.
+2. ~~**`driver.array( [ 0, 1, 2 ] )` rend des flottants.**~~ **Réglé** : le chemin documenté est la
+   classe, qui EST la déclaration de type (`IntTensor[ x ]( [ 0, 1, 2 ] )` ne peut pas se tromper),
+   et `driver` est redevenu la couche basse. La friction était de passer par lui.
 
 3. **Le batch d'un appel ne vient que des agrégats.** `CallArgsAnalysis` collecte `batch_axes` sur
    les arguments qui en ont ; un **tenseur nu** portant le même axe est ignoré en silence, le
@@ -73,15 +72,14 @@ zéro silencieux.
    (La docstring de `tensor/batch.py` connaît déjà le cas — « un axe de batch peut atteindre un
    appel par un tenseur NU » — mais l'analyse, elle, ne le gère pas.)
 
-4. **« Qui suis-je ? » n'a pas de réponse.** Le scaffold injecte `batch_index`, `thread_index`,
-   `nb_threads` — pas le rang plat de l'item. Il faut donc matérialiser un iota et le transférer à
-   chaque appel. sdot fait exactement pareil (`_ranks_of_items` → `np.arange`). Un `IotaTensor`
-   existe pourtant côté C++, il n'est simplement pas atteignable depuis l'appelant.
+4. **« Qui suis-je ? » n'a pas de réponse** côté noyau : le scaffold injecte `batch_index`,
+   `thread_index`, `nb_threads` — pas le rang plat de l'item. **À moitié réglé** : il n'y a plus de
+   `np.arange` hôte (`IntTensor[ cellule ].iota()` bâtit l'indice sur le device), mais il faut
+   encore le passer en argument. Le vrai remède serait que le scaffold l'injecte.
 
-5. **Pas d'`arange`, pas de `linspace`, pas de `ones`, pas de `concatenate`** sur le driver (ils
-   sont en commentaire dans `JaxDriver`). À quelqu'un à qui on interdit numpy (« ça force un
-   transfert vers l'hôte »), il ne reste que des compréhensions de listes pour construire un
-   indice ou un champ de coordonnées.
+5. ~~**Pas d'`arange`, pas de `linspace`, pas de `ones`.**~~ **Réglé**, et sur les tenseurs plutôt
+   que sur le driver : `zeros`, `ones`, `full`, `iota`, `linspace`, `random`, qui lisent leur forme
+   dans les AXES — il n'y a donc pas de forme à répéter.
 
 6. **Une compilation par taille de grille** (`CtShapeVar` grave l'extent dans la source) — ici
    c'est voulu, le stencil y gagne, mais rien ne le dit — **et une compilation par motif de
@@ -94,15 +92,32 @@ zéro silencieux.
    `loom/tests/test_call.py`. Un étranger qui écrit un backward gardé par
    `if constexpr ( surely_null )` et qui omet la branche `else` rend des ordures, silencieusement.
 
-8. **Importer l'exemple demande une chirurgie de `sys.path`** : `./run test` importe le fichier de
+8. **Les fabriques avalaient leurs mots-clés.** `Parametrized.__getattr__` versait *tout* kwarg
+   dans les `template_kwargs` : `RealTensor[ x ].random( seed = 7 )` tirait donc une valeur
+   différente à chaque appel, en silence — et `full( v )` ne marchait que parce que son argument
+   est positionnel. Corrigé : la signature de la fabrique départage.
+
+9. **Le driver Torch n'existe pas.** C'est la trouvaille la plus lourde, et elle a d'abord été
+   *ratée ici* : `--driver torch` sélectionne un ENVIRONNEMENT, pas un driver, et cet
+   environnement a jax installé — les deux premières exécutions, « jax » et « torch », étaient
+   donc toutes deux du `JaxDriver`. Forcé par `SDOT_FRAMEWORK=torch`, rien ne démarre :
+   `TorchDriver` n'a ni `available_gpus`, ni `array`, ni `grad`, ni `vjp`, ni `vmap`, ni `jit` —
+   **ni `call`**, qui est pourtant LE point d'entrée. Ce qu'il porte à la place
+   (`optimize_using_lbfgs`, `to_nanobind_compatible_objects`, `linalg_solve`) date d'un autre
+   design. Aujourd'hui loom est une bibliothèque **Jax**.
+
+10. **Importer l'exemple demande une chirurgie de `sys.path`** : `./run test` importe le fichier de
    test par son chemin, et le module voisin n'est pas trouvable. Sans conséquence ici, mais c'est
    la première ligne du fichier.
 
 ## Ce que l'exercice dit de loom
 
 Le cœur — `tensor` + `drivers` + `compilation` — a encaissé un usage franchement étranger **sans
-qu'une ligne de loom change**, et sous les deux frameworks. C'est le meilleur argument dont on
-dispose pour dire que loom n'est pas un sous-produit de sdot.
+qu'une ligne de loom change** pour le faire marcher : le modèle tient, et c'est le meilleur
+argument dont on dispose pour dire que loom n'est pas un sous-produit de sdot.
 
-Toutes les frictions sont au bord : un renommage (1), deux constructeurs côté appelant (2, 4, 5),
-une hypothèse structurelle (3), et de la documentation (6, 7, 8). Aucune ne touche au modèle.
+Mais la moitié de la promesse n'est pas tenue (9) : il n'y a qu'un driver. Tant que le chemin
+Torch n'existe pas, « interface homogène pour qui a du C++ à brancher sur Jax **ou** Torch » ne
+peut pas être la phrase d'accroche — et c'est justement la phrase qui justifierait une vie
+indépendante. Les autres frictions sont au bord : un renommage (1), des constructeurs côté
+appelant (2, 4, 5, 8 — réglés), une hypothèse structurelle (3), de la documentation (6, 7, 10).

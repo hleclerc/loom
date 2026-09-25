@@ -161,6 +161,102 @@ class Tensor( Attribute ):
         res.storage = Fill( driver.array( scalar, dtype = res.dtype, device = res.device ), reference_shape )
         return res
 
+    # ---- les fabriques : un tenseur bâti DEPUIS SES AXES, sans forme à répéter ------------------
+    # `RealTensor[ x, y ].zeros()`, `IntTensor[ cellule ].iota()`, ... Elles sont atteintes par
+    # `Parametrized.__getattr__`, qui leur passe les `template_args` de la déclaration -- donc la
+    # forme vient des axes, comme pour n'importe quel tenseur bâti sur eux.
+    #
+    # C'est ICI qu'on construit une valeur, et pas via `driver.array( ..., dtype = driver.itype )` :
+    # la CLASSE est la déclaration de type, donc le dtype n'est jamais deviné depuis un littéral
+    # Python (`driver.array( [ 0, 1, 2 ] )` rend des flottants -- voir `loom/examples/diffusion`).
+    # `driver` est la couche basse ; ce qu'on met en avant, ce sont ces classes.
+
+    @classmethod
+    def _built_on( cls, template_args, template_kwargs, scope ):
+        """Le tenseur vide et sa forme -- le préambule commun à toutes les fabriques."""
+        res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
+        return res, res.shape
+
+    def _adopt( self, raw ):
+        """Prendre `raw` comme valeur, à la forme dense qu'on vient de lui donner."""
+        self.storage = Storage.of( self._as_declared( raw ),
+                                   ReferenceShape.from_dense_shape( list( raw.shape ) ) )
+        return self
+
+    def _axis_position( self, axis ):
+        """La position de `axis` parmi nos axes -- un objet `Axis` déclaré, ou déjà une position.
+
+        `None` n'est légitime que pour un tenseur de rang 1 : ailleurs, « le long de quel axe ? »
+        n'a pas de réponse par défaut, et la deviner produirait silencieusement un autre tenseur.
+        """
+        if axis is None:
+            if self.rank != 1:
+                raise ValueError( f"{ type( self ).__name__ }: rank { self.rank } -- name the axis "
+                                  f"to run along (e.g. `.linspace( 0, 1, axis = x )`)" )
+            return 0
+        if isinstance( axis, int ):
+            return axis if axis >= 0 else axis + self.rank
+        for pos, declared in enumerate( self.axes ):
+            if declared is axis:
+                return pos
+        raise ValueError( f"{ type( self ).__name__ }: { axis } is not one of this tensor's axes" )
+
+    @classmethod
+    def zeros( cls, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        res, shape = cls._built_on( template_args, template_kwargs, scope )
+        return res._adopt( driver.zeros( shape, dtype = res.dtype ) )
+
+    @classmethod
+    def ones( cls, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        res, shape = cls._built_on( template_args, template_kwargs, scope )
+        return res._adopt( driver.ones( shape, dtype = res.dtype ) )
+
+    @classmethod
+    def iota( cls, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        """Les indices : `0, 1, 2, ...`.
+
+        Sans axe, c'est le RANG PLAT (ordre C) -- « qui suis-je ? » pour un work-item, ce que tout
+        noyau batché finit par demander, et ce que chacun bricolait jusqu'ici avec un `np.arange`
+        hôte (donc un aller-retour vers l'hôte, ce qu'on s'interdit sur GPU).
+
+        Avec un axe, c'est la COORDONNÉE le long de cet axe, diffusée sur les autres --
+        `IntTensor[ y, x ].iota( x )` est la grille des abscisses.
+        """
+        res, shape = cls._built_on( template_args, template_kwargs, scope )
+        if axis is None and res.rank > 1:
+            nb = 1
+            for extent in shape:
+                nb *= extent
+            return res._adopt( driver.reshape( driver.arange( nb, dtype = res.dtype ), shape ) )
+        pos = res._axis_position( axis )
+        return res._adopt( res._spread( driver.arange( shape[ pos ], dtype = res.dtype ), pos, shape ) )
+
+    @classmethod
+    def linspace( cls, start, stop, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        """`start` à `stop` inclus, régulièrement espacés le long de `axis` (le seul axe, par
+        défaut) et diffusés sur les autres : `RealTensor[ y, x ].linspace( 0, 1, x )`."""
+        res, shape = cls._built_on( template_args, template_kwargs, scope )
+        pos = res._axis_position( axis )
+        return res._adopt( res._spread( driver.linspace( start, stop, shape[ pos ], dtype = res.dtype ),
+                                        pos, shape ) )
+
+    @classmethod
+    def random( cls, seed = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
+        """Un tirage uniforme sur `[ 0, 1 [`. `seed = None` prend le suivant d'un compteur de
+        process -- passer un seed est ce qui rend un test reproductible (voir `driver.random`)."""
+        res, shape = cls._built_on( template_args, template_kwargs, scope )
+        if not res.dtype.floating_point:
+            raise TypeError( f"{ type( res ).__name__ }.random: a uniform draw is a REAL value -- "
+                             f"declare a RealTensor, or scale one yourself" )
+        return res._adopt( driver.random( shape, dtype = res.dtype, seed = seed ) )
+
+    def _spread( self, vector, pos, shape ):
+        """`vector` (1D, le long de l'axe `pos`) diffusé sur toute `shape`."""
+        if len( shape ) == 1:
+            return vector
+        view = driver.reshape( vector, [ extent if d == pos else 1 for d, extent in enumerate( shape ) ] )
+        return view + driver.zeros( shape, dtype = self.dtype )
+
     def append_axis( self, axis ):
         """A new tensor sharing our buffer, with `axis` appended as one extra TRAILING axis --
         e.g. `SumOfDiracs1d.positions` (rank 1) reused as `SumOfDiracs`'s ( `num_dirac`, `dim` )

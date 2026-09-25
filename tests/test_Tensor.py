@@ -1023,3 +1023,60 @@ if test( "a_dimension_can_be_shared_across_aggregates" ):
         assert False, "an AxisId is not a count"
     except TypeError:
         pass
+
+
+if test( "fabriques" ):
+    # LES FABRIQUES : un tenseur bati depuis ses AXES, sans forme a repeter -- et sans jamais
+    # passer par `driver.array`, dont le dtype se devine depuis un litteral (et se devine mal).
+    print( "driver :", type( driver._checked_driver_instance() ).__name__ )
+
+    n = ShapeVar( 4 )
+    x = Axis( n ); x.name = "x"
+    m = ShapeVar( 3 )
+    y = Axis( m ); y.name = "y"
+
+    # la CLASSE est la declaration de type : un iota d'entiers est entier, point.
+    rangs = IntTensor[ x ].iota()
+    assert numpy.asarray( rangs.tensor ).tolist() == [ 0, 1, 2, 3 ]
+    assert not rangs.dtype.floating_point
+
+    # sans axe et en rang > 1 : le rang PLAT, en ordre C -- « qui suis-je ? » d'un work-item
+    plat = IntTensor[ y, x ].iota()
+    assert numpy.asarray( plat.tensor ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
+
+    # avec un axe : la COORDONNEE le long de cet axe, diffusee sur les autres
+    colonnes = IntTensor[ y, x ].iota( x )
+    assert numpy.asarray( colonnes.tensor ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
+    lignes = IntTensor[ y, x ].iota( y )
+    assert numpy.asarray( lignes.tensor ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
+
+    # zeros / ones / full, a la forme que les axes donnent
+    assert numpy.asarray( RealTensor[ y, x ].zeros().tensor ).tolist() == [ [ 0.0 ] * 4 ] * 3
+    assert numpy.asarray( RealTensor[ y, x ].ones().tensor ).tolist() == [ [ 1.0 ] * 4 ] * 3
+    assert numpy.asarray( RealTensor[ x ].full( 2.5 ).tensor ).tolist() == [ 2.5 ] * 4
+
+    # linspace : bornes INCLUSES, le long de l'axe nomme
+    assert numpy.asarray( RealTensor[ x ].linspace( 0, 1 ).tensor ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
+    grille = numpy.asarray( RealTensor[ y, x ].linspace( 0, 1, x ).tensor ).tolist()
+    assert grille == [ [ 0.0, 1 / 3, 2 / 3, 1.0 ] ] * 3
+
+    # un tirage reproductible, et qui reste dans [ 0, 1 [
+    a = RealTensor[ y, x ].random( seed = 7 )
+    b = RealTensor[ y, x ].random( seed = 7 )
+    va, vb = numpy.asarray( a.tensor ), numpy.asarray( b.tensor )
+    assert va.shape == ( 3, 4 ) and ( va == vb ).all()
+    assert ( 0 <= va ).all() and ( va < 1 ).all()
+
+    # « le long de quel axe ? » n'a pas de reponse par defaut en rang > 1 : on le DIT
+    try:
+        RealTensor[ y, x ].linspace( 0, 1 )
+        assert False, "un linspace de rang 2 doit nommer son axe"
+    except ValueError:
+        pass
+
+    # un tirage uniforme est un REEL : le demander en entier est une erreur, pas un arrondi
+    try:
+        IntTensor[ x ].random()
+        assert False, "un tirage uniforme entier n'a pas de sens ici"
+    except TypeError:
+        pass

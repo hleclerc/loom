@@ -56,6 +56,13 @@ class Cellules( Aggregate ):
     rang        : IntTensor
 
 
+def axes( n ):
+    """Les deux axes d'une grille `n x n` : de quoi batir ses champs avec les fabriques
+    ( `RealTensor[ y, x ].ones()`, `.linspace( 0, 1, x )`, ... ) sans jamais repeter la forme."""
+    grille = Grille( ny = n, nx = n )
+    return grille.y, grille.x
+
+
 # UN SEUL noyau : `fwd_code` fait le pas, `bwd_code` rend les deux gradients. Les deux se
 # contentent d'appeler l'en-tete -- c'est le C++ qu'on avait deja qui travaille.
 _code = FfiCodeParallel(
@@ -110,15 +117,11 @@ def pas( u, k, coef ):
     grille.temperature = u
     grille.diffusivite = k
 
-    # « qui suis-je ? » : un work-item par cellule, et son rang plat lu dans un tenseur d'entiers.
-    # loom n'offre pas d'iota cote appelant ( ni `arange` ), donc on le construit ici -- voir le
-    # README, c'est l'une des frictions relevees.
+    # « qui suis-je ? » : un work-item par cellule, et son rang plat. La CLASSE dit le type, donc
+    # l'iota est entier sans qu'on ait a le repeter -- et il est bati sur le device.
     cellule = new_batch_axis( ny * nx, prefix = "cellule" )
     cellules = Cellules( batch_axes = [ cellule ] )
-    cellules.rang = driver.array( list( range( ny * nx ) ), dtype = driver.itype )
-
-    c = RealTensor()
-    c.set( driver.array( float( coef ) ) )
+    cellules.rang = IntTensor[ cellule ].iota()
 
     suivant = RealTensor[ grille.y, grille.x ]()
 
@@ -126,7 +129,7 @@ def pas( u, k, coef ):
         _code,
         grille = grille,
         cellules = cellules,
-        coef = c,
+        coef = RealTensor( float( coef ) ),
         suivant = suivant,
         output_attributes = [ "suivant" ],
     )

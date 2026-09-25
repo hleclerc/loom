@@ -179,6 +179,18 @@ class JaxDriver:
     def full( self, shape, value, dtype = None ):
         return jnp.full( shape, value, dtype = Dtype.factory( dtype or self.ftype ).driver_version )
 
+    def ones( self, shape, dtype = None ):
+        return jnp.ones( shape, dtype = Dtype.factory( dtype or self.ftype ).driver_version )
+
+    def arange( self, nb, dtype = None ):
+        return jnp.arange( nb, dtype = Dtype.factory( dtype or self.itype ).driver_version )
+
+    def linspace( self, a, b, nb, dtype = None ):
+        return jnp.linspace( a, b, nb, dtype = Dtype.factory( dtype or self.ftype ).driver_version )
+
+    def reshape( self, tensor, shape ):
+        return jnp.reshape( tensor, tuple( shape ) )
+
     def stack( self, tensors, axis = 0 ):
         return jnp.stack( tensors, axis = axis )
 

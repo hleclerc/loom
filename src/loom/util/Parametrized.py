@@ -34,9 +34,20 @@ class Parametrized:
         if not callable( attr ):
             return attr
 
+        # A KEYWORD the factory itself declares goes to the FACTORY; anything else is a template
+        # kwarg, as on a plain instantiation. Without the split, everything landed in the template
+        # kwargs -- so `RealTensor[ x ].random( seed = 7 )` drew a DIFFERENT value each time, in
+        # silence, while `full( v )` worked only because its argument is positional. The signature
+        # is what separates them; a name that is both is resolved in favour of the factory.
+        try:
+            declared = set( inspect.signature( attr ).parameters ) - { "template_args", "template_kwargs", "scope" }
+        except ( TypeError, ValueError ):
+            declared = set()
+
         def method( *args, scope = None, **kwargs ):
-            merged_kwargs = { **self.kwargs, **kwargs }
-            return attr( *args, template_args = self.args, template_kwargs = merged_kwargs, scope = scope )
+            own = { k: v for k, v in kwargs.items() if k in declared }
+            merged_kwargs = { **self.kwargs, **{ k: v for k, v in kwargs.items() if k not in declared } }
+            return attr( *args, **own, template_args = self.args, template_kwargs = merged_kwargs, scope = scope )
         return method
 
 

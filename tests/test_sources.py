@@ -11,7 +11,7 @@ import numpy
 from loom import driver
 from loom.compilation.FfiCode import FfiCodeParallel
 from loom.tensor import Axis, IntTensor, ShapeVar
-from loom.testing import test
+from errand import test
 
 HERE = Path( __file__ ).resolve().parent / "cpp_sources"
 

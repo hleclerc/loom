@@ -1,7 +1,7 @@
 import math
 
 from loom.tensor import PhysicalLayout, items_per_alignment
-from loom.testing import test
+from errand import test
 
 
 def _contiguous( shape ):

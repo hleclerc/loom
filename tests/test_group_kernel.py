@@ -16,7 +16,7 @@ import numpy
 from loom import driver
 from loom.compilation.FfiCode import FfiCodeParallel
 from loom.tensor import Axis, IntTensor, ShapeVar
-from loom.testing import test
+from errand import test
 
 
 def _sum_over_lanes( group_size ):

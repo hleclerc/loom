@@ -1,6 +1,6 @@
 from loom.tensor import Affine, Coord
 from loom import ShapeVar
-from loom.testing import test
+from errand import test
 import numpy
 
 

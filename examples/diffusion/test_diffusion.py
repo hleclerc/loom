@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 
 from loom import driver
-from loom.testing import check_grad, test
+from errand import test
+from loom.testing import check_grad
 
 from diffusion import evolution, pas
 

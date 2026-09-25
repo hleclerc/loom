@@ -1,5 +1,5 @@
 from loom.tensor import ReferenceShape
-from loom.testing import test
+from errand import test
 import numpy
 
 

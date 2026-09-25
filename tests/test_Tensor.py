@@ -1,5 +1,6 @@
 from loom import ShapeVar, ShapeArray, Axis, AxisList, Tensor, Aggregate, driver, RealTensor, IntTensor, BoolTensor
-from loom.testing import test
+from errand import test
+from loom.util import info
 import numpy
 
 if test( "basic" ):

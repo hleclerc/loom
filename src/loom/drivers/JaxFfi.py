@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 
 import ctypes
+import time
 from pathlib import Path
 import sys
 
@@ -29,7 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy
 
-from ..compilation import build_dir, make_library
+from ..compilation import build_dir, journal, make_library
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
 
@@ -81,7 +82,34 @@ def render_source( body: str ) -> str:
     return _SOURCE_TEMPLATE.format( body = body )
 
 
-def compile_and_register( source: str, device, prefix: str = "", sources = () ) -> str:
+def call_signature( ca ):
+    """Ce qui décrit l'APPEL, et pas la source : de quoi répondre à « pourquoi ce noyau est-il
+    neuf ? » (voir `compilation/journal.py`).
+
+    Un argument y entre par sa FORME D'ABAISSEMENT -- un tampon, un `NoneTensor` (non perturbé),
+    un `ZeroTensor` (cotangente symboliquement nulle), un `FillTensor` -- plus son type et les
+    extents que le type porte. C'est exactement l'axe le long duquel un backward se démultiplie."""
+    def kind( t ):
+        if not t.io_category.is_bound:
+            return "none"
+        if t.inst.is_symbolic_zero:
+            return "zero"
+        if t.inst.is_fill:
+            return "fill"
+        return "out" if t.io_category.is_output else "in"
+
+    # `ca.tensors` porte aussi le tampon d'ERREURS de l'appel, qui n'est pas un tenseur déclaré
+    # (pas d'`inst`, pas de dtype) et ne distingue jamais deux variantes : on ne le décrit pas.
+    res = { t.name: f"{ kind( t ) } { t.dtype.cpp_name }"
+                    f"[{ ','.join( '*' if e is None else str( e ) for e in t._dim_ct_extent ) }]"
+            for t in ca.tensors if hasattr( t, "inst" ) }
+    if ca.batch_axes:
+        res[ "<batch>" ] = ",".join( ca.batch_axes )
+    return res
+
+
+def compile_and_register( source: str, device, prefix: str = "", sources = (),
+                          code_name = None, signature = None ) -> str:
     """Compile *source* (plus the `sources` units it links, see `make_library`), load and
     register it, and return its Jax FFI target name.
 
@@ -102,6 +130,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = () ) 
     # changes the binary as much as the source does, and a GPU architecture belongs there too.
     name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }" )
     if name in _loaded:
+        journal.record_reuse()
         return name
 
     # a precompiled kernel first (a wheel's catalogue, see `compilation/catalogue.py`): the same
@@ -110,8 +139,10 @@ def compile_and_register( source: str, device, prefix: str = "", sources = () ) 
     from ..compilation import catalogue
     catalogue.record( source, sources, device )
     found = catalogue.lookup( source, sources, device )
+    started = time.monotonic()
     if found is not None:
         lib, handler = found
+        journal.record( name, code_name, signature, "catalogue" )
     else:
         if catalogue.policy() == "catalogue":
             raise RuntimeError( f"sdot: kernel `{ name }` is not in the catalogue and SDOT_KERNELS=catalogue forbids compiling it" )
@@ -130,6 +161,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = () ) 
         )
         lib = ctypes.CDLL( str( lib_path ) )
         handler = getattr( lib, _HANDLER_SYMBOL )
+        journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
 
     jax.ffi.register_ffi_target(
         name, jax.ffi.pycapsule( handler ), platform = device.ffi_platform,
@@ -355,7 +387,8 @@ def _make_op( code, ca, device, prefix ):
     @jax.custom_batching.custom_vmap
     def op( *arrays ):
         source, _, outputs, attrs, sources = _render_call( code, ca, device )
-        target = compile_and_register( source, device, prefix, sources )
+        target = compile_and_register( source, device, prefix, sources,
+                                       code_name = code.name, signature = call_signature( ca ) )
         results = jax.ffi.ffi_call( target, [ b.jax_out_spec() for b in outputs ] )(
             *arrays, **{ name: numpy.int64( value ) for name, _, value in attrs }
         )

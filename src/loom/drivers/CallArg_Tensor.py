@@ -263,27 +263,31 @@ class CallArg_Tensor( CallArg ):
         # Ce n'est pas gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur, qui
         # sert maintenant à MESURER ce que coûte le semis, pas à décider s'il a lieu.
         #
-        # `LOOM_ZERO_OUTPUTS=poison` sème autre chose que zéro : un NaN (un entier hors bornes),
-        # parce que zéro REND SÛRE une sortie partiellement écrite mais la rend aussi CRÉDIBLE, et
-        # qu'une écriture oubliée passe alors les tests en silence. Le poison la fait échouer. C'est
+        # IL Y A DEUX SORTES DE SORTIES, et une seule peut être empoisonnée.
+        #
+        # Une sortie flottante PARTAGÉE d'un appel batché ne porte aucun axe de batch alors que
+        # l'appel en a : chaque item écrit le MÊME tampon, donc le kernel y ACCUMULE (le gradient
+        # de positions d'un `PowerDiagram`, ajouté par chaque cellule ; celui d'un
+        # `ProjectedSumOfDiracs`, par chaque angle). Partir de zéro n'y est pas un filet, c'est le
+        # CONTRAT de l'accumulation -- un poison y serait absorbé par la première addition et
+        # rendrait un NaN parfaitement légitime. Celle-là part à zéro, quel que soit le mode.
+        #
+        # C'est le mode poison qui a rendu la distinction visible : sans elle, les 14 tests de
+        # DÉRIVÉE de `test_PowerDiagram` rendaient `adjoint = nan` -- pas une écriture oubliée,
+        # juste une accumulation empoisonnée d'avance.
+        accumulee = ( self.dtype.floating_point and self._call_batch_axes
+                      and not any( b in self.axis_names for b in self._call_batch_axes ) )
+
+        # `LOOM_ZERO_OUTPUTS=poison` sème alors autre chose que zéro : un NaN (un entier hors
+        # bornes), parce que zéro REND SÛRE une sortie partiellement écrite mais la rend aussi
+        # CRÉDIBLE, et qu'une écriture oubliée passe en silence. Le poison la fait échouer. C'est
         # l'état à mettre sous une suite de tests ; le défaut reste zéro (voir `poison_value`).
         mode = os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower()
-        if mode == "poison":
+        if mode == "poison" and not accumulee:
             return f"{ view }.fill_with( queue, poison_value<DECAYED_TYPE_OF( { view } )::TF>() );"
-        if mode not in ( "0", "false", "no", "off" ):
+        if accumulee or mode not in ( "0", "false", "no", "off" ):
             return f"{ view }.fill_with( queue, 0 );"
-
-        # Le cas déjà couvert : une sortie flottante PARTAGÉE d'un appel batché. Elle ne porte aucun
-        # axe de batch alors que l'appel en a, donc chaque item écrit le MÊME tampon : le kernel y
-        # accumule (le gradient de points d'un `ProjectedSumOfDiracs`, ajouté atomiquement par chaque
-        # angle) et il doit partir de zéro. Une sortie PAR ITEM est écrite une fois par item -- rien
-        # à semer ; et sans batch il n'y a pas d'accumulation du tout. `fill_with( queue, 0 )` passe
-        # par la queue, donc il est ordonné avant le kernel du corps.
-        if not self.dtype.floating_point:
-            return ""
-        if not self._call_batch_axes or any( b in self.axis_names for b in self._call_batch_axes ):
-            return ""
-        return f"{ view }.fill_with( queue, 0 );"
+        return ""
 
     # -- as a member of an aggregate: one type parameter, spelled out at instantiation --
     def cpp_tpl_param( self ):

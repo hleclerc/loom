@@ -7,9 +7,15 @@ from .JaxFramework import JaxFramework
 from .Framework import Framework
 
 from ..devices.Device import Device
-from ..tensor.Dtype import Dtype
 
+# `Dtype` n'est importe QUE dans les methodes qui s'en servent. Au niveau du module, il tire
+# `loom/tensor/__init__.py`, qui tire `ShapeVar`, qui fait `from ..drivers.driver import driver` :
+# un CYCLE, des lors que `loom.drivers.driver` est le premier module de loom importe. C'est
+# exactement ce que fait `from loom import driver` en tete de fichier -- et ca cassait tout un
+# fichier de tests ( `sdot/tests/test_PowerDiagram.py` ). Ca ne marchait que si quelque chose
+# avait importe `loom.tensor` avant.
 if TYPE_CHECKING:
+    from ..tensor.Dtype import Dtype
     from .JaxDriver import JaxDriver
 
 
@@ -129,12 +135,13 @@ class DriverProxy:
 
     # ------------------------------------- ftype -------------------------------------
     @property
-    def ftype( self ) -> Dtype:
+    def ftype( self ) -> "Dtype":
         return self._checked_driver_instance().ftype
 
     @ftype.setter
     def ftype( self, value ):
         # cancel the driver instance if ftype is not compatible
+        from ..tensor.Dtype import Dtype
         ftype = Dtype.factory( value )
         if self._driver_instance is not None and not self._driver_instance.ftype == ftype:
             self._driver_instance = None
@@ -144,12 +151,13 @@ class DriverProxy:
 
     # ------------------------------------- itype -------------------------------------
     @property
-    def itype( self ) -> Dtype:
+    def itype( self ) -> "Dtype":
         return self._checked_driver_instance().itype
 
     @itype.setter
     def itype( self, value ):
         # cancel the driver instance if itype is not compatible
+        from ..tensor.Dtype import Dtype
         itype = Dtype.factory( value )
         if self._driver_instance is not None and not self._driver_instance.itype == itype:
             self._driver_instance = None

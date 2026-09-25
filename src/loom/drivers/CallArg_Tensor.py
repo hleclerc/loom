@@ -219,7 +219,20 @@ class CallArg_Tensor( CallArg ):
         self._caa = weakref.ref( caa )
 
     # -- seeding: what an output must hold before the body runs --
+    def cpp_seed_root( self, var_name ):
+        """Le semis d'un tenseur passé NU (pas membre d'un agrégat).
+
+        Il manquait : `JaxFfi._render_call` demande un `cpp_seed_root` à chaque argument racine qui
+        en a un, et seuls les agrégats en avaient -- donc une sortie tensorielle nue (le cas le plus
+        simple : `driver.call( ..., out = RealTensor[ ... ]() )`) n'était jamais semée, alors même
+        que `LOOM_ZERO_OUTPUTS` promet le contraire. Même règle que pour un membre, la vue étant
+        ici la variable elle-même."""
+        return self._seed_of( var_name )
+
     def cpp_seed_member( self, owner_name ):
+        return self._seed_of( f"{ owner_name }.{ self.name }" )
+
+    def _seed_of( self, view ):
         """Zero a SHARED float OUTPUT of a BATCHED call, before the body runs.
 
         Such an output carries NONE of the call's batch axes, yet the call has some: every item
@@ -249,8 +262,16 @@ class CallArg_Tensor( CallArg ):
         #
         # Ce n'est pas gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur, qui
         # sert maintenant à MESURER ce que coûte le semis, pas à décider s'il a lieu.
-        if os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower() not in ( "0", "false", "no", "off" ):
-            return f"{ owner_name }.{ self.name }.fill_with( queue, 0 );"
+        #
+        # `LOOM_ZERO_OUTPUTS=poison` sème autre chose que zéro : un NaN (un entier hors bornes),
+        # parce que zéro REND SÛRE une sortie partiellement écrite mais la rend aussi CRÉDIBLE, et
+        # qu'une écriture oubliée passe alors les tests en silence. Le poison la fait échouer. C'est
+        # l'état à mettre sous une suite de tests ; le défaut reste zéro (voir `poison_value`).
+        mode = os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower()
+        if mode == "poison":
+            return f"{ view }.fill_with( queue, poison_value<DECAYED_TYPE_OF( { view } )::TF>() );"
+        if mode not in ( "0", "false", "no", "off" ):
+            return f"{ view }.fill_with( queue, 0 );"
 
         # Le cas déjà couvert : une sortie flottante PARTAGÉE d'un appel batché. Elle ne porte aucun
         # axe de batch alors que l'appel en a, donc chaque item écrit le MÊME tampon : le kernel y
@@ -262,7 +283,7 @@ class CallArg_Tensor( CallArg ):
             return ""
         if not self._call_batch_axes or any( b in self.axis_names for b in self._call_batch_axes ):
             return ""
-        return f"{ owner_name }.{ self.name }.fill_with( queue, 0 );"
+        return f"{ view }.fill_with( queue, 0 );"
 
     # -- as a member of an aggregate: one type parameter, spelled out at instantiation --
     def cpp_tpl_param( self ):

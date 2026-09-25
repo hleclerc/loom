@@ -755,3 +755,41 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
 
     assert cnt.nb_out.value == 3
     assert numpy.asarray( cnt.out.tensor ).tolist() == [ 0.0, 10.0, 20.0 ]
+
+
+if test( "une_sortie_nue_est_semee" ):
+    # UN TAMPON DE SORTIE PART SEME, y compris quand le tenseur est passe NU.
+    #
+    # `JaxFfi._render_call` demande un `cpp_seed_root` a chaque argument racine qui en a un, et
+    # seuls les AGREGATS en avaient : une sortie tensorielle nue -- le cas le plus simple -- n'etait
+    # jamais semee, alors que `LOOM_ZERO_OUTPUTS` promet le contraire.
+    #
+    # On le teste sous `poison` et pas sous le zero par defaut : un tampon fraichement alloue vaut
+    # souvent zero par chance, donc le defaut ne distingue pas « seme » de « chanceux ». Le poison,
+    # lui, ne peut venir que du semis -- et c'est aussi ce qui le rend utile : une ecriture oubliee
+    # devient un NaN qui se propage, au lieu d'un zero credible qui passe les tests.
+    import math, os
+    import numpy
+
+    ancien = os.environ.get( "LOOM_ZERO_OUTPUTS" )
+    os.environ[ "LOOM_ZERO_OUTPUTS" ] = "poison"
+    try:
+        n = ShapeVar( 8 )
+        ax = Axis( n )
+        ax.name = "seed_n"
+
+        out = RealTensor[ ax ]()
+        driver.call(
+            FfiCodeParallel( name = "test_seed_bare", fwd_code = "out( seed_n = 0 ) = 1;" ),
+            out = out,
+            output_attributes = [ "out" ],
+        )
+
+        vals = numpy.asarray( out.raw ).reshape( -1 ).tolist()
+        assert vals[ 0 ] == 1
+        assert all( math.isnan( v ) for v in vals[ 1 : ] ), vals
+    finally:
+        if ancien is None:
+            del os.environ[ "LOOM_ZERO_OUTPUTS" ]
+        else:
+            os.environ[ "LOOM_ZERO_OUTPUTS" ] = ancien

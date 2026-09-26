@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy
 
 from ..compilation import build_dir, journal, make_library
+from ..compilation.build import kernels_root
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
 
@@ -156,10 +157,15 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
         if catalogue.policy() == "catalogue":
             raise RuntimeError( f"sdot: kernel `{ name }` is not in the catalogue and SDOT_KERNELS=catalogue forbids compiling it" )
 
+        # UN REPERTOIRE PAR NOYAU : la source engendree, son objet et sa bibliotheque y vivent, et
+        # s'effacent d'un bloc quand on n'en veut plus -- voir la docstring de `build.py`. Le nom
+        # est deja un hachage du contenu, donc il identifie le repertoire sans ambiguite.
+        work_dir = kernels_root() / name
+        work_dir.mkdir( parents = True, exist_ok = True )
+
         # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes
         # would look like a change to it (one recompilation per process, for nothing).
-        src_path = build_dir() / f"{ name }{ device.compiler.source_suffix() }"
-        src_path.parent.mkdir( parents = True, exist_ok = True )
+        src_path = work_dir / f"kernel{ device.compiler.source_suffix() }"
         if not ( src_path.exists() and src_path.read_text() == source ):
             src_path.write_text( source )
 
@@ -167,6 +173,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
             name + _lib_suffix(), [ src_path ], device,
             extra_flags = _ffi_include_flags(),
             sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
+            work_dir = work_dir,
         )
         lib = ctypes.CDLL( str( lib_path ) )
         handler = getattr( lib, _HANDLER_SYMBOL )

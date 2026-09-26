@@ -98,6 +98,48 @@ def compile_( args ):
     print( f"catalogue `{ tag }` : { nb } noyau(x) dans { Path( args.out ) / tag }" )
 
 
+def prune( args ):
+    """Oublier des noyaux : effacer leur repertoire, puis nettoyer le graphe commun.
+
+    C'est la partition qui rend l'operation triviale ( voir `build.py` ) : ce qui est propre a un
+    noyau vit dans son repertoire et part avec lui, sans mutation de graphe ni verrou. Le graphe
+    commun se nettoie ensuite tout seul, en retirant les aretes dont la sortie n'existe plus.
+    """
+    import shutil
+    import time
+
+    from .build import Manifest, kernels_root
+    from . import build_dir
+
+    racine = kernels_root()
+    limite = time.time() - args.older_than * 86400 if args.older_than is not None else None
+    efface, octets = 0, 0
+    if racine.is_dir():
+        for d in sorted( racine.iterdir() ):
+            if not d.is_dir():
+                continue
+            if limite is not None and d.stat().st_mtime >= limite:
+                continue
+            taille = sum( f.stat().st_size for f in d.rglob( "*" ) if f.is_file() )
+            if args.dry_run:
+                print( f"  a effacer : { d.name } ( { taille // 1024 } ko )" )
+            else:
+                shutil.rmtree( d )
+            efface += 1
+            octets += taille
+
+    verbe = "a effacer" if args.dry_run else "efface"
+    print( f"{ verbe } : { efface } noyau(x), { octets // ( 1024 * 1024 ) } Mo" )
+
+    if not args.dry_run:
+        m = Manifest( build_dir() )
+        retirees = m.prune()
+        if retirees:
+            m.save()
+            m.write_ninja()
+        print( f"graphe commun : { retirees } arete(s) orpheline(s) retiree(s), { len( m.edges ) } restantes" )
+
+
 def main( argv = None ):
     argv = list( sys.argv[ 1: ] if argv is None else argv )
     # `--` sépare nos options de la commande à lancer : argparse ne sait pas le faire lui-même
@@ -123,6 +165,13 @@ def main( argv = None ):
                     metavar = "MODULE", help = "module à importer avant de compiler ( il enregistre "
                                                "sa racine C++ ) ; répétable" )
     c.set_defaults( func = compile_ )
+
+    g = sub.add_parser( "prune", help = "oublier des noyaux : effacer leur repertoire" )
+    g.add_argument( "--older-than", type = float, metavar = "JOURS",
+                    help = "n'effacer que les noyaux inutilises depuis ce nombre de jours "
+                           "( sans l'option : tous )" )
+    g.add_argument( "--dry-run", action = "store_true", help = "dire ce qui serait efface" )
+    g.set_defaults( func = prune )
 
     a = p.parse_args( miens )
     a.func( a )

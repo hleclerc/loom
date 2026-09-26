@@ -5,15 +5,33 @@ Pourquoi ninja et pas un hachage maison : un noyau n'est pas un fichier mais une
 d'en-têtes, et seul le compilateur la connaît exactement (`-MMD`). ninja lit ces depfiles, compare
 les dates, et rebâtit une unité si et seulement si l'un de SES en-têtes a bougé -- là où le hachage
 global de tout l'arbre (`cpp_sources_hash`, avant) rebâtissait chaque noyau pour un commentaire
-touché dans un en-tête qu'il n'incluait pas. Et un graphe est ce qu'il faut pour les unités
-partagées : la bibliothèque runtime (la file de threads, une par processus), demain les sources
-de domaine compilées une fois par configuration et liées dans plusieurs noyaux.
+touché dans un en-tête qu'il n'incluait pas. Mesuré : 88 ms de graphe par noyau contre ~8 s de
+compilation, soit 1 % -- un bon marché pour la seule chose difficile.
 
-Le graphe VIT SUR DISQUE (`build/ninja/manifest.json`) : chaque processus y ajoute ce qu'il demande,
-réécrit `build/build.ninja` en entier et lance `ninja` sur ses cibles. Les rebuilds d'un processus
-à l'autre restent donc exacts (ninja garde ses `.ninja_deps` / `.ninja_log` dans `build/`). Un
-verrou de fichier sérialise les processus : deux ninja concurrents dans un même répertoire se
-marcheraient dessus.
+= DEUX GRAPHES, parce qu'il y a deux sortes de cibles
+
+Le critère n'est pas « commun / spécifique » mais AVOIR DES DÉPENDANTS OU NON.
+
+  * Le graphe COMMUN (`build/`) porte ce qui en a : la bibliothèque runtime (la file de threads,
+    une par signature de compilateur) et les UNITÉS DE DOMAINE -- une source compilée une fois par
+    (source, defines, compilateur) et liée par tous les noyaux qui la nomment. Il est permanent, il
+    a un verrou, et il ne grandit plus avec le nombre de noyaux.
+  * Le graphe PROPRE d'un noyau (`build/noyaux/<cible>/`) porte sa source engendrée, son objet et
+    sa bibliothèque : un noyau, zéro dépendant, et un nom qui est déjà un hachage de son contenu.
+    Deux arêtes, son propre `build.ninja`, son propre verrou, son propre journal de dépendances.
+
+Ce que ça change, et c'est le point : OUBLIER UN NOYAU DEVIENT UNE SUPPRESSION. `rm -rf` de son
+répertoire, sans mutation de graphe, sans verrou, sans arête orpheline possible -- là où un
+manifeste unique ne faisait que croître (5104 arêtes, 3506 bibliothèques, 2,7 Go mesurés avant
+cette partition). Et le verrou se décompose : il ne sérialise plus que la phase « le runtime est-il
+à jour ? », de sorte que deux processus qui compilent deux noyaux DIFFÉRENTS ne s'attendent plus.
+Deux processus sur le MÊME noyau s'attendent encore, ce qui est le seul cas où il le faut.
+
+Les deux phases sont séquentielles et dans cet ordre : le commun d'abord (il peut rafraîchir le
+runtime), le noyau ensuite, qui voit alors une entrée plus récente et relie. Les artefacts communs
+entrent dans le graphe du noyau comme de simples FICHIERS D'ENTRÉE, sans règle -- c'est ce qui
+empêche deux répertoires de noyaux de décider indépendamment de rebâtir le runtime et de se battre
+sur le même fichier de sortie. (C'est aussi pourquoi ce n'est pas un `subninja`.)
 
 Les commandes viennent du compilateur du device (`Compiler.commands`) : c'est lui qui sait compiler
 un `.cpp` ou un `.cu`, et il les donne sous forme de GABARITS D'ARGV à trous nommés (`{in}`,
@@ -43,6 +61,11 @@ def ninja_path() -> str:
     if p is None:
         raise RuntimeError( "sdot: `ninja` introuvable (pip install ninja, ou SDOT_NINJA=/chemin/ninja)" )
     return p
+
+
+def kernels_root() -> Path:
+    """Où vit un répertoire par noyau -- chacun s'efface d'un bloc (voir la docstring du module)."""
+    return build_dir() / "noyaux"
 
 
 def _short_hash( *parts ) -> str:
@@ -77,8 +100,8 @@ class Manifest:
     { rule, inputs, implicit, vars }. Chargé et réécrit sous le verrou."""
 
     def __init__( self, root: Path ):
-        self.root = root
-        self.path = root / "ninja" / "manifest.json"
+        self.root = Path( root )
+        self.path = self.root / "ninja" / "manifest.json"
         self.rules = {}
         self.edges = {}
         if self.path.is_file():
@@ -97,6 +120,21 @@ class Manifest:
         self.edges[ str( out ) ] = { "rule": rule, "inputs": [ str( i ) for i in inputs ],
                                      "implicit": [ str( i ) for i in implicit ],
                                      "vars": { k: str( v ) for k, v in variables.items() if v } }
+
+    def prune( self, garder = () ) -> int:
+        """Retire les arêtes dont la SORTIE n'existe plus, `garder` exceptée (ce que ce build vient
+        de déclarer et s'apprête justement à bâtir).
+
+        Toujours sûr : si quelqu'un a encore besoin d'une arête retirée, le processus qui la déclare
+        la remettra. C'est ce qui fait qu'effacer un répertoire de noyau -- ou un artefact à la
+        main -- NETTOIE le graphe au lieu de le laisser enfler, et c'est ce qui manquait quand tout
+        vivait dans un manifeste unique."""
+        garder = { str( g ) for g in garder }
+        vivantes = { out: e for out, e in self.edges.items()
+                     if out in garder or Path( out ).exists() }
+        retirees = len( self.edges ) - len( vivantes )
+        self.edges = vivantes
+        return retirees
 
     def save( self ):
         self.path.parent.mkdir( parents = True, exist_ok = True )
@@ -128,10 +166,13 @@ class Manifest:
 
 
 class _Lock:
-    """Un verrou de fichier autour du graphe et de ninja (POSIX ; no-op ailleurs)."""
+    """Un verrou de fichier autour d'un graphe et de son ninja (POSIX ; no-op ailleurs).
+
+    Un par graphe : celui du commun sérialise « le runtime est-il à jour ? », celui d'un noyau
+    sérialise la compilation de CE noyau. Deux noyaux différents ne se croisent plus."""
 
     def __init__( self, root: Path ):
-        self.path = root / "ninja" / "lock"
+        self.path = Path( root ) / "ninja" / "lock"
         self.fd = None
 
     def __enter__( self ):
@@ -160,24 +201,82 @@ def force_build() -> bool:
     return v not in ( "", "0", "false", "no", "off" )
 
 
+class _Graphe:
+    """Un graphe dans un répertoire : ce que CE build y déclare, plus ce qu'il faut pour le fondre
+    dans le manifeste qui s'y trouve déjà et lancer ninja dessus.
+
+    Les déclarations restent ici et ne sont pas écrites tout de suite : le manifeste sur disque
+    n'est lu et réécrit que dans `run`, sous le verrou -- donc les arêtes qu'un autre processus
+    aurait ajoutées entre-temps ne sont pas perdues (avant, un verrou pris pour toute la durée du
+    build rendait la question sans objet, au prix d'une sérialisation totale)."""
+
+    def __init__( self, root, sig: str, commands: dict ):
+        self.root = Path( root )
+        self.sig = sig
+        self.rules = { f"{ name }_{ sig }": ( _en_regle_ninja( argv ), depfile, description )
+                       for name, ( argv, depfile, description ) in commands.items() }
+        self.edges = {}
+
+    def add_edge( self, out: Path, rule: str, inputs: list, implicit: list = (), **variables ):
+        self.edges[ str( out ) ] = dict( rule = rule, inputs = list( inputs ),
+                                         implicit = list( implicit ), variables = variables )
+
+    def run( self, targets: list ):
+        """Fond nos déclarations dans le manifeste du répertoire, puis bâtit `targets`."""
+        targets = [ str( t ) for t in targets ]
+        if not targets:
+            return
+        with _Lock( self.root ):
+            manifest = Manifest( self.root )
+            for name, ( command, depfile, description ) in self.rules.items():
+                manifest.add_rule( name, command, depfile, description )
+            for out, e in self.edges.items():
+                manifest.add_edge( out, e[ "rule" ], e[ "inputs" ], e[ "implicit" ], **e[ "variables" ] )
+            manifest.prune( garder = self.edges )
+            manifest.save()
+            ninja_file = manifest.write_ninja()
+
+            if force_build():
+                for t in targets:
+                    Path( t ).unlink( missing_ok = True )
+                    for i in manifest.edges.get( t, {} ).get( "inputs", [] ):
+                        if i.endswith( ".o" ):
+                            Path( i ).unlink( missing_ok = True )
+
+            # `SDOT_BUILD_JOBS` : le parallélisme (défaut : celui de ninja, tous les coeurs) -- un
+            # catalogue CUDA compile cent unités d'un gigaoctet chacune, on ne les veut pas toutes
+            # en même temps sur une machine partagée
+            jobs = os.getenv( "SDOT_BUILD_JOBS" )
+            cmd = [ ninja_path(), "-C", str( self.root ), "-f", str( ninja_file ),
+                    *( [ "-j", jobs ] if jobs else [] ), *targets ]
+            r = subprocess.run( cmd, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, text = True )
+            out = r.stdout or ""
+            # ninja's own line for a no-op build is noise; a real compilation is worth seeing
+            if "no work to do" not in out:
+                print( out, end = "", flush = True )
+            if r.returncode:
+                raise RuntimeError( f"ninja failed ({ r.returncode }) on { targets }" )
+
+
 class Build:
     """Une session de construction : on y déclare des unités, des bibliothèques, des exécutables,
-    puis `run( targets )` fait le nécessaire. Tout ce qui est déclaré s'ajoute au manifeste du
-    répertoire de build."""
+    puis `run( targets )` fait le nécessaire.
 
-    def __init__( self, device ):
+    `work_dir` est le répertoire PROPRE de ce qu'on bâtit -- celui d'un noyau, effaçable d'un bloc.
+    Sans lui, tout va dans le graphe commun : c'est ce que font le catalogue (un seul gros lien dans
+    un répertoire jetable) et les tests C++."""
+
+    def __init__( self, device, work_dir = None ):
         self.device = device
         self.compiler = device.compiler
         self.root = build_dir()
         self.sig = _short_hash( self.compiler.build_signature )
-        self._lock = _Lock( self.root )
-        self._lock.__enter__()
-        self.manifest = Manifest( self.root )
-        for name, ( argv, depfile, description ) in self.compiler.commands().items():
-            self.manifest.add_rule( f"{ name }_{ self.sig }", _en_regle_ninja( argv ), depfile, description )
+        commands = self.compiler.commands()
+        self.commun = _Graphe( self.root, self.sig, commands )
+        self.propre = _Graphe( work_dir, self.sig, commands ) if work_dir is not None else self.commun
 
     def close( self ):
-        self._lock.__exit__( None, None, None )
+        pass
 
     def __enter__( self ):
         return self
@@ -189,14 +288,20 @@ class Build:
     def _rule( self, name ) -> str:
         return f"{ name }_{ self.sig }"
 
-    def object( self, src: Path, defines: dict = None, extra_flags: list = () ) -> Path:
+    def object( self, src: Path, defines: dict = None, extra_flags: list = (), partage = True ) -> Path:
         """L'objet d'une source compilée avec ces `defines` -- une unité par (source, defines,
-        compilateur). Le même `.o` sert à tous les noyaux qui le demandent."""
+        compilateur).
+
+        `partage` (le défaut) : l'unité a des dépendants, le même `.o` sert à tous les noyaux qui la
+        demandent, donc elle vit dans le graphe COMMUN. `partage = False` : l'objet n'est à personne
+        d'autre (la source engendrée d'un noyau), il vit dans le répertoire propre et part avec lui."""
         src = Path( src ).resolve()
         defines = dict( defines or {} )
         extra_flags = list( extra_flags )
-        obj = self.root / "obj" / f"{ src.stem }_{ _short_hash( self.sig, src, sorted( defines.items() ), extra_flags ) }.o"
-        self.manifest.add_edge(
+        graphe = self.commun if partage else self.propre
+        nom = f"{ src.stem }_{ _short_hash( self.sig, src, sorted( defines.items() ), extra_flags ) }.o"
+        obj = ( graphe.root / "obj" / nom ) if graphe is self.commun else ( graphe.root / nom )
+        graphe.add_edge(
             obj, self._rule( self.compiler.rule_for( src ) ), [ src ],
             includes = " ".join( f"-I { _ninja_escape( d ) }" for d in include_dirs() ),
             defines  = " ".join( f"-D{ k }={ v }" if v is not None else f"-D{ k }" for k, v in defines.items() ),
@@ -204,51 +309,47 @@ class Build:
         )
         return obj
 
-    def shared_library( self, out: Path, objects: list, libraries: list = () ) -> Path:
+    def shared_library( self, out: Path, objects: list, libraries: list = (), partage = False ) -> Path:
         """`out` = un `.so` lié des `objects` et des `libraries` (des `.so` du graphe : le
-        répertoire de chacune entre dans le rpath)."""
+        répertoire de chacune entre dans le rpath).
+
+        `partage = True` pour une bibliothèque qui a des dépendants (le runtime) : elle va dans le
+        graphe commun."""
         out = Path( out )
-        self.manifest.add_edge( out, self._rule( "link_shared" ), objects, implicit = libraries,
-                                libs = self.compiler.link_libraries( libraries ),
-                                soname = self.compiler.soname_flags( out ) )
+        graphe = self.commun if partage else self.propre
+        graphe.add_edge( out, self._rule( "link_shared" ), objects, implicit = libraries,
+                         libs = self.compiler.link_libraries( libraries ),
+                         soname = self.compiler.soname_flags( out ) )
         return out
 
     def executable( self, out: Path, objects: list, libraries: list = () ) -> Path:
         out = Path( out )
-        self.manifest.add_edge( out, self._rule( "link_executable" ), objects, implicit = libraries,
-                                libs = self.compiler.link_libraries( libraries ) )
+        self.propre.add_edge( out, self._rule( "link_executable" ), objects, implicit = libraries,
+                              libs = self.compiler.link_libraries( libraries ) )
         return out
 
     def runtime_library( self ) -> Path:
-        """`libloom_runtime` pour ce compilateur : la file de threads du processus, et tout ce
-        que les noyaux partagent sans avoir à le recompiler. Une par signature de compilateur."""
+        """`libloom_runtime` pour ce compilateur : la file de threads du processus, et tout ce que
+        les noyaux partagent sans avoir à le recompiler. Une par signature de compilateur, dans le
+        graphe commun -- c'est l'exemple même d'une cible à dépendants."""
         objects = [ self.object( src ) for src in runtime_sources() ]
-        return self.shared_library( self.root / "runtime" / self.compiler.library_file_name( f"loom_runtime_{ self.sig }" ), objects )
+        return self.shared_library(
+            self.commun.root / "runtime" / self.compiler.library_file_name( f"loom_runtime_{ self.sig }" ),
+            objects, partage = True )
 
     # ── run ──────────────────────────────────────────────────────────────────
     def run( self, targets: list ):
-        """Bâtit `targets` (et ce dont elles dépendent), et rien d'autre."""
-        self.manifest.save()
-        ninja_file = self.manifest.write_ninja()
-        targets = [ str( t ) for t in targets ]
-        if force_build():
-            for t in targets:
-                Path( t ).unlink( missing_ok = True )
-                for i in self.manifest.edges.get( t, {} ).get( "inputs", [] ):
-                    if i.endswith( ".o" ):
-                        Path( i ).unlink( missing_ok = True )
-        # `SDOT_BUILD_JOBS` : le parallélisme (défaut : celui de ninja, tous les coeurs) -- un
-        # catalogue CUDA compile cent unités d'un gigaoctet chacune, on ne les veut pas toutes en
-        # même temps sur une machine partagée
-        jobs = os.getenv( "SDOT_BUILD_JOBS" )
-        cmd = [ ninja_path(), "-C", str( self.root ), "-f", str( ninja_file ), *( [ "-j", jobs ] if jobs else [] ), *targets ]
-        r = subprocess.run( cmd, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, text = True )
-        out = r.stdout or ""
-        # ninja's own line for a no-op build is noise; a real compilation is worth seeing
-        if "no work to do" not in out:
-            print( out, end = "", flush = True )
-        if r.returncode:
-            raise RuntimeError( f"ninja failed ({ r.returncode }) on { targets }" )
+        """Bâtit `targets` (et ce dont elles dépendent), et rien d'autre.
+
+        Deux phases, dans cet ordre : le COMMUN d'abord -- il peut rafraîchir le runtime ou une
+        unité de domaine -- puis le PROPRE, qui voit alors une entrée plus récente et relie. Les
+        artefacts communs entrent dans le graphe propre comme de simples fichiers d'entrée, sans
+        règle : aucun répertoire de noyau ne peut décider de rebâtir le runtime."""
+        if self.propre is self.commun:
+            self.commun.run( targets )
+            return
+        self.commun.run( list( self.commun.edges ) )
+        self.propre.run( targets )
 
 
 def runtime_sources() -> list:

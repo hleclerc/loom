@@ -186,9 +186,14 @@ def include_dirs() -> list:
 from .externals import register_external as register_external
 
 
-def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = () ):
+def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = (), work_dir = None ):
     """Compile & link `src_paths` into a shared library with the compiler of `device`, through
     the build graph (see `build.py`).
+
+    `work_dir` : le repertoire PROPRE de cette bibliotheque. Ce qui n'est a personne d'autre -- la
+    source engendree et son objet -- y vit, et part avec lui quand on l'efface ; les unites de
+    domaine (`sources`) restent dans le graphe commun, puisqu'elles ont des dependants. Sans
+    `work_dir`, tout va dans le graphe commun (le catalogue, les tests C++).
 
     Emits a relocatable shared object meant to be `dlopen`ed at runtime (e.g. to expose an XLA
     FFI handler symbol to Jax), linked against the runtime library (`libloom_runtime`: the
@@ -206,10 +211,12 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     Returns the path to the built library.
     """
     from .build import Build
-    with Build( device ) as b:
-        objects = [ b.object( p, extra_flags = extra_flags or [] ) for p in src_paths ]
+    with Build( device, work_dir = work_dir ) as b:
+        # la source engendree n'a aucun dependant : son objet est PROPRE a cette bibliotheque
+        objects = [ b.object( p, extra_flags = extra_flags or [], partage = work_dir is None )
+                    for p in src_paths ]
         objects += [ b.object( p, defines ) for p, defines in sources ]
-        lib = b.shared_library( build_dir() / lib_name, objects, [ b.runtime_library() ] )
+        lib = b.shared_library( ( work_dir or build_dir() ) / lib_name, objects, [ b.runtime_library() ] )
         b.run( [ lib ] )
     return lib
 

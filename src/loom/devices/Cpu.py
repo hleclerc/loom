@@ -35,6 +35,11 @@ class Cpu( Device ):
     def cpp_queue_include( self ):
         return "loom/support/kernels/CpuQueue.h"
 
+    # le handler tourne sur l'hôte et ses tampons SONT de la mémoire hôte : `aligned_alloc`,
+    # libéré en sortant. Rien à recevoir d'XLA, donc ni paramètre ni clause `Bind()`.
+    def cpp_scratch_decl( self ):
+        return f"auto scratch = host_scratch<{ self.cpp_memory_space }>();"
+
     @property
     def compiler( self ):
         from ..compilation.Compiler import HostCxx

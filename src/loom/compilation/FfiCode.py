@@ -15,6 +15,13 @@ class AbstractFfiCode:
         apporte le sien)."""
         return ""
 
+    @property
+    def wants_scratch( self ) -> bool:
+        """Si le handler doit recevoir l'allocateur d'XLA (`Scratch`). Faux par défaut : c'est la
+        SOURCE qui est hachée pour nommer un noyau, donc lier ce contexte sans qu'on le demande
+        recompilerait tout le dépôt pour une capacité que personne n'utilise."""
+        return False
+
 
 class FfiCode( AbstractFfiCode ):
     """Un noyau : le C++ qui s'exécute PAR ITEM, plus ce que l'appel doit savoir pour le lancer.
@@ -115,7 +122,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  _scaffold = True ) -> None:
+                  scratch = False, _scaffold = True ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -128,6 +135,7 @@ class FfiCode( AbstractFfiCode ):
         self.prologue = prologue
         self.sources = tuple( sources )
         self.includes = tuple( includes )
+        self.scratch = bool( scratch )
         self._scaffold = _scaffold
 
         # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
@@ -151,6 +159,10 @@ class FfiCode( AbstractFfiCode ):
     @property
     def cooperative( self ):
         return "group_size" in self.hooks
+
+    @property
+    def wants_scratch( self ):
+        return self.scratch
 
     def _params( self, names ):
         """Les paramètres de l'`operator()` : les réservés, puis un par argument de l'appel --
@@ -221,7 +233,8 @@ class FfiCode( AbstractFfiCode ):
         if self.includes and self.sources:
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
-                       self.sources or other.sources, _scaffold = self._scaffold,
+                       self.sources or other.sources, scratch = self.scratch,
+                       _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
         return res
@@ -254,6 +267,10 @@ class Kernels( AbstractFfiCode ):
     @property
     def sources( self ):
         return self.forward.sources
+
+    @property
+    def wants_scratch( self ):
+        return self.forward.wants_scratch
 
     def functor_name( self ) -> str:
         """L'identifiant C++ du foncteur : le nom de l'appel, rendu identifiant."""

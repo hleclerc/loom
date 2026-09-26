@@ -74,6 +74,25 @@ class CudaGpu( Device ):
     def cpp_queue_decl( self ):
         return "Queue queue( xla_stream );"
 
+    # la carte est à XLA ( il en préalloue le gros ), donc c'est SON pool qu'on ouvre :
+    # `XLA_FFI_DeviceMemory_Allocate`, un champ de la struct `XLA_FFI_Api` -- de l'ABI C stable,
+    # pas un utilitaire d'en-tête. Il libère tout seul au retour du handler, d'où l'absence de
+    # `FreeFn`.
+    def cpp_scratch_param( self ):
+        return "ffi::ScratchAllocator xla_scratch"
+
+    def cpp_scratch_bind( self ):
+        return ".Ctx<ffi::ScratchAllocator>()"
+
+    def cpp_scratch_decl( self ):
+        return ( f"Scratch<{ self.cpp_memory_space }> scratch(\n"
+                 "        []( void *ctx, SI nb_bytes, SI alignment ) -> void * {\n"
+                 "            auto res = reinterpret_cast<ffi::ScratchAllocator *>( ctx )->Allocate( nb_bytes, alignment );\n"
+                 "            return res.has_value() ? *res : nullptr;\n"
+                 "        },\n"
+                 "        &xla_scratch\n"
+                 "    );" )
+
     def catalogue_kind( self ):
         return "cuda"
 

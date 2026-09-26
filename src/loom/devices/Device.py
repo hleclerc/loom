@@ -102,6 +102,27 @@ class Device:
     def cpp_queue_decl( self ):
         return "static Queue &queue = *new Queue();"
 
+    # ── allouer PENDANT l'appel, à une taille que seul le noyau connaît ──────────────────
+    # D'où vient la mémoire n'est pas la même question partout : sur GPU il faut le pool d'XLA
+    # ( c'est lui qui détient la carte ), sur CPU un `malloc` suffit ( le handler tourne sur
+    # l'hôte, et le backend CPU d'XLA répond « No device memory allocator available on this
+    # platform » -- il a raison, il n'y a pas de device ). Le corps du noyau, lui, ne voit qu'un
+    # `scratch` et ne change pas. Voir `support/kernels/Scratch.h`.
+    def cpp_scratch_param( self ):
+        """Le paramètre du handler qui porte de quoi allouer, ou "" (rien à recevoir)."""
+        return ""
+
+    def cpp_scratch_bind( self ):
+        """La clause `Bind()` qui le lie, ou ""."""
+        return ""
+
+    def cpp_scratch_decl( self ):
+        """La déclaration de `scratch` dans le handler. Un device qui ne sait pas allouer le dit
+        ici, plutôt que de laisser passer un noyau qui s'en croit capable."""
+        raise NotImplementedError(
+            f"{ self.name }: `FfiCode( scratch = True )` -- ce device ne sait pas allouer pendant "
+            f"un appel ( voir `Device.cpp_scratch_decl` )" )
+
     # ── the catalogue (precompiled kernels in a wheel, see compilation/catalogue.py) ──────
     def catalogue_kind( self ) -> str:
         """Under which kind a recorded source is filed ("cpu" | "cuda")."""

@@ -322,6 +322,8 @@ def _render_call( code, ca, device ):
     # body itself listed. Collected blind: the call never knows which node brought a header, nor
     # that any of it is hand-written or generated behind the scenes.
     includes = []
+    if code.wants_scratch:
+        includes.append( "loom/support/kernels/Scratch.h" )
     for inc in [ i for arg_ca in ca.args.values() for i in arg_ca.cpp_includes() ] + list( code.includes ):
         if inc not in includes:
             includes.append( inc )
@@ -343,11 +345,22 @@ def _render_call( code, ca, device ):
     # results, and attributes.
     stream_param = device.cpp_stream_param()
     params = [ stream_param ] if stream_param else []
+
+    # l'allocateur d'XLA, SUR DEMANDE ( `FfiCode( scratch = True )` ). Il est lié en `Ctx`, donc
+    # sa place dans la signature est celle de sa clause `Bind()` -- juste après le flux, avant les
+    # arguments. Et il ne s'ajoute QUE si le corps l'a demandé : le nom d'un noyau est le hachage
+    # de sa source, donc une clause ajoutée sans condition recompilerait tout le dépôt.
+    scratch = code.wants_scratch
+    if scratch and device.cpp_scratch_param():
+        params.append( device.cpp_scratch_param() )
+
     params += [ f"{ b.jax_ffi_type() } { b.ffi_name }" for b in inputs ]
     params += [ f"ffi::Result<{ b.jax_ffi_type() }> { b.ffi_name }" for b in outputs ]
     params += [ f"{ cpp_type } { name }" for name, cpp_type, _ in attrs ]
 
     binds = ( "\n        " + device.cpp_stream_bind() ) if stream_param else ""
+    if scratch and device.cpp_scratch_bind():
+        binds += "\n        " + device.cpp_scratch_bind()
     binds += "".join( f"\n        .Arg<{ b.jax_ffi_type() }>()" for b in inputs )
     binds += "".join( f"\n        .Ret<{ b.jax_ffi_type() }>()" for b in outputs )
     binds += "".join( f'\n        .Attr<{ cpp_type }>( "{ name }" )' for name, cpp_type, _ in attrs )
@@ -359,9 +372,26 @@ def _render_call( code, ca, device ):
     seeds = [ ca.errors.cpp_seed_root( ERRORS_VAR_NAME ) ]
     seeds += [ ca_.cpp_seed_root( n ) for n, ca_ in ca.args.items() if hasattr( ca_, "cpp_seed_root" ) ]
 
+    # ce qui donne au corps l'allocateur, et ce qui rapporte un refus. Le pool d'XLA peut dire
+    # non, et `Scratch` en fait une VALEUR ( une vue vide, un drapeau ) plutôt qu'une exception :
+    # le corps ne déréférence rien, et c'est ici que le refus redevient une erreur pour XLA.
+    queue_decl = device.cpp_queue_decl()
+    body = code.code_for( ca )
+    if scratch:
+        queue_decl += "\n    " + device.cpp_scratch_decl()
+        # le POURQUOI est perdu en route : `ScratchAllocator::Allocate` emet la raison dans un
+        # `DiagnosticEngine` que `Handler::Call` ne consulte que sur echec de DECODAGE, et rend
+        # `nullopt` sans elle. Le message porte donc la cause de loin la plus frequente, qui est
+        # aussi la seule qu'on ait observee : la plateforme n'a pas d'allocateur du tout.
+        body += ( '\n        if ( scratch.failed )\n'
+                  '            return ffi::Error( ffi::ErrorCode::kResourceExhausted,\n'
+                  '                "loom: XLA refused a scratch allocation -- typically "\n'
+                  '                "\\"No device memory allocator available on this platform\\", "\n'
+                  '                "which is what the CPU backend answers" );' )
+
     from ..tensor.AbstractAxis import AbstractAxis
     source = _CALL_TEMPLATE.format(
-        queue_decl    = device.cpp_queue_decl(),
+        queue_decl    = queue_decl,
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
         preamble      = code.preamble_for( ca ),
@@ -372,7 +402,7 @@ def _render_call( code, ca, device ):
         batch_indices = _batch_indices_decl( ca ),
         decls         = "\n".join( decls ),
         seeds         = "\n".join( s for s in seeds if s ),
-        body          = code.code_for( ca ),
+        body          = body,
         binds         = binds,
     )
     return source, inputs, outputs, attrs, tuple( sources )

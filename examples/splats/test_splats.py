@@ -10,11 +10,12 @@ sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 
 import numpy
 
-from errand import test
+from errand import Param, bench, test
 from loom import RealTensor, driver
 from loom.testing import check_grad
 
-from splats import COTE, Ecran, Splats, construire_index, rendre, rendu
+from splats import ( COTE, Ecran, Splats, construire_index, construire_index_csr,
+                     rendre, rendre_csr, rendu )
 
 
 def _scene( nb, largeur, hauteur, seed = 0, echelle = 3.0, amas = 6 ):
@@ -226,3 +227,81 @@ if test( "csr_contre_rembourre_les_deux_couts" ):
 
         # le rembourre est PLUS COUTEUX en memoire, toujours : c'est le constat, pas l'inverse
         assert au_mieux > csr
+
+
+if p := bench( "csr_contre_rembourre_en_temps",
+               nb      = Param( 2000, help = "nombre de splats" ),
+               taille  = Param( 512, help = "cote de l'image" ),
+               reps    = Param( 5, help = "repetitions chronometrees ( on garde le minimum )" ),
+               seed    = Param( 0, help = "graine de la scene" ) ):
+    # LA MEMOIRE ET LES PASSES SONT MESUREES AILLEURS ( `csr_contre_rembourre_les_deux_couts` ) ;
+    # ici c'est le TEMPS, qui est la seule chose que ces deux-la ne permettaient pas de deviner : le
+    # CSR economise de la memoire mais paie une passe de plus sur les splats ET un aller-retour vers
+    # l'hote ( lire le total ). Lequel gagne n'est pas une question d'opinion.
+    import time
+
+    def fini( x ):
+        """Attendre vraiment : jax est asynchrone, un chronometre autour d'un appel qui n'a pas
+        fini ne mesure que le temps de le mettre en file."""
+        raw = x.raw if hasattr( x, "raw" ) else x
+        if hasattr( raw, "block_until_ready" ):
+            raw.block_until_ready()
+        else:
+            numpy.asarray( raw )
+        return x
+
+    largeur = hauteur = p.taille
+    splats = _scene( p.nb, largeur, hauteur, seed = p.seed )
+    ecran = _ecran( largeur, hauteur )
+
+    # de quoi connaitre la capacite IDEALE ( et chauffer les noyaux du chemin rembourre )
+    repere = construire_index( splats, ecran, capacite = 512 )
+    ideale = int( numpy.asarray( repere.nb_par_tuile.value ).reshape( -1 ).max() )
+
+    # un tour de chauffe par variante : le premier appel de chacune compile encore
+    fini( construire_index( splats, ecran, capacite = ideale ) )
+    o, c, ids, total = construire_index_csr( splats, ecran )
+    fini( ids )
+    fini( rendre( splats, repere, ecran ) )
+    fini( rendre_csr( splats, o, c, ids, ecran ) )
+
+    def chrono( action ):
+        meilleur = float( "inf" )
+        for _ in range( p.reps ):
+            t = time.perf_counter()
+            fini( action() )
+            meilleur = min( meilleur, time.perf_counter() - t )
+        return meilleur
+
+    # LE BALAYAGE DE CAPACITE : le travail utile est le meme ( les memes splats, les memes tuiles ),
+    # seule la taille allouee change. Si le temps croit avec elle, c'est le SEMIS a zero qui le
+    # porte -- il remplit la capacite, pas le contenu. On ne peut pas le verifier en coupant le
+    # semis : sans lui le compteur s'accumule sur de la memoire indeterminee, et le total devient
+    # une taille d'allocation absurde ( teste : « overflow in static extent product » ).
+    capacites = [ ideale, 2 * ideale, 4 * ideale ]
+    temps_par_capacite = [ ( c, chrono( lambda c = c: construire_index( splats, ecran, capacite = c ) ) )
+                           for c in capacites ]
+
+    t_idx_devine = chrono( lambda: construire_index( splats, ecran, capacite = 512 ) )
+    t_idx_ideale = temps_par_capacite[ 0 ][ 1 ]
+    t_idx_csr    = chrono( lambda: construire_index_csr( splats, ecran )[ 2 ] )
+    t_rnd_remb   = chrono( lambda: rendre( splats, repere, ecran ) )
+    t_rnd_csr    = chrono( lambda: rendre_csr( splats, o, c, ids, ecran ) )
+
+    print( f"\n{p.nb} splats, {largeur}x{hauteur}, capacite ideale {ideale}, total CSR {total}" )
+    for cap, t in temps_par_capacite:
+        print( f"  index rembourre, capacite {cap:5d} ( {1024 * cap // 1024} entiers/tuile ) :"
+               f" {t * 1e3:8.2f} ms" )
+    print( f"  index rembourre ( capacite devinee 512 ) : {t_idx_devine * 1e3:8.2f} ms" )
+    print( f"  index rembourre ( capacite ideale )      : {t_idx_ideale * 1e3:8.2f} ms" )
+    print( f"  index CSR ( 2 passes + prefixe hote )    : {t_idx_csr * 1e3:8.2f} ms"
+           f"   -> x{t_idx_csr / t_idx_ideale:.2f} du rembourre ideal" )
+    print( f"  rendu sur index rembourre                : {t_rnd_remb * 1e3:8.2f} ms" )
+    print( f"  rendu sur index CSR                      : {t_rnd_csr * 1e3:8.2f} ms"
+           f"   -> x{t_rnd_csr / t_rnd_remb:.2f}" )
+    print( f"  TOTAL rembourre : {( t_idx_ideale + t_rnd_remb ) * 1e3:8.2f} ms" )
+    print( f"  TOTAL CSR       : {( t_idx_csr + t_rnd_csr ) * 1e3:8.2f} ms" )
+
+    p.results.update( idx_rembourre_ms = t_idx_ideale * 1e3, idx_csr_ms = t_idx_csr * 1e3,
+                      rendu_rembourre_ms = t_rnd_remb * 1e3, rendu_csr_ms = t_rnd_csr * 1e3,
+                      capacite_ideale = ideale, total_csr = total )

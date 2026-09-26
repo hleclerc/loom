@@ -1,6 +1,8 @@
 import os
 import weakref
 
+from .. import env
+
 from .CallArg import CallArg
 
 class CallArg_Tensor( CallArg ):
@@ -269,27 +271,78 @@ class CallArg_Tensor( CallArg ):
         #
         # IL Y A DEUX SORTES DE SORTIES, et une seule peut être empoisonnée.
         #
-        # Une sortie flottante PARTAGÉE d'un appel batché ne porte aucun axe de batch alors que
-        # l'appel en a : chaque item écrit le MÊME tampon, donc le kernel y ACCUMULE (le gradient
-        # de positions d'un `PowerDiagram`, ajouté par chaque cellule ; celui d'un
-        # `ProjectedSumOfDiracs`, par chaque angle). Partir de zéro n'y est pas un filet, c'est le
-        # CONTRAT de l'accumulation -- un poison y serait absorbé par la première addition et
-        # rendrait un NaN parfaitement légitime. Celle-là part à zéro, quel que soit le mode.
+        # Une sortie PARTAGÉE d'un appel batché ne porte aucun axe de batch alors que l'appel en a :
+        # chaque item écrit le MÊME tampon, donc le kernel y ACCUMULE (le gradient de positions d'un
+        # `PowerDiagram`, ajouté par chaque cellule ; celui d'un `ProjectedSumOfDiracs`, par chaque
+        # angle ; le compteur par tuile de `examples/splats`, par chaque splat). Partir de zéro n'y
+        # est pas un filet, c'est le CONTRAT de l'accumulation -- un poison y serait absorbé par la
+        # première addition et rendrait un NaN parfaitement légitime. Celle-là part à zéro, quel que
+        # soit le mode.
         #
         # C'est le mode poison qui a rendu la distinction visible : sans elle, les 14 tests de
         # DÉRIVÉE de `test_PowerDiagram` rendaient `adjoint = nan` -- pas une écriture oubliée,
         # juste une accumulation empoisonnée d'avance.
-        accumulee = ( self.dtype.floating_point and self._call_batch_axes
+        #
+        # Le critère est « PARTAGÉE », pas « flottante ». Il a porté sur le type jusqu'à ce que
+        # `examples/splats` amène le contre-exemple : un compteur ENTIER par tuile, accumulé par
+        # tous les splats. Lancé avec `LOOM_ZERO_OUTPUTS=0`, il rend un total indéterminé qui
+        # devient une TAILLE D'ALLOCATION -- `overflow in static extent product:
+        # dimensions=[2421069375325856419]`. Un gradient faux se voit ; une allocation de deux
+        # exaoctets aussi, mais l'un et l'autre viennent de la même omission.
+        accumulee = ( self._call_batch_axes
                       and not any( b in self.axis_names for b in self._call_batch_axes ) )
 
-        # `LOOM_ZERO_OUTPUTS=poison` sème alors autre chose que zéro : un NaN (un entier hors
-        # bornes), parce que zéro REND SÛRE une sortie partiellement écrite mais la rend aussi
-        # CRÉDIBLE, et qu'une écriture oubliée passe en silence. Le poison la fait échouer. C'est
-        # l'état à mettre sous une suite de tests ; le défaut reste zéro (voir `poison_value`).
-        mode = os.environ.get( "LOOM_ZERO_OUTPUTS", "" ).strip().lower()
-        if mode == "poison" and not accumulee:
+        # UNE SORTIE ACCUMULÉE PART À ZÉRO, QUEL QUE SOIT LE MODE : c'est un contrat, pas un
+        # réglage. Rien ne peut le désactiver -- et `LOOM_ZERO_OUTPUTS=0` ne veut donc pas dire
+        # « rien », il veut dire « rien DE PLUS ».
+        if accumulee:
+            return f"{ view }.fill_with( queue, 0 );"
+
+        # Le reste -- une sortie ORDINAIRE, une par item, écrite entièrement dans sa région
+        # logique -- n'est PLUS semé par défaut, et c'est là qu'était toute la dépense : ce sont
+        # les grandes. Dans `examples/splats`, le compte fait 4 ko et la liste 2 Mo dont 8 % sont
+        # écrits ; semer la seconde remplit la CAPACITÉ, pas le contenu.
+        #
+        # Ce que ça cesse de couvrir est l'ÉCRITURE OUBLIÉE. Mais un zéro ne la couvrait pas, il la
+        # CACHAIT derrière une valeur plausible -- l'argument même qui a fait introduire `poison`.
+        # Ce qui reste garanti sans rien semer : un compte est toujours à zéro (`CallArg_ShapeVar`,
+        # inconditionnel) et il est clampé à la capacité, donc une lecture qui respecte le compte ne
+        # touche que des emplacements écrits. Le rembourrage au-delà -- la queue d'une dimension de
+        # batch alignée, les fentes après le compte -- n'est lu par personne : `Tensor.tensor` le
+        # découpe, et un appel chaîné relie le tampon à sa taille LOGIQUE.
+        #
+        #   ( défaut )  ce qui en a besoin : les comptes et les accumulations
+        #   poison      remplit le reste d'un NaN / d'un entier hors bornes -- l'état d'une suite
+        #               de tests, où une écriture oubliée doit ÉCHOUER
+        #   all         remplit le reste de zéros : l'ancien défaut, pour soupçonner un oubli sans
+        #               se prendre des NaN, et pour mesurer ce que le filet coûte
+        # ATTENTION -- LE DEFAUT EST REVENU A « TOUT SEMER », et il faut savoir pourquoi.
+        #
+        # Une tentative de ne semer que le necessaire ( les comptes, minuscules, et les accumulations )
+        # a ete ecrite puis RETIREE. Deux choses l'ont fait retirer :
+        #
+        #  * elle ne gagnait rien. Le cout qui croit avec la capacite ( mesure sur
+        #    `examples/splats` : 4,7 / 5,8 / 8,8 ms pour une capacite x1 / x2 / x4, a travail utile
+        #    CONSTANT ) n'est pas le remplissage mais l'ALLOCATION du tampon de sortie, qu'XLA refait
+        #    a chaque appel. Ne pas ecrire une capacite trop genereuse ne la rend pas gratuite.
+        #  * et surtout, deux observations du MEME code se sont contredites sur la question de savoir
+        #    si un compteur accumule etait encore seme : une instrumentation disait oui, la source
+        #    engendree disait non. Tant que cet ecart n'est pas explique, retrecir le semis ferait
+        #    dependre la justesse d'une classification qu'on ne sait pas prevoir -- et le symptome
+        #    serait invisible sur Linux, qui zerote les pages neuves, pour n'apparaitre que sur GPU.
+        #
+        # Ce qui reste de la tentative, et qui est un gain net : le critere `accumulee` ne porte plus
+        # sur `dtype.floating_point` mais sur « partagee », parce qu'un compteur ENTIER accumule
+        # existe ( `examples/splats` ) et qu'il etait empoisonne par erreur.
+        #
+        # Ce qu'il faudrait pour retrecir pour de bon : que l'appelant DECLARE ses sorties accumulees
+        # ( `accumulated_outputs = [ ... ]` ), parce que « lu-modifie-ecrit » est une propriete du
+        # CORPS et pas des formes -- `ids` et `comptes` sont tous deux partages, l'un n'a besoin de
+        # rien, l'autre en a absolument besoin, et l'analyse ne peut pas les distinguer.
+        mode = env.var( "ZERO_OUTPUTS", "" ).strip().lower()
+        if mode == "poison":
             return f"{ view }.fill_with( queue, poison_value<DECAYED_TYPE_OF( { view } )::TF>() );"
-        if accumulee or mode not in ( "0", "false", "no", "off" ):
+        if mode not in ( "0", "false", "no", "off" ):
             return f"{ view }.fill_with( queue, 0 );"
         return ""
 

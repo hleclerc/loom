@@ -31,6 +31,8 @@ import subprocess
 import sys
 import tempfile
 
+from .. import env
+
 
 def _decoupe_commandes( restes ):
     """`[ "--", "a", "b", "--", "c" ]` -> `[ [ "a", "b" ], [ "c" ] ]`."""
@@ -62,12 +64,12 @@ def record( args, commandes ):
     out.mkdir( parents = True, exist_ok = True )
 
     with tempfile.TemporaryDirectory( prefix = "loom-catalogue-record-" ) as build:
-        env = dict( os.environ )
-        env.update( SDOT_CATALOGUE_RECORD = str( out ), SDOT_BUILD_DIR = build,
-                    SDOT_KERNELS = "atelier" )
+        environnement = dict( os.environ )
+        environnement.update( LOOM_CATALOGUE_RECORD = str( out ), LOOM_BUILD_DIR = build,
+                              LOOM_KERNELS = "atelier" )
         for cmd in commandes:
             print( "$", " ".join( cmd ), flush = True )
-            if subprocess.run( cmd, env = env ).returncode:
+            if subprocess.run( cmd, env = environnement ).returncode:
                 raise SystemExit( "le relevé a échoué" )
 
     nb = len( list( ( out / args.device ).glob( "*.c*" ) ) ) if ( out / args.device ).is_dir() else 0
@@ -79,12 +81,12 @@ def compile_( args ):
     with tempfile.TemporaryDirectory( prefix = "loom-catalogue-build-" ) as build:
         # la variante / les architectures vont au compilateur par l'environnement, et le build a
         # son propre répertoire : rien de la machine ne doit entrer dans la bibliothèque
-        os.environ[ "SDOT_BUILD_DIR" ] = build
+        env.pose( "BUILD_DIR", build )
         if args.device == "cpu":
-            os.environ[ "SDOT_CPU_VARIANT" ] = args.variant
+            env.pose( "CPU_VARIANT", args.variant )
             tag = f"cpu-{ args.variant }"
         else:
-            os.environ[ "SDOT_CUDA_ARCH" ] = args.arch
+            env.pose( "CUDA_ARCH", args.arch )
             tag = "cuda"
 
         # les modules qui enregistrent leurs racines C++ : sans eux, les `#include` du relevé ne

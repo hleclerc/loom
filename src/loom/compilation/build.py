@@ -49,17 +49,18 @@ import os
 
 from . import build_dir, include_dirs, _dev_repo_root
 from ..util.encode_base_62 import encode_base_62
+from .. import env
 
 
 def ninja_path() -> str:
-    p = os.getenv( "SDOT_NINJA" ) or shutil.which( "ninja" )
+    p = env.var( "NINJA" ) or shutil.which( "ninja" )
     if p is None:
         # the `ninja` pip package ships the binary next to the interpreter's scripts
         candidate = Path( sys.executable ).parent / "ninja"
         if candidate.is_file():
             p = str( candidate )
     if p is None:
-        raise RuntimeError( "sdot: `ninja` introuvable (pip install ninja, ou SDOT_NINJA=/chemin/ninja)" )
+        raise RuntimeError( "loom : `ninja` introuvable (pip install ninja, ou LOOM_NINJA=/chemin/ninja)" )
     return p
 
 
@@ -195,10 +196,9 @@ class _Lock:
 
 
 def force_build() -> bool:
-    """`SDOT_FORCE_BUILD` : rebâtir les cibles demandées même si ninja les croit à jour -- pour
+    """`LOOM_FORCE_BUILD` : rebâtir les cibles demandées même si ninja les croit à jour -- pour
     quand la chaîne a changé d'une façon que les depfiles ne voient pas (un flag, un outil)."""
-    v = ( os.getenv( "SDOT_FORCE_BUILD" ) or "" ).strip().lower()
-    return v not in ( "", "0", "false", "no", "off" )
+    return env.flag( "FORCE_BUILD" )
 
 
 class _Graphe:
@@ -243,10 +243,10 @@ class _Graphe:
                         if i.endswith( ".o" ):
                             Path( i ).unlink( missing_ok = True )
 
-            # `SDOT_BUILD_JOBS` : le parallélisme (défaut : celui de ninja, tous les coeurs) -- un
+            # `LOOM_BUILD_JOBS` : le parallélisme (défaut : celui de ninja, tous les coeurs) -- un
             # catalogue CUDA compile cent unités d'un gigaoctet chacune, on ne les veut pas toutes
             # en même temps sur une machine partagée
-            jobs = os.getenv( "SDOT_BUILD_JOBS" )
+            jobs = env.var( "BUILD_JOBS" )
             cmd = [ ninja_path(), "-C", str( self.root ), "-f", str( ninja_file ),
                     *( [ "-j", jobs ] if jobs else [] ), *targets ]
             r = subprocess.run( cmd, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, text = True )

@@ -7,6 +7,7 @@ from .JaxFramework import JaxFramework
 from .Framework import Framework
 
 from ..devices.Device import Device
+from .. import env
 
 # `Dtype` n'est importe QUE dans les methodes qui s'en servent. Au niveau du module, il tire
 # `loom/tensor/__init__.py`, qui tire `ShapeVar`, qui fait `from ..drivers.driver import driver` :
@@ -49,12 +50,12 @@ class DriverProxy:
     Cpu | CudaGpu | AppleGpu
 
     Env variables that are taken into account
-        * SDOT_FRAMEWORK
-        * SDOT_DEVICE
-        * SDOT_FTYPE  -> float point type
-        * SDOT_ITYPE  -> integer type (signed)
+        * LOOM_FRAMEWORK
+        * LOOM_DEVICE
+        * LOOM_FTYPE  -> float point type
+        * LOOM_ITYPE  -> integer type (signed)
 
-        * SDOT_VERBOSE
+        * LOOM_VERBOSE
     """
 
     def __init__( self ):
@@ -66,13 +67,13 @@ class DriverProxy:
         self._ftype = None
         self._itype = None
 
-        if d := os.getenv( "SDOT_FRAMEWORK" ):
+        if d := env.var( "FRAMEWORK" ):
             self.framework = d
-        if d := os.getenv( "SDOT_DEVICE" ):
+        if d := env.var( "DEVICE" ):
             self.device = d
-        if d := os.getenv( "SDOT_FTYPE" ):
+        if d := env.var( "FTYPE" ):
             self.ftype = d
-        if d := os.getenv( "SDOT_ITYPE" ):
+        if d := env.var( "ITYPE" ):
             self.itype = d
 
 

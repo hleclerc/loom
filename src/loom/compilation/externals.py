@@ -8,9 +8,9 @@ sans paquet système ni étape à la main : sdot en dépend pour les solveurs li
 transport (`sdot/otplan/Lineaire.cpp`), et un catalogue de noyaux se bâtit avec ces mêmes
 versions, épinglées -- une archive et son SHA-256, pas une branche.
 
-Sans réseau (`SDOT_EXTERNALS=0`, ou un téléchargement qui échoue), l'externe manque et on le dit
+Sans réseau (`LOOM_EXTERNALS=0`, ou un téléchargement qui échoue), l'externe manque et on le dit
 UNE fois : la source qui l'attend se garde par `__has_include` et fait avec ce qu'elle a.
-`SDOT_EXT_DIR` place le cache ailleurs (une machine de build, un montage partagé).
+`LOOM_EXT_DIR` place le cache ailleurs (une machine de build, un montage partagé).
 """
 
 from pathlib import Path
@@ -22,6 +22,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+from .. import env
 
 
 class External:
@@ -51,7 +52,7 @@ def register_external( name, version, url, sha256, include = "" ):
 
 def ext_root() -> Path:
     from . import cache_root
-    override = os.getenv( "SDOT_EXT_DIR" )
+    override = env.var( "EXT_DIR" )
     return Path( override ).expanduser() if override else cache_root() / "ext"
 
 
@@ -90,7 +91,7 @@ def ensure( ext: External ) -> bool:
     """Vrai si `ext.include_dir` est là (déjà, ou après téléchargement)."""
     if ext.include_dir.is_dir():
         return True
-    if os.getenv( "SDOT_EXTERNALS", "1" ) in ( "0", "no", "off" ):
+    if not env.flag( "EXTERNALS", True ):
         return False
     try:
         _fetch( ext )

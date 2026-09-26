@@ -1,5 +1,6 @@
 from .Device import Device
 import os
+from .. import env
 
 
 class Cpu( Device ):
@@ -85,10 +86,10 @@ class Cpu( Device ):
 
 
 def _nb_workers():
-    """What `CpuQueue` will use: `SDOT_NB_THREADS` if set, else every hardware thread. The
+    """What `CpuQueue` will use: `LOOM_NB_THREADS` if set, else every hardware thread. The
     per-thread scratch is sized on this, so the two must agree."""
     try:
-        n = int( os.environ.get( "SDOT_NB_THREADS", "0" ) )
+        n = int( env.var( "NB_THREADS", "0" ) )
     except ValueError:
         n = 0
     return n if n > 0 else ( os.cpu_count() or 1 )

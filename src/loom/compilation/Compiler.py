@@ -13,7 +13,7 @@ Un compilateur répond à trois questions :
   * `describe()` -- ce que `sdot-toolchain` affiche.
 
 Réglages d'environnement, communs :
-  * `SDOT_CXX`     : le compilateur hôte (sinon `CXX`, sinon `c++` / `clang++` / `g++` sur PATH).
+  * `LOOM_CXX`     : le compilateur hôte (sinon `CXX`, sinon `c++` / `clang++` / `g++` sur PATH).
   * `SDOT_CXXFLAGS`: des flags de plus, découpés en mots -- l'échappatoire pour essayer un réglage
                      sans toucher au code. Ils entrent dans la signature.
   * `SDOT_CPU_VARIANT` : compiler pour un NIVEAU d'architecture nommé (`x86-64-v2` / `v3` / `v4`,
@@ -31,11 +31,12 @@ import shutil
 import shlex
 import sys
 import os
+from .. import env
 
 
 def env_cxxflags() -> list:
     """`SDOT_CXXFLAGS`, découpé en mots."""
-    return shlex.split( os.getenv( "SDOT_CXXFLAGS", "" ) )
+    return shlex.split( env.var( "CXXFLAGS", "" ) )
 
 
 def cpu_model() -> str:
@@ -91,8 +92,8 @@ def cpu_variant() -> str:
 
 
 def find_host_cxx() -> str | None:
-    """Le compilateur C++ hôte : `SDOT_CXX`, puis `CXX`, puis les noms usuels sur PATH."""
-    for var in ( "SDOT_CXX", "CXX" ):
+    """Le compilateur C++ hôte : `LOOM_CXX`, puis `CXX`, puis les noms usuels sur PATH."""
+    for var in ( "LOOM_CXX", "SDOT_CXX", "CXX" ):
         cxx = os.getenv( var )
         if cxx and ( shutil.which( cxx ) or Path( cxx ).is_file() ):
             return cxx
@@ -174,13 +175,13 @@ class HostCxx( Compiler ):
     def __init__( self, cxx: str | None = None, variant: str | None = None ):
         self.cxx = cxx or find_host_cxx()
         # `None` = cette machine (`-march=native`) ; un niveau nommé = un binaire portable
-        self.variant = variant or os.getenv( "SDOT_CPU_VARIANT" ) or None
+        self.variant = variant or env.var( "CPU_VARIANT" ) or None
 
     def is_available( self ) -> bool:
         return self.cxx is not None
 
     def march_flags( self ) -> list:
-        if os.environ.get( "SDOT_NO_MARCH_NATIVE" ):
+        if env.flag( "NO_MARCH_NATIVE" ):
             return []
         if any( f.startswith( "-march" ) or f.startswith( "-mcpu" ) for f in env_cxxflags() ):
             return []
@@ -215,7 +216,7 @@ class HostCxx( Compiler ):
 
     def _require( self ):
         if self.cxx is None:
-            raise RuntimeError( "sdot: aucun compilateur C++ trouvé (SDOT_CXX, CXX, ou c++/clang++/g++ sur PATH)" )
+            raise RuntimeError( "loom : aucun compilateur C++ trouvé (LOOM_CXX, CXX, ou c++/clang++/g++ sur PATH)" )
 
     def commands( self ):
         self._require()
@@ -262,7 +263,7 @@ def find_nvcc() -> str | None:
     """`nvcc` : `SDOT_NVCC`, puis celui du paquet pip `nvidia-cuda-nvcc` (le même toolkit que le
     plugin CUDA de Jax, et un compilateur sans rien installer sur la machine), puis
     `/usr/local/cuda/bin`, puis PATH."""
-    override = os.getenv( "SDOT_NVCC" )
+    override = env.var( "NVCC" )
     if override and Path( override ).is_file():
         return override
     import site
@@ -295,7 +296,7 @@ class Nvcc( Compiler ):
     def __init__( self, host: HostCxx | None = None, arch: str | None = None ):
         self.host = host or HostCxx()
         self.nvcc = find_nvcc()
-        self.arch = arch or os.getenv( "SDOT_CUDA_ARCH" ) or "native"
+        self.arch = arch or env.var( "CUDA_ARCH" ) or "native"
 
     def is_available( self ) -> bool:
         return self.nvcc is not None and self.host.is_available()
@@ -331,7 +332,7 @@ class Nvcc( Compiler ):
 
     def commands( self ):
         if not self.is_available():
-            raise RuntimeError( "sdot: nvcc introuvable (pip install nvidia-cuda-nvcc-cu13, ou SDOT_NVCC=/chemin/nvcc)" )
+            raise RuntimeError( "loom : nvcc introuvable (pip install nvidia-cuda-nvcc-cu13, ou LOOM_NVCC=/chemin/nvcc)" )
         # les `.cpp` gardent la commande hôte : un device CUDA compile les deux sortes de source
         res = dict( self.host.commands() )
         bsymbolic = [] if sys.platform == "darwin" else [ "-Xlinker", "-Bsymbolic" ]

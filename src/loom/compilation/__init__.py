@@ -4,6 +4,7 @@ import hashlib
 import getpass
 import sys
 import os
+from .. import env
 
 
 def _src_root():
@@ -97,14 +98,14 @@ def _fallback_build_dir( root: Path ):
         user = "anon"
     user = "".join( c if c.isalnum() else "_" for c in user )
 
-    return Path( tempfile.gettempdir() ) / f"sdot-build-{ user }-{ digest }"
+    return Path( tempfile.gettempdir() ) / f"loom-build-{ user }-{ digest }"
 
 
 def build_dir():
     """Directory where compilation artifacts (.o, .a, shared libs) are stored.
 
     Resolution order:
-      1. `SDOT_BUILD_DIR` if set (explicit override).
+      1. `LOOM_BUILD_DIR` if set (explicit override).
       2. Dev checkout: `<repo>/build` when writable, else a stable per-user directory
          under the system temp dir (used when the checkout is read-only).
       3. Installed wheel (no dev checkout): the per-user cache root (`cache_root`) -- never
@@ -112,11 +113,11 @@ def build_dir():
 
     The chosen directory is created if needed and returned as a `Path`.
 
-    The answer is CACHED per `SDOT_BUILD_DIR` value: it is asked on every generated header of every
+    The answer is CACHED per `LOOM_BUILD_DIR` value: it is asked on every generated header of every
     call (`generated_headers.shared_header`), and probing writability each time -- a `mkdir`, a
     probe file, an `unlink` -- was measured at a third of the per-call overhead of a small kernel.
     """
-    override = os.getenv( "SDOT_BUILD_DIR" )
+    override = env.var( "BUILD_DIR" )
     cached = _build_dir_cache.get( override )
     if cached is not None:
         return cached
@@ -150,28 +151,28 @@ def _resolve_build_dir( override ):
 
 
 def cache_root() -> Path:
-    """Le premier répertoire de cache utilisateur inscriptible : `SDOT_CACHE_DIR` s'il est mis,
-    sinon la convention de la plateforme (`~/.cache/sdot`, `~/Library/Caches/sdot`,
-    `%LOCALAPPDATA%/sdot/cache`), puis `/tmp` en dernier recours."""
+    """Le premier répertoire de cache utilisateur inscriptible : `LOOM_CACHE_DIR` s'il est mis,
+    sinon la convention de la plateforme (`~/.cache/loom`, `~/Library/Caches/loom`,
+    `%LOCALAPPDATA%/loom/cache`), puis `/tmp` en dernier recours."""
     candidates = []
-    override = os.getenv( "SDOT_CACHE_DIR" )
+    override = env.var( "CACHE_DIR" )
     if override:
         candidates.append( Path( override ).expanduser() )
     if sys.platform == "darwin":
-        candidates.append( Path.home() / "Library" / "Caches" / "sdot" )
+        candidates.append( Path.home() / "Library" / "Caches" / "loom" )
     elif os.name == "nt":
         base = os.getenv( "LOCALAPPDATA" ) or str( Path.home() / "AppData" / "Local" )
-        candidates.append( Path( base ) / "sdot" / "cache" )
+        candidates.append( Path( base ) / "loom" / "cache" )
     else:
         xdg = os.getenv( "XDG_CACHE_HOME" )
-        candidates.append( ( Path( xdg ) if xdg else Path.home() / ".cache" ) / "sdot" )
+        candidates.append( ( Path( xdg ) if xdg else Path.home() / ".cache" ) / "loom" )
     if os.name != "nt":
         uid = os.getuid() if hasattr( os, "getuid" ) else "shared"
-        candidates.append( Path( "/tmp" ) / f"sdot-cache-{ uid }" )
+        candidates.append( Path( "/tmp" ) / f"loom-cache-{ uid }" )
     for p in candidates:
         if _is_writable_dir( p ):
             return p
-    raise RuntimeError( "sdot: could not find a writable cache directory. Set SDOT_CACHE_DIR to an explicit writable path." )
+    raise RuntimeError( "loom : could not find a writable cache directory. Set LOOM_CACHE_DIR to an explicit writable path." )
 
 
 def include_dirs() -> list:

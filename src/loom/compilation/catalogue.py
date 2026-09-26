@@ -32,6 +32,7 @@ import json
 import os
 
 from ..util.encode_base_62 import encode_base_62
+from .. import env
 
 # tags -> répertoire (contenant `catalogue.json` et la bibliothèque), dans l'ordre d'enregistrement
 _catalogues = {}
@@ -40,9 +41,9 @@ _entries = {}  # tag -> dict( clé -> nom du point d'entrée )
 
 
 def policy() -> str:
-    v = ( os.getenv( "SDOT_KERNELS" ) or "auto" ).strip().lower()
+    v = env.var( "KERNELS", "auto" ).strip().lower()
     if v not in ( "auto", "catalogue", "atelier" ):
-        raise ValueError( f"SDOT_KERNELS={ v !r} : attendu auto, catalogue ou atelier" )
+        raise ValueError( f"LOOM_KERNELS={ v !r} : attendu auto, catalogue ou atelier" )
     return v
 
 
@@ -112,7 +113,7 @@ def record( source: str, sources, device ):
     """Dépose ce source dans `SDOT_CATALOGUE_RECORD` (si mis), avec ce qu'il faut pour le
     recompiler ailleurs : `<h>.<cpp|cu>`, `<h>.json` (device, sources de domaine), et les en-têtes
     générés du build courant (copiés en entier, ils sont petits et déterministes)."""
-    root = os.getenv( "SDOT_CATALOGUE_RECORD" )
+    root = env.var( "CATALOGUE_RECORD" )
     if not root:
         return
     from . import build_dir
@@ -129,7 +130,7 @@ def record( source: str, sources, device ):
         ( root / f"{ h }.json" ).write_text( json.dumps( { "sources": [ list( s ) for s in sources ] }, indent = 1 ) )
     # les en-têtes générés : la même arborescence, fusionnée (write-if-changed, comme à l'origine)
     gen_src = include_root()
-    gen_dst = Path( os.getenv( "SDOT_CATALOGUE_RECORD" ) ) / "include"
+    gen_dst = Path( env.var( "CATALOGUE_RECORD" ) ) / "include"
     for p in gen_src.rglob( "*.h" ):
         q = gen_dst / p.relative_to( gen_src )
         if not ( q.exists() and q.read_bytes() == p.read_bytes() ):

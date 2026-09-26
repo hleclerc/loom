@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy
 
 from loom import driver
-from loom.compilation.FfiCode import FfiCodeParallel
+from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
 from errand import test
 
@@ -20,10 +20,10 @@ def _scaled( scale ):
     num = Axis( ShapeVar( 3 ), name = "num" )
     res = IntTensor[ num ]()
     driver.call(
-        FfiCodeParallel( name = f"test_sources_scaled_{ scale }",
-            fwd_code = "for ( int i = 0; i < 3; ++i ) res( i ) = scaled( i + 1 );",
+        FfiCode( code = "for ( int i = 0; i < 3; ++i ) res( i ) = scaled( i + 1 );",
             includes = [ str( HERE / "scaled.h" ) ],
             sources = [ ( str( HERE / "scaled.cpp" ), { "SCALE": str( scale ) } ) ] ),
+        name = f"test_sources_scaled_{ scale }",
         output_attributes = [ "res" ],
         res = res,
     )

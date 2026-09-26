@@ -24,7 +24,7 @@ import loom.compilation as compilation
 compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
 
 from loom import Aggregate, Axis, CtShapeVar, IntTensor, RealTensor, driver
-from loom.compilation.FfiCode import FfiCodeParallel
+from loom.compilation.FfiCode import FfiCode
 from loom.tensor import new_batch_axis
 
 
@@ -63,19 +63,23 @@ def axes( n ):
     return grille.y, grille.x
 
 
-# UN SEUL noyau : `fwd_code` fait le pas, `bwd_code` rend les deux gradients. Les deux se
-# contentent d'appeler l'en-tete -- c'est le C++ qu'on avait deja qui travaille.
-_code = FfiCodeParallel(
-    name = "diffusion_pas",
+# DEUX noyaux : l'aller fait le pas, le retour rend les deux gradients. Les deux se
+# contentent d'appeler l'en-tete -- c'est le C++ qu'on avait deja qui travaille. C'est
+# l'APPEL qui les prend tous les deux, et qui porte le nom ( voir `FfiCode` ).
+_avant = FfiCode(
     includes = [ "diffusion/pas.h" ],
-    fwd_code = """
+    code = """
         const SI n = SI( grille.nx ), m = SI( grille.ny );
         const SI p = SI( cellules.rang( batch_index ) ), j = p / n, i = p % n;
 
         suivant( y = j, x = i ) = diffusion::pas_explicite(
             grille.temperature, grille.diffusivite, j, i, m, n, coef );
     """,
-    bwd_code = """
+)
+
+_arriere = FfiCode(
+    includes = [ "diffusion/pas.h" ],
+    code = """
         const SI n = SI( grille.nx ), m = SI( grille.ny );
         const SI p = SI( cellules.rang( batch_index ) ), j = p / n, i = p % n;
 
@@ -126,7 +130,9 @@ def pas( u, k, coef ):
     suivant = RealTensor[ grille.y, grille.x ]()
 
     driver.call(
-        _code,
+        _avant,
+        _arriere,
+        name = "diffusion_pas",
         grille = grille,
         cellules = cellules,
         coef = RealTensor( float( coef ) ),

@@ -357,7 +357,7 @@ def _render_call( code, ca, device ):
         queue_decl    = device.cpp_queue_decl(),
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
-        preamble      = code.preamble_for( "fwd", ca ),
+        preamble      = code.preamble_for( ca ),
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'
                                  for n in ca.axis_names ),
@@ -365,7 +365,7 @@ def _render_call( code, ca, device ):
         batch_indices = _batch_indices_decl( ca ),
         decls         = "\n".join( decls ),
         seeds         = "\n".join( s for s in seeds if s ),
-        body          = code.code_for( "fwd", ca ),
+        body          = code.code_for( ca ),
         binds         = binds,
     )
     return source, inputs, outputs, attrs, tuple( sources )
@@ -445,7 +445,7 @@ def call( code, ca, device, prefix = "" ):
 
     When `code` has a backward, the call is made DIFFERENTIABLE: Jax is given a VJP rule
     (`jax.custom_vjp`) whose backward is itself an ordinary kernel call (see `_call_backward`)."""
-    if code.has_code_for( "bwd" ):
+    if code.has_backward:
         outputs, results = _call_with_vjp( code, ca, device, prefix )
     else:
         outputs, results = _run( code, ca, device, prefix )
@@ -688,9 +688,9 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
         kwargs[ "grad_for_" + name ] = grad
 
     # the backward runs as an ordinary forward whose body is our backward one -- of the same kind,
-    # so a `FfiCodeParallel` scaffolds it over the residual+gradient arguments just as it did the
+    # so a `FfiCode` scaffolds it over the residual+gradient arguments just as it did the
     # forward over the primal ones.
-    bwd_code = code.for_backward()
+    bwd_kernel = code.for_backward()
     # the forward's `input_exceptions` hold for the backward too: they say what THIS KERNEL has no
     # business touching (`Cell.measure` never reads the H-representation), and the adjoint of a body
     # that does not read something does not read it either. Passing them on is not an optimization
@@ -712,7 +712,7 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
     bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
                                output_attribute_exceptions = bwd_output_exceptions,
                                input_exceptions = bwd_input_exceptions )
-    bwd_outputs, bwd_results = _run( bwd_code, bwd_ca, device, prefix + "bwd_" )
+    bwd_outputs, bwd_results = _run( bwd_kernel, bwd_ca, device, prefix + "bwd_" )
 
     result_of = { id( o.inst ): r for o, r in zip( bwd_outputs, bwd_results ) if hasattr( o, "inst" ) }
 

@@ -1,4 +1,4 @@
-"""La facilité « kernel de GROUPE » (`FfiCodeParallel( group_size = ... )`), pour elle-même.
+"""La facilité « kernel de GROUPE » (`FfiCode( group_size = ... )`), pour elle-même.
 
 Elle n'était exercée que par `OtPlan1d`, à travers un tri radix coopératif et un balayage de
 transport optimal : quand elle casse, le symptôme est un coût de transport faux de 3 %, ce qui
@@ -14,7 +14,7 @@ ici, à un endroit qui le nomme.
 import numpy
 
 from loom import driver
-from loom.compilation.FfiCode import FfiCodeParallel
+from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
 from errand import test
 
@@ -30,8 +30,7 @@ def _sum_over_lanes( group_size ):
     res = IntTensor[ num_group ]()
 
     driver.call(
-        FfiCodeParallel( name = f"test_group_kernel_{ group_size }",
-            fwd_code = """
+        FfiCode( code = """
                 local_scratch[ local_index ] = local_index;
                 group_barrier( group );
                 if ( local_index == 0 ) {
@@ -41,9 +40,10 @@ def _sum_over_lanes( group_size ):
                     res( group_index ) = s;
                 }
             """,
-            thread_cap = "res.shape( 0 )",
-            group_size = str( group_size ),
-            local_mem_elems = str( group_size ) ),
+            max_nb_threads = "return res.shape( 0 );",
+            group_size = f"return { group_size };",
+            local_mem_elems = f"return { group_size };" ),
+        name = f"test_group_kernel_{ group_size }",
         output_attributes = [ "res" ],
         res = res,
     )
@@ -69,14 +69,14 @@ def _runtime_subgroup_width( group_size ):
     res = IntTensor[ num_group ]()
 
     driver.call(
-        FfiCodeParallel( name = f"test_group_sgw_{ group_size }",
-            fwd_code = """
+        FfiCode( code = """
                 if ( local_index == 0 )
                     res( group_index ) = SI( sub_group.get_local_linear_range() );
             """,
-            thread_cap = "res.shape( 0 )",
-            group_size = str( group_size ),
-            local_mem_elems = str( group_size ) ),
+            max_nb_threads = "return res.shape( 0 );",
+            group_size = f"return { group_size };",
+            local_mem_elems = f"return { group_size };" ),
+        name = f"test_group_sgw_{ group_size }",
         output_attributes = [ "res" ],
         res = res,
     )
@@ -104,11 +104,11 @@ def _probe( group_size, expr, tag ):
     num_lane = Axis( ShapeVar( group_size ), name = "num_lane" )
     res = IntTensor[ num_lane ]()
     driver.call(
-        FfiCodeParallel( name = f"probe_sg_{ group_size }_{ tag }",
-            fwd_code = f"res( local_index ) = SI( { expr } );",
-            thread_cap = "1",
-            group_size = str( group_size ),
-            local_mem_elems = str( group_size ) ),
+        FfiCode( code = f"res( local_index ) = SI( { expr } );",
+            max_nb_threads = "return 1;",
+            group_size = f"return { group_size };",
+            local_mem_elems = f"return { group_size };" ),
+        name = f"probe_sg_{ group_size }_{ tag }",
         output_attributes = [ "res" ],
         res = res,
     )

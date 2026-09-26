@@ -10,7 +10,7 @@ que, dans loom, est général, et qu'est-ce qui n'est que du sdot déguisé ? »
 
 ```
 include/diffusion/pas.h   le C++ qu'on avait DÉJÀ : la physique et ses deux adjoints
-diffusion.py              l'enrobage loom : deux agrégats, un noyau, ~40 lignes utiles
+diffusion.py              l'enrobage loom : deux agrégats, deux noyaux, ~40 lignes utiles
 test_diffusion.py         les tests
 ```
 
@@ -45,7 +45,7 @@ zéro silencieux.
 - **Le C++ existant n'a rien appris.** `TensorView` s'indexe positionnellement (`u( j, i )`), donc
   `pas.h` ne contient aucun vocabulaire loom : `HD`, `SI`, et c'est tout. Un en-tête qu'on avait
   déjà reste un en-tête qu'on avait déjà.
-- **Le VJP.** `bwd_code` est branché par `driver.grad` sans qu'on déclare quoi que ce soit, et les
+- **Le VJP.** L'adjoint est branché par `driver.grad` sans qu'on déclare quoi que ce soit, et les
   catégories `NoneTensor` / `ZeroTensor` font vraiment tomber les termes à la compilation.
 - **`register_include_root`** : un paquet tiers enregistre son propre `-I`, exactement comme sdot.
   loom ne connaît pas ses usagers par leur nom, et ça se vérifie.
@@ -58,7 +58,7 @@ zéro silencieux.
 1. **Tout s'appelle `sdot`.** Le C++ de loom vit dans `namespace sdot` ; les variables
    d'environnement sont `SDOT_BUILD_DIR`, `SDOT_CACHE_DIR`, `SDOT_KERNELS`, `SDOT_EXTERNALS` ; le
    cache est `~/.cache/sdot` ; les messages d'erreur disent « sdot: » ; le functor par défaut d'un
-   `FfiCodeParallel` sans nom s'appelle `sdot_fwd_kernel`. On installe loom et on reçoit sdot. Un
+   `FfiCode` sans nom s'appelait `sdot_fwd_kernel` (le nom est obligatoire depuis). On installe loom et on reçoit sdot. Un
    simple renommage — mais c'est la première chose que l'étranger voit.
 
 2. ~~**`driver.array( [ 0, 1, 2 ] )` rend des flottants.**~~ **Réglé** : le chemin documenté est la

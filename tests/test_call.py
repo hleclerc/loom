@@ -1,5 +1,5 @@
 from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, RealTensor, IntTensor
-from loom.compilation.FfiCode import FfiCodeParallel
+from loom.compilation.FfiCode import FfiCode
 from errand import test
 
 # An `@aggregate` instance is built BEFORE the call and passed as a plain kwarg. Inputs and
@@ -56,7 +56,7 @@ if test( "basic" ):
     cell = Cell1( nb_dims = 2 )
 
     # the body runs on a DEVICE, once per item of the call's batch (a single item here: a `vmap`
-    # is what will give it axes). `FfiCodeParallel` wraps it in a named functor and a
+    # is what will give it axes). `FfiCode` wraps it in a named functor and a
     # `run_parallel` over every argument of the call, on the device's queue (a typedef, since the
     # memory space a pointer lives in is part of its type).
     #
@@ -70,11 +70,12 @@ if test( "basic" ):
     # mapped along that axis ignores it. Unbatched, it is the EMPTY multi-index, and indexing by
     # it is a no-op. Hence one body, batched or not.
     driver.call(
-        FfiCodeParallel( name = "test_call_basic", fwd_code = """
+        FfiCode( code = """
         cell.nb_vertices( batch_index ).set( 1 );
         cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
         cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
         """ ),
+        name = "test_call_basic",
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
         output_capacities = { "cell.nb_vertices": 8 },   # => `vertex_positions` is allocated 8x2
@@ -97,9 +98,10 @@ if test( "basic" ):
     res = RealTensor[ cell.num_vertex ]()
 
     driver.call(
-        FfiCodeParallel( name = "test_call_basic_res", fwd_code = """
+        FfiCode( code = """
         res( batch_index, num_vertex = 0 ) = cell.nb_vertices( batch_index );
         """ ),
+        name = "test_call_basic_res",
         cell = cell,
         res = res,
         output_attributes = [ "res" ],
@@ -132,7 +134,7 @@ if test( "partial_init" ):
     cell = Cell2( nb_dims = 2 )
 
     driver.call(
-        FfiCodeParallel( name = "test_partial_init", fwd_code = """
+        FfiCode( code = """
         cell.nb_vertices( batch_index ).set( 1 );
         // a fresh output buffer is NOT guaranteed zero-initialized (see
         // `ProjectedSumOfDiracs::zero_position_grad`'s docstring for the general fact) --
@@ -144,6 +146,7 @@ if test( "partial_init" ):
         static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 1 );
         static_assert( DECAYED_TYPE_OF( cell.vertex_indices  .is_valid() )::value == 0 );
         """ ),
+        name = "test_partial_init",
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
         output_capacities = { "cell.nb_vertices": 8 },
@@ -177,20 +180,22 @@ if test( "input_exceptions" ):
     cell = Cell3( nb_dims = 2 )
 
     driver.call(
-        FfiCodeParallel( name = "test_input_exceptions_init", fwd_code = """
+        FfiCode( code = """
         cell.nb_vertices( batch_index ).set( 1 );
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
         """ ),
+        name = "test_input_exceptions_init",
         cell = cell,
         output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
         output_capacities = { "cell.nb_vertices": 8 },
     )
 
     driver.call(
-        FfiCodeParallel( name = "test_input_exceptions_use", fwd_code = """
+        FfiCode( code = """
         static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 0 );
         """ ),
+        name = "test_input_exceptions_use",
         cell = cell,
         input_exceptions = [ "cell.vertex_positions" ],
     )
@@ -217,7 +222,7 @@ if test( "two_instances" ):
     volu = Cell3( nb_dims = 3 )
 
     driver.call(
-        FfiCodeParallel( name = "two_instances", fwd_code = """
+        FfiCode( code = """
         // an index applies to a whole aggregate just as well as to one of its members:
         // `f( batch_index ).nb_vertices` and `flat.nb_vertices( batch_index )` are the
         // same thing. Handy when every member takes the same index.
@@ -232,6 +237,7 @@ if test( "two_instances" ):
         volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
         volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
         """ ),
+        name = "two_instances",
         flat = flat,
         volu = volu,
         output_attributes = [
@@ -273,7 +279,7 @@ if test( "nested" ):
     pair = Pair( left = { "nb_dims": 2 }, right = { "nb_dims": 3 } )
 
     driver.call(
-        FfiCodeParallel( name = "test_call_nested", fwd_code = """
+        FfiCode( code = """
         // indexing an aggregate indexes its members -- a nested one included, recursively.
         auto p = pair( batch_index );
         
@@ -289,6 +295,7 @@ if test( "nested" ):
         p.right.vertex_positions( num_vertex = 0, dim = 1 ) = 0;
         p.right.vertex_positions( num_vertex = 0, dim = 2 ) = 2;
         """ ),
+        name = "test_call_nested",
         pair = pair,
         output_attributes = [ "pair" ],   # a whole subtree can be named at once
         output_capacities = { "pair.left.nb_vertices": 8, "pair.right.nb_vertices": 4 },
@@ -315,13 +322,12 @@ if test( "vmap" ):
 
 
 
-    code = FfiCodeParallel( name = "test_call_vmap", fwd_code = """
+    noyau = FfiCode( code = """
     auto c = cell( batch_index );
     c.nb_vertices.set( 1 );
     c.vertex_positions( num_vertex = 0, dim = 0 ) = scale( batch_index, dim = 0 );
     c.vertex_positions( num_vertex = 0, dim = 1 ) = scale( batch_index, dim = 1 );
     """ )
-
     def positions_of( raw_scale ):
         cell = Cell5( nb_dims = 2 )
 
@@ -330,7 +336,8 @@ if test( "vmap" ):
         scale.set( raw_scale )
 
         driver.call(
-            code,
+            noyau,
+            name = "test_call_vmap",
             cell = cell,
             scale = scale,
             output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
@@ -369,7 +376,7 @@ if test( "capacity_overflow" ):
 
 
 
-    code = FfiCodeParallel( name = "test_call_overflow", fwd_code = """
+    noyau = FfiCode( code = """
     auto c = cell( batch_index );
     
     // the count may not fit -- and then what one READS BACK is the capacity, never more,
@@ -378,11 +385,11 @@ if test( "capacity_overflow" ):
     for ( SI n = 0; n < SI( c.nb_vertices ); ++n )
         c.vertex_positions( num_vertex = n, dim = 0 ) = n;
     """ )
-
     def cell_of( nb_wanted, capacity ):
         cell = Cell6( nb_dims = 2, nb_wanted = nb_wanted )
         driver.call(
-            code,
+            noyau,
+            name = "test_call_overflow",
             cell = cell,
             output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
             output_capacities = { "cell.nb_vertices": capacity },
@@ -414,7 +421,7 @@ if test( "capacity_overflow" ):
 
 
 if test( "der" ):
-    # a differentiable call: `fwd_code` computes the output, `bwd_code` the input gradients. The
+    # a differentiable call: `code` computes the output, `backward` the input gradients. The
     # backward is generated as an ORDINARY kernel call -- its inputs are the forward inputs and
     # outputs plus the output cotangents (`grad_for_out`), its output the input cotangent
     # (`grad_for_inp`). Jax reaches it through a `custom_vjp` rule.
@@ -424,21 +431,18 @@ if test( "der" ):
     # is a compile-time true), and a non-perturbed input gradient to a `NoneTensor`
     # (`grad_for_inp.is_valid()` a compile-time false) -- either lets the body drop a term at
     # compile time rather than move or multiply a buffer of zeros.
-    code = FfiCodeParallel( name = "test_call_der",
-        fwd_code = """
+    avant = FfiCode( code = """
             out = 2 * inp + 100;
-        """,
-        bwd_code = """
+        """ )
+    arriere = FfiCode( """
             if ( ! grad_for_out.surely_null() && grad_for_inp.is_valid() )
                 grad_for_inp = 2 * grad_for_out;
-        """,
-    )
-
+        """ )
     def fwd_of( x ):
         inp = RealTensor()
         inp.set( x )
         out = RealTensor()
-        driver.call( code, output_attributes = [ "out" ], out = out, inp = inp )
+        driver.call( avant, arriere, name = "test_call_der", output_attributes = [ "out" ], out = out, inp = inp )
         return out.raw
 
     # forward: 2 * 17 + 100 = 134
@@ -453,22 +457,19 @@ if test( "der_symbolic_zero" ):
     # two outputs, and a loss that uses only one of them: the cotangent of the UNUSED output is a
     # symbolic zero, so `grad_for_out_b` reaches the backward kernel as a `ZeroTensor` -- read as
     # 0, no buffer. The body multiplies by it and the term simply vanishes.
-    code = FfiCodeParallel( name = "test_call_der_sz",
-        fwd_code = """
+    avant = FfiCode( code = """
             out_a = 2 * inp;
             out_b = 3 * inp;
-        """,
-        bwd_code = """
+        """ )
+    arriere = FfiCode( """
             grad_for_inp = 2 * grad_for_out_a + 3 * grad_for_out_b;
-        """,
-    )
-
+        """ )
     def only_a( x ):
         inp = RealTensor()
         inp.set( x )
         out_a = RealTensor()
         out_b = RealTensor()
-        driver.call( code, output_attributes = [ "out_a", "out_b" ],
+        driver.call( avant, arriere, name = "test_call_der_sz", output_attributes = [ "out_a", "out_b" ],
                      out_a = out_a, out_b = out_b, inp = inp )
         return out_a.raw   # `out_b` is never used: its cotangent is a symbolic zero
 
@@ -482,11 +483,10 @@ if test( "der_non_perturbed" ):
     # constant, so Jax does not perturb it. Its gradient is never requested, so `grad_for_bias`
     # reaches the backward kernel as a `NoneTensor` -- `is_valid()` is a compile-time false, and
     # the body simply does not compute it (nor is a buffer allocated for it).
-    code = FfiCodeParallel( name = "test_call_der_np",
-        fwd_code = """
+    avant = FfiCode( code = """
             out = inp + bias;
-        """,
-        bwd_code = """
+        """ )
+    arriere = FfiCode( """
             // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
             // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
             static_assert( DECAYED_TYPE_OF( grad_for_inp .is_valid() )::value == 1 );
@@ -498,16 +498,14 @@ if test( "der_non_perturbed" ):
                 grad_for_inp = grad_for_out;
             if constexpr ( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value )
                 grad_for_bias = grad_for_out;
-        """,
-    )
-
+        """ )
     def loss( x ):
         inp = RealTensor()
         inp.set( x )
         bias = RealTensor()
         bias.set( driver.array( 100.0 ) )   # a constant: not a function of `x`, so non-perturbed
         out = RealTensor()
-        driver.call( code, output_attributes = [ "out" ], out = out, inp = inp, bias = bias )
+        driver.call( avant, arriere, name = "test_call_der_np", output_attributes = [ "out" ], out = out, inp = inp, bias = bias )
         return out.raw
 
     assert float( loss( driver.array( 5.0 ) ) ) == 105
@@ -524,24 +522,21 @@ if test( "der_shape_var" ):
     ax = Axis( n )
     ax.name = "n"   # a standalone axis: stamp the name the generated C++ uses (`DEFINE_AXIS( n )`)
 
-    code = FfiCodeParallel( name = "test_call_der_sv",
-        fwd_code = """
+    avant = FfiCode( code = """
             out( n = 0 ) = 2 * vec( n = 0 );
             out( n = 1 ) = 3 * vec( n = 1 );
-        """,
-        bwd_code = """
+        """ )
+    arriere = FfiCode( """
             if ( grad_for_vec.is_valid() && ! grad_for_out.surely_null() ) {
                 grad_for_vec( n = 0 ) = 2 * grad_for_out( n = 0 );
                 grad_for_vec( n = 1 ) = 3 * grad_for_out( n = 1 );
             }
-        """,
-    )
-
+        """ )
     def loss( x ):
         vec = RealTensor[ ax ]()
         vec.set( x )            # length-2 vector -> `n` is solved to 2 from the data
         out = RealTensor[ ax ]()
-        driver.call( code, output_attributes = [ "out" ], out = out, vec = vec )
+        driver.call( avant, arriere, name = "test_call_der_sv", output_attributes = [ "out" ], out = out, vec = vec )
         return out.raw.sum()    # loss = 2*vec[0] + 3*vec[1]
 
     assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
@@ -562,23 +557,20 @@ if test( "der_aggregate" ):
         nn   : CtShapeVar
 
 
-    code = FfiCodeParallel( name = "test_call_der_agg",
-        fwd_code = """
+    avant = FfiCode( code = """
             out = 2 * cell.data( n = 0 ) + 3 * cell.data( n = 1 );
-        """,
-        bwd_code = """
+        """ )
+    arriere = FfiCode( """
             if ( ! grad_for_out.surely_null() && grad_for_cell.data.is_valid() ) {
                 grad_for_cell.data( n = 0 ) = 2 * grad_for_out;
                 grad_for_cell.data( n = 1 ) = 3 * grad_for_out;
             }
-        """,
-    )
-
+        """ )
     def loss( x ):
         cell = Vec( nn = 2 )
         cell.data = x           # a float INPUT member
         out = RealTensor()          # a bare scalar output
-        driver.call( code, output_attributes = [ "out" ], out = out, cell = cell )
+        driver.call( avant, arriere, name = "test_call_der_agg", output_attributes = [ "out" ], out = out, cell = cell )
         return out.raw          # loss = 2*data[0] + 3*data[1]
 
     assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
@@ -610,18 +602,18 @@ if test( "batch_alignment_forced" ):
         nb_dims          : CtShapeVar
 
 
-    code = FfiCodeParallel( name = "test_call_batch_align", fwd_code = """
+    noyau = FfiCode( code = """
     auto c = cell( batch_index );
     c.nb_vertices.set( 1 );
     c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
     c.vertex_positions( num_vertex = 0, dim = 1 ) = c.scale( dim = 1 );
     """ )
-
     def run( alignment ):
         cell = Cell7( nb_dims = 2, batch_axes = [ new_batch_axis( 3 ) ] )
         cell.scale = driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] )
         driver.call(
-            code,
+            noyau,
+            name = "test_call_batch_align",
             cell = cell,
             output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
             output_capacities = { "cell.nb_vertices": 4 },
@@ -654,13 +646,12 @@ if test( "physical_axis_reorder" ):
     from loom.tensor import Storage
     from loom import Axis, ShapeVar, Tensor
 
-    code = FfiCodeParallel( name = "test_call_phys_reorder", fwd_code = """
+    noyau = FfiCode( code = """
     out( batch_index, row = 0, col = 0 ) = m( batch_index, row = 0, col = 0 );
     out( batch_index, row = 0, col = 1 ) = m( batch_index, row = 0, col = 1 );
     out( batch_index, row = 1, col = 0 ) = m( batch_index, row = 1, col = 0 );
     out( batch_index, row = 1, col = 1 ) = m( batch_index, row = 1, col = 1 );
     """ )
-
     row = Axis( ShapeVar( 2 ), name = "row" )
     col = Axis( ShapeVar( 2 ), name = "col" )
 
@@ -674,7 +665,7 @@ if test( "physical_axis_reorder" ):
     assert numpy.asarray( m.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
 
     out = RealTensor[ row, col ]()
-    driver.call( code, m = m, out = out, output_attributes = [ "out" ] )
+    driver.call( noyau, name = "test_call_phys_reorder", m = m, out = out, output_attributes = [ "out" ] )
 
     # the kernel read the permuted input by name and copied it: the logical value is preserved.
     assert numpy.asarray( out.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
@@ -700,7 +691,7 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
     out = RealTensor[ num ]()
 
     driver.call(
-        FfiCodeParallel( name = "test_call_fill", fwd_code = """
+        FfiCode( code = """
         // the same scalar whatever the index -- indexing a fill ignores the index
         out( batch_index, num = 0 ) = x( batch_index, num = 0 ) * f( batch_index, num = 0 );
         out( batch_index, num = 1 ) = x( batch_index, num = 1 ) * f( batch_index, num = 3 );
@@ -710,6 +701,7 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
         static_assert( ! std::is_same_v< decltype( f ), decltype( x ) > );
         out( batch_index, num = 3 ) = 0;
         """ ),
+        name = "test_call_fill",
         x = x, f = f, out = out,
         output_attributes = [ "out" ],
     )
@@ -735,7 +727,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
         nb_out    : ShapeVar     # written by the kernel -> a buffer: it is the result
         nb_wanted : ShapeVar     # prescribed, only read   -> crosses by value
 
-    code = FfiCodeParallel( name = "test_call_scalar_count", fwd_code = """
+    noyau = FfiCode( code = """
     auto c = cnt( batch_index );
     
     static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
@@ -747,9 +739,8 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     for ( SI n = 0; n < SI( c.nb_out ); ++n )
         c.out( num = n ) = 10 * n;
     """ )
-
     cnt = Counter( nb_wanted = 3 )
-    driver.call( code, cnt = cnt,
+    driver.call( noyau, name = "test_call_scalar_count", cnt = cnt,
                  output_attributes = [ "cnt.nb_out", "cnt.out" ],
                  output_capacities = { "cnt.nb_out": 8 } )
 
@@ -780,7 +771,8 @@ if test( "une_sortie_nue_est_semee" ):
 
         out = RealTensor[ ax ]()
         driver.call(
-            FfiCodeParallel( name = "test_seed_bare", fwd_code = "out( seed_n = 0 ) = 1;" ),
+            FfiCode( code = "out( seed_n = 0 ) = 1;" ),
+            name = "test_seed_bare",
             out = out,
             output_attributes = [ "out" ],
         )
@@ -814,12 +806,11 @@ if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
         val : RealTensor
 
 
-    code = FfiCodeParallel( name = "test_axe_canonique", fwd_code = "res.val( batch_index ) = 1;" )
-
+    noyau = FfiCode( code = "res.val( batch_index ) = 1;" )
     def un_appel():
         axe = new_batch_axis( 3, prefix = "essai" )
         res = Sortie( batch_axes = [ axe ] )
-        driver.call( code, res = res, output_attributes = [ "res" ] )
+        driver.call( noyau, name = "test_axe_canonique", res = res, output_attributes = [ "res" ] )
         return axe, res
 
     vivants = [ un_appel() ]                       # l'axe reste vivant : c'est le point

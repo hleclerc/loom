@@ -6,6 +6,13 @@
 
 namespace sdot {
 
+/// NOTE : plus personne n'appelle ces deux adaptateurs. Ils servaient à injecter dans un foncteur
+/// une géométrie de lancement DÉCIDÉE EN PYTHON (`FfiCode( thread_cap = "..." )`, une chaîne
+/// d'expression C++ rendue au site d'appel). La géométrie est maintenant écrite là où elle a un
+/// sens -- des méthodes du foncteur, que `_run_kernel` détecte directement (`requires`) -- donc
+/// le code engendré passe le foncteur tel quel. Ils restent pour un foncteur ÉCRIT À LA MAIN qui
+/// voudrait poser un plafond sans se déclarer de méthode.
+///
 /// Wrap a functor with an explicit `max_nb_threads` cap that `run_parallel` reads (`_run_kernel`) to
 /// bound the launched work-items to `min( nb_items, cap )` -- so a body's PER-THREAD scratch is sized
 /// on threads, not items. A generated body's LAMBDA cannot carry the hook, and a LOCAL struct cannot

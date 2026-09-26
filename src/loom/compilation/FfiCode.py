@@ -1,167 +1,162 @@
 class AbstractFfiCode:
-    """The C++ a call runs, behind two questions: `code_for( "fwd" | "bwd", call_args_analysis )`,
-    the statements inside the handler, and `preamble_for( ... )`, what must exist at namespace
-    scope before it (a kernel functor).
+    """Le C++ qu'un appel exécute, derrière deux questions : `code_for( call_args_analysis )`, les
+    instructions à l'intérieur du handler, et `preamble_for( ... )`, ce qui doit exister au niveau
+    du namespace avant lui (un foncteur).
 
-    A subclass may hand the body back VERBATIM (`FfiCode`) or GENERATE the scaffold around it from
-    what the call turns out to be (`FfiCodeParallel` renders a named functor from the body and a
-    `run_parallel` over the call's arguments). Either way the rest of the pipeline only ever asks
-    these two, so it never has to know which -- nor how much of the source was written by hand."""
+    Il n'y a pas de direction dans ces deux questions : un BACKWARD est un noyau à part entière,
+    que l'appel obtient par `for_backward()` et lance ensuite comme n'importe quel forward. Le
+    reste du pipeline ne connaît donc qu'un seul sens."""
 
-    def code_for( self, code_type: str, call_args_analysis ) -> str:
+    def code_for( self, call_args_analysis ) -> str:
         raise NotImplementedError
 
-    def preamble_for( self, code_type: str, call_args_analysis ) -> str:
-        """Namespace-scope C++ emitted before the handler. Nothing by default (a verbatim body
-        brings its own)."""
+    def preamble_for( self, call_args_analysis ) -> str:
+        """C++ de niveau namespace émis avant le handler. Rien par défaut (un corps verbatim
+        apporte le sien)."""
         return ""
 
 
 class FfiCode( AbstractFfiCode ):
-    """A C++ body, plus what the CALL must know to run it -- today: its batch axes and includes.
+    """Un noyau : le C++ qui s'exécute PAR ITEM, plus ce que l'appel doit savoir pour le lancer.
 
-    `batch_axes` is what a `vmap` adds: one named axis per mapping (`vmap_0`, `vmap_1`, ...).
-    It belongs here and not to the arguments because it is what changes the KERNEL: it is the
-    shape of `global_batch_indices`, hence the arity of the `batch_index` the body is handed.
-    WHICH arguments carry which axis is another matter (a mapping may leave an argument out) and
-    belongs to the call's arguments.
+    = Le corps, et rien que le corps
 
-    `includes` are extra headers the body needs (the free functions it calls, e.g.
-    `sdot/Cell/init_full.h`). They are emitted after the runtime's own includes, so the body can
-    lean on everything the generated source already brings in.
+    `code` est ce qui se passe POUR UN ITEM. Il devient l'`operator()` d'un foncteur NOMMÉ, au
+    niveau du namespace, dont les paramètres sont dérivés des arguments de l'appel : ajouter un
+    argument à l'appel le fait apparaître dans la signature ET dans le `run_parallel`, sans que le
+    corps change. C'est la bonne idée de tout ceci, et elle ne bouge pas.
 
-    `fwd_code` does not change when an axis is added -- that is the whole point (a batch index is
-    an ordinary index, and an empty one is a no-op). What changes is the generated source around
-    it, so the derived code compiles to a target of its own, for free (the target name is a hash
-    of the source).
+    Un foncteur nommé, et pas une lambda : un compilateur de device (nvcc) est à l'aise avec un
+    struct dont l'`operator()` est un template membre explicite, et bute sur une lambda qui
+    traverse vers du code device.
+
+    Trois noms sont RÉSERVÉS (injectés par l'échafaudage, ce ne sont pas des arguments d'appel) :
+    `batch_index` (le multi-indice de l'item), `thread_index` (le numéro du work-item,
+    `0..nb_threads-1`, stable sur tous les items que ce work-item traite -- c'est avec lui qu'on
+    indexe un scratch PAR FIL) et `nb_threads`. Un corps qui ne s'en sert pas les ignore. Un kwarg
+    de l'appel ne doit pas porter un de ces noms : il masquerait le paramètre injecté.
+
+    = Un noyau ne se contient pas lui-même
+
+    L'adjoint n'est PAS un champ de l'aller : c'est un autre noyau, et c'est l'APPEL qui en prend
+    plusieurs.
+
+        driver.call(
+            FfiCode( "le corps aller", max_nb_threads = "..." ),
+            FfiCode( "le corps retour", prologue = "..." ),      # optionnel
+            name = "update_outputs",
+            ... )
+
+    Il tourne sur d'autres tampons (les résidus et les cotangentes), fait un autre travail, et n'a
+    aucune raison de vouloir la même géométrie de lancement que l'aller -- un gather peut devenir
+    une accumulation, un balayage peut devenir un tri. Tant qu'il était une paire de champs `bwd_*`,
+    il héritait de force du plafond, du groupe et de la mémoire partagée de l'aller.
+
+    Le NOM est sur l'appel, pas sur le noyau : il identifie le couple (les deux foncteurs en
+    dérivent, `<name>_kernel` et `<name>_bwd_kernel`), il préfixe la cible compilée et il groupe le
+    journal des compilations. Le porter sur chaque noyau obligeait à en écrire deux et à les tenir
+    cohérents à la main.
+
+    = La géométrie de lancement est du C++, pas des chaînes évaluées ailleurs
+
+    `run_parallel` ne lit pas la géométrie sur un objet Python : il la DÉTECTE sur le foncteur
+    (`requires { func.max_nb_threads( args... ); }`, voir `run_parallel.cxx`), et ces hooks
+    reçoivent les arguments de l'appel. Ce sont donc de vraies fonctions C++, et c'est ainsi
+    qu'on les écrit ici : `max_nb_threads`, `group_size` et `local_mem_elems` sont des CORPS DE
+    MÉTHODE, émis seulement s'ils sont donnés, avec les arguments de l'appel en portée sous leurs
+    propres noms -- exactement comme le corps.
+
+      max_nb_threads = "return scratch.words.shape( 0 );"
+
+    Ce que ça achète, par rapport aux chaînes d'expression d'avant : la portée est visible (c'est
+    une signature), une faute est une erreur de compilation à l'endroit qu'on lit, et surtout le
+    calcul peut s'appuyer sur les CONSTANTES DE L'ALGORITHME, qui sont en C++. Le budget de
+    mémoire partagée d'un tri radix est une propriété de ce tri ; il n'a rien à faire dans une
+    f-string Python qui recopie `NB_BUCKETS` « kept in sync by hand ».
+
+    `max_nb_threads` borne le nombre de work-items (de GROUPES si `group_size` est donné)
+    lancés : un scratch PAR FIL est alors dimensionné sur les travailleurs concurrents et non sur
+    les items, donc un gros batch ne fait pas exploser la mémoire. Rien de tout ça n'entre dans la
+    source : ce sont des valeurs lues à l'EXÉCUTION, donc un même noyau compilé sert toutes les
+    machines.
+
+    `group_size` fait passer à un SECOND niveau de parallélisme : chaque item lancé devient un
+    work-GROUP de `group_size` voies coopérantes. Il EXIGE `local_mem_elems` (la taille, en
+    `int32`, du scratch de mémoire locale partagé par les voies) -- `run_parallel` ne prend le
+    chemin coopératif que si les deux hooks existent, donc l'un sans l'autre serait silencieusement
+    ignoré : c'est refusé ici. Le jeu des noms réservés change alors : `batch_index` garde son sens
+    (quel item ce GROUPE traite), et `thread_index`/`nb_threads` cèdent la place à `group_index`
+    (le numéro du groupe, stable sur les items qu'il enjambe -- c'est lui qui indexe un scratch PAR
+    GROUPE), `local_index` (le rang de la voie dans son groupe), `local_size`, `group` (pour
+    `group_barrier`), `local_scratch` (la vue `int32` partagée, dimensionnée par `local_mem_elems`,
+    dont l'accès sans course est l'affaire du corps) et `sub_group` (le niveau warp). Comme le
+    `group_index` d'un groupe -- donc sa ligne de scratch -- est RÉUTILISÉ d'un item à l'autre, un
+    corps DOIT finir par un `group_barrier` après sa dernière lecture de cette ligne.
+
+    = Le reste
+
+    `includes` : les en-têtes dont le corps a besoin, émis après ceux du runtime. `sources` : les
+    unités C++ qu'il LIE (`"sdot/x.cpp"` ou `( "sdot/x.cpp", { "DEF": "1" } )`), compilées une fois
+    par (source, defines, compilateur) et partagées par tous les noyaux qui les nomment.
+
+    `prologue` : une instruction C++ émise VERBATIM avant le lancement, dans la portée du
+    HANDLER -- où `queue` et les agrégats de l'appel sont déclarés. C'est la position d'une
+    pré-passe unique qu'un corps par item ne peut pas exprimer. Mettre une sortie accumulée à zéro
+    n'en fait plus partie : toute sortie part semée (voir `CallArg_Tensor.cpp_seed_member`).
+
+    = L'échappatoire : un corps qui est TOUT le handler
+
+    `FfiCode.handler( ... )` construit un noyau dont le corps n'est pas échafaudé mais recopié tel
+    quel dans le handler -- à lui d'appeler `run_parallel`, ou de ne pas le faire du tout. C'est ce
+    qu'il faut pour du code HÔTE qui a besoin de la `queue` et pilote lui-même son parallélisme :
+    le solveur de transport d'`OtPlan` est exactement ça (cent diagrammes dans un seul appel).
+    Rare, mais réel -- et jusqu'ici l'échappatoire existait sans que rien ne la nomme.
     """
 
-    def __init__( self, fwd_code, bwd_code = "", name = "", batch_axes = (), includes = (),
-                  thread_cap = None, group_size = None, local_mem_elems = None,
-                  fwd_setup_code = "", bwd_setup_code = "", sources = () ) -> None:
-        self._code = dict( fwd = fwd_code, bwd = bwd_code )
-        # the C++ units this body LINKS (`"sdot/x.cpp"` or `( "sdot/x.cpp", { "DEF": "1" } )`), as
-        # opposed to what it includes: compiled once per (source, defines, compiler) and shared by
-        # every kernel that names them -- see `make_library`.
+    def __init__( self, code = "", prologue = "", includes = (), sources = (),
+                  max_nb_threads = "", group_size = "", local_mem_elems = "",
+                  _scaffold = True ) -> None:
+        if group_size and not local_mem_elems:
+            raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
+                              "only takes the cooperative path when BOTH hooks exist, so this "
+                              "would be silently ignored" )
+        if local_mem_elems and not group_size:
+            raise ValueError( "FfiCode: `local_mem_elems` without `group_size` -- there is no "
+                              "work-group to share it" )
+
+        self.code = code
+        self.prologue = prologue
         self.sources = tuple( sources )
-        # a plain C++ STATEMENT emitted verbatim BEFORE the scaffolded call below (outside the
-        # per-item lambda, in the handler's own scope -- where a call's aggregate args are already
-        # declared, see `_render_call`'s `decls`). For a one-time, pre-launch step a per-item body
-        # cannot express: e.g. zeroing a buffer several items will ATOMICALLY accumulate into next
-        # (see `OtPlan1d`'s backward, `grad_for_plan.src_dist` -- a shared points-gradient buffer,
-        # accumulated across every angle, that Jax does not guarantee starts zeroed). Empty by
-        # default (a no-op statement position, nothing to run).
-        self._setup_code = dict( fwd = fwd_setup_code, bwd = bwd_setup_code )
-        self.batch_axes = tuple( batch_axes )
         self.includes = tuple( includes )
-        self.name = name
-        # cap on the number of work-items (work-GROUPS, if `group_size` is set) a `FfiCodeParallel`
-        # launches (see `code_for`): with it a body's PER-THREAD (or per-group) scratch is sized on
-        # concurrent workers, not items, so a huge batch does not blow up memory. A C++ EXPRESSION
-        # string, evaluated at the `run_parallel` call site (where the mapped args are in scope) --
-        # e.g. `"sorted_indices.shape( 0 )"`, the RUNTIME extent of the scratch's thread axis. Kept
-        # an expression, NOT a baked int, so the same compiled kernel serves every machine/RAM (the
-        # count is read at run time, never in the source hash). `None` = one work-item per item (the
-        # default). Carried through `for_backward` / `with_batch_axis` so the backward and every
-        # `vmap` keep the same cap.
-        self.thread_cap = thread_cap
-        # opt into a SECOND level of parallelism: each launched work-item becomes a work-GROUP
-        # of `group_size` cooperating lanes (a cooperative launch), instead of one lone
-        # work-item per `thread_cap` slot. Also a C++ EXPRESSION (same runtime-not-baked reasoning as
-        # `thread_cap`), e.g. `"num_local.shape( 0 )"`. Requires `thread_cap` (the cap becomes a cap
-        # on concurrent GROUPS, same RAM-budget meaning as before -- cooperating doesn't shrink the
-        # O(n)-per-concurrent-item scratch, it just puts more workers on each one). `None` (default)
-        # = no group, the plain per-item work-item scaffold (what every non-cooperative kernel uses).
-        self.group_size = group_size
-        # size (element count) of the raw `int32` local-memory scratch (`local_scratch`) the body
-        # gets when `group_size` is set -- another C++ EXPRESSION, typically composed from
-        # `group_size`'s own expression (e.g. `f"{group_size} * 256"` for a per-work-item histogram
-        # row of 256 buckets). Meaningless without `group_size`.
-        self.local_mem_elems = local_mem_elems
+        self._scaffold = _scaffold
 
-    def code_for( self, code_type: str, call_args_analysis ) -> str:
-        return self._code[ code_type ]
+        # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
+        # expressions évaluées dans une portée que l'appelant ne voit pas. L'ordre compte :
+        # `local_mem_elems` peut appeler `group_size`.
+        self.hooks = { hook: body for hook, body in
+                       ( ( "max_nb_threads", max_nb_threads ), ( "group_size", group_size ),
+                         ( "local_mem_elems", local_mem_elems ) ) if body }
 
-    def has_code_for( self, code_type: str ) -> bool:
-        """Whether there is a body for this direction. A `bwd` is what makes a call differentiable."""
-        return bool( self._code.get( code_type ) )
+    @classmethod
+    def handler( cls, code = "", **kwargs ):
+        """Un noyau dont le corps EST le handler : recopié tel quel, aucun foncteur, aucun
+        `run_parallel` engendré. Voir la docstring de la classe."""
+        if any( kwargs.get( k ) for k in ( "max_nb_threads", "group_size", "local_mem_elems" ) ):
+            raise ValueError( "FfiCode.handler: a verbatim handler launches itself, so it has no "
+                              "functor for a launch hook to live on" )
+        return cls( code, _scaffold = False, **kwargs )
 
-    def for_backward( self ):
-        """The backward as an ordinary FORWARD call: a code object of the SAME kind whose forward
-        body is our backward one. Run through the normal path, so a `FfiCodeParallel` scaffolds
-        the backward exactly as it does the forward (see `_call_backward`)."""
-        return type( self )( self._code[ "bwd" ], name = ( self.name or "sdot" ) + "_bwd",
-                             includes = self.includes, thread_cap = self.thread_cap,
-                             group_size = self.group_size, local_mem_elems = self.local_mem_elems,
-                             fwd_setup_code = self._setup_code[ "bwd" ], sources = self.sources )
+    # ---- ce que l'appel demande ( il passe le nom du foncteur, qu'il est seul à connaître ) ----
 
-    def with_batch_axis( self ):
-        """The same code, mapped over one more axis: what a `vmap` runs. The name is derived from
-        how many axes are already there, so a nested `vmap` gets a fresh one, deterministically.
-        `type( self )` keeps the subclass, so a `FfiCodeParallel` stays one under `vmap`."""
-        name = f"vmap_{ len( self.batch_axes ) }"
-        return name, type( self )( self._code[ "fwd" ], self._code[ "bwd" ], self.name,
-                                   self.batch_axes + ( name, ), self.includes,
-                                   thread_cap = self.thread_cap, group_size = self.group_size,
-                                   local_mem_elems = self.local_mem_elems,
-                                   fwd_setup_code = self._setup_code[ "fwd" ],
-                                   bwd_setup_code = self._setup_code[ "bwd" ], sources = self.sources )
-
-
-class FfiCodeParallel( FfiCode ):
-    """A body run over EVERY argument of the call, in parallel: `code_for` here is not the body
-    verbatim but a `run_parallel` scaffold GENERATED around it, from the arguments the call turns
-    out to have.
-
-    So the caller writes only what happens per item -- `cell( batch_index ).init_full();` -- and
-    the boilerplate is filled in from `call_args_analysis`: the functor's parameters (one per
-    argument, plus the `batch_index`), and the `<arg>_io, <arg>` pairs `run_parallel` maps over
-    (an io policy or tag, then the value). Add an argument to the call and it appears in both,
-    without the body changing.
-
-    The body becomes the `operator()` of a NAMED functor at namespace scope (`preamble_for`), not
-    a lambda: a device compiler (nvcc) is at ease with a plain struct whose `operator()` is an
-    explicit member template, and balks at lambdas crossing into device code. The parameter types
-    are template parameters, deduced at the call -- what `kernel_form` hands the kernel is
-    decided in C++ (the kernel-side memory space), so the functor does not spell them.
-
-    Three names are RESERVED (injected by the scaffold, not call arguments): `batch_index` (the
-    item's multi-index), `thread_index` (the work-item number, 0..nb_threads-1, stable over every
-    item that work-item handles -- index a PER-THREAD scratch with it) and `nb_threads` (their
-    count). A body indexes `scratch( thread_index )` to get a row exclusive to its work-item,
-    independent of the item count; a body that does not need them just ignores the two params. A
-    call kwarg must not be named `thread_index`/`nb_threads`/`batch_index` (they would shadow the
-    injected params) -- the scaffold OWNS `nb_threads`, so a call reads it from the body, never
-    passes it.
-
-    When `group_size` is set, a DIFFERENT set of names is reserved instead of `thread_index`/
-    `nb_threads`: `group_index` (the work-GROUP's number, 0..nb_groups-1, stable over the strided
-    loop -- the group-level analogue of `thread_index`, index a PER-GROUP scratch with it, e.g.
-    `scratch( group_index )`), `local_index` (the lane's rank WITHIN its work-group,
-    0..local_size-1), `local_size` (their count), `group` (the device's group handle -- for
-    `group_barrier( group )`, see `Group.h`), `local_scratch` (a raw `int32` view, sized by
-    `local_mem_elems`, SHARED by every lane of the group -- race-free access is the body's own
-    responsibility, via `local_index`/`group_barrier`) and `sub_group` (the warp-level handle for
-    THIS lane, a THIRD, warp-granularity level of cooperation, one lane wide on CPU).
-    `batch_index` keeps its meaning: which item (e.g. angle) this GROUP was assigned, one
-    work-group per item now instead of one work-item -- since a group's `group_index` (hence its
-    scratch row) is REUSED across every item it strides over, a body MUST end with a
-    `group_barrier` after its last read of that scratch, so a lane that finishes early does not
-    race ahead into the next item and overwrite the row while a slower sibling (e.g. the
-    `local_index==0` leader finishing a sequential sweep) is still reading it.
-    """
-
-    def functor_name( self, code_type: str ) -> str:
-        """The C++ identifier of the kernel functor: the code's name, made an identifier."""
-        base = "".join( c if c.isalnum() or c == "_" else "_" for c in ( self.name or "sdot" ) )
-        if base[ 0 ].isdigit():
-            base = "_" + base
-        return f"{ base }_{ code_type }_kernel"
+    @property
+    def cooperative( self ):
+        return "group_size" in self.hooks
 
     def _params( self, names ):
-        """The functor's parameters: the reserved ones, then one per call argument -- each with
-        its own template parameter, since their kernel-side types are decided in C++."""
-        if self.group_size is not None:
+        """Les paramètres de l'`operator()` : les réservés, puis un par argument de l'appel --
+        chacun avec son propre paramètre de template, puisque leur type côté kernel est décidé en
+        C++."""
+        if self.cooperative:
             reserved = [ ( "BatchIndex", "batch_index" ), ( "int", "group_index" ), ( "int", "local_index" ),
                          ( "int", "local_size" ), ( "Group", "group" ), ( "LocalScratch", "local_scratch" ),
                          ( "SubGroup", "sub_group" ) ]
@@ -171,61 +166,123 @@ class FfiCodeParallel( FfiCode ):
         tparams = [ t for t, _ in params if t != "int" ]
         return tparams, params
 
-    def preamble_for( self, code_type: str, call_args_analysis ) -> str:
-        body = self._code[ code_type ]
-        tparams, params = self._params( list( call_args_analysis.args ) )
-        return ( f"struct { self.functor_name( code_type ) } {{\n"
+    def _hook_methods( self, names ):
+        """Les hooks de lancement, en méthodes du foncteur. `run_parallel` les appelle avec les
+        arguments de l'appel (`func.max_nb_threads( args... )`, voir `run_parallel.cxx`), donc ils
+        prennent la même liste que l'`operator()`, sans les noms réservés -- et ils tournent CÔTÉ
+        HÔTE, avant le lancement, donc pas de `HD`."""
+        if not self.hooks:
+            return ""
+        tparams = ", ".join( f"class T_{ n }" for n in names )
+        params = ", ".join( f"T_{ n } { n }" for n in names )
+        res = ""
+        for hook, body in self.hooks.items():
+            res += ( f"    template<{ tparams }>\n"
+                     f"    int { hook }( { params } ) const {{\n"
+                     f"        { body }\n"
+                     f"    }}\n" )
+        return res
+
+    def preamble_for( self, call_args_analysis, functor ) -> str:
+        if not self._scaffold:
+            return ""
+        names = list( call_args_analysis.args )
+        tparams, params = self._params( names )
+        return ( f"struct { functor } {{\n"
+                 f"{ self._hook_methods( names ) }"
                  f"    template<{ ', '.join( 'class ' + t for t in tparams ) }>\n"
                  f"    HD void operator()( { ', '.join( f'{ t } { n }' for t, n in params ) } ) const {{\n"
-                 f"        { body }\n"
+                 f"        { self.code }\n"
                  f"    }}\n"
                  f"}};\n" )
 
-    def code_for( self, code_type: str, call_args_analysis ) -> str:
+    def code_for( self, call_args_analysis, functor ) -> str:
+        # émis AVANT le lancement, dans la portée du handler (voir la docstring) -- une pré-passe
+        # unique, pas un morceau du foncteur.
+        prologue = ( self.prologue + "\n" ) if self.prologue else ""
+
+        if not self._scaffold:
+            return prologue + self.code
+
         names = list( call_args_analysis.args )
         mapped = ", ".join( call_args_analysis.args[ n ].cpp_run_parallel_pair() for n in names )
-        functor = f"{ self.functor_name( code_type ) }{{}}"
-
-        # emitted BEFORE the scaffolded call, in the handler's own scope (see `FfiCode.__init__`'s
-        # docstring on `_setup_code`) -- a one-time, pre-launch statement, not part of the per-item
-        # functor.
-        setup = self._setup_code[ code_type ]
-        setup = ( setup + "\n" ) if setup else ""
-
-        # Cooperative: a work-GROUP per item, `group_size` lanes inside it sharing `local_scratch`.
-        # `with_group_kernel` wraps the functor with the `max_nb_threads` (cap on concurrent GROUPS
-        # -- same RAM-budget meaning `thread_cap` always had), `group_size` and `local_mem_elems`
-        # hooks `run_parallel` reads (see run_parallel.h). All three are C++ EXPRESSIONS read at
-        # RUN TIME (never baked ints), so one compiled kernel serves every machine.
-        if self.group_size is not None:
-            return ( f"{ setup }"
-                     "run_parallel(\n"
-                     "    queue,\n"
-                     "    global_batch_indices,\n"
-                     f"    with_group_kernel( { self.thread_cap }, { self.group_size }, { self.local_mem_elems }, { functor } ),\n"
-                     f"    { mapped }\n"
-                     ");" )
-
-        # No cap: the plain functor, one work-item per item (`run_parallel` then launches `nb_items`
-        # threads). This is the default and what every non-scratch kernel uses.
-        if self.thread_cap is None:
-            return ( f"{ setup }"
-                     "run_parallel(\n"
-                     "    queue,\n"
-                     "    global_batch_indices,\n"
-                     f"    { functor },\n"
-                     f"    { mapped }\n"
-                     ");" )
-
-        # Capped: `with_max_threads` wraps the functor with a `max_nb_threads` hook that `run_parallel`
-        # reads to launch at most `min( nb_items, cap )` work-items, each handling its share of items
-        # and reusing its `scratch( thread_index )` row. `thread_cap` is a C++ EXPRESSION read at RUN
-        # TIME (e.g. `sorted_indices.shape( 0 )`, the scratch's thread-axis extent), so the same
-        # compiled kernel serves every machine -- nothing about the thread count enters the source.
-        return ( f"{ setup }"
+        return ( f"{ prologue }"
                  "run_parallel(\n"
                  "    queue,\n"
                  "    global_batch_indices,\n"
-                 f"    with_max_threads( { self.thread_cap }, { functor } ),\n"
+                 f"    { functor }{{}},\n"
                  f"    { mapped }\n"
                  ");" )
+
+    def inheriting( self, other ):
+        """Nous, mais en prenant de `other` ce que nous n'avons pas dit : `includes` et `sources`
+        sont ce que l'APPEL compile et lie, identique dans les deux sens. La géométrie, elle, n'est
+        jamais héritée -- c'est tout l'intérêt de l'avoir sortie."""
+        if self.includes and self.sources:
+            return self
+        res = FfiCode( self.code, self.prologue, self.includes or other.includes,
+                       self.sources or other.sources, _scaffold = self._scaffold,
+                       **{ hook: self.hooks.get( hook, "" ) for hook in
+                           ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
+        return res
+
+
+class Kernels( AbstractFfiCode ):
+    """CE QU'UN APPEL LANCE : un noyau aller, un noyau retour optionnel, et le nom qui identifie
+    les deux.
+
+    Ce n'est pas une classe qu'on écrit soi-même : `driver.call` la construit à partir des
+    `FfiCode` qu'on lui passe. Elle existe parce que le pipeline a besoin d'UN objet à qui
+    demander « ton préambule », « ton corps », « ton adjoint », « toi avec un axe de plus » -- et
+    parce que ces trois dernières questions portent sur le COUPLE, pas sur un noyau.
+    """
+
+    def __init__( self, name, forward, backward = None, batch_axes = () ) -> None:
+        if not name:
+            raise ValueError( "driver.call: `name` is required -- it names the functors, prefixes "
+                              "the compiled target and groups the compilation journal" )
+        self.name = name
+        self.forward = forward
+        self.backward = backward
+        self.batch_axes = tuple( batch_axes )
+
+    # ce que le rendu de la source lit sur nous, directement
+    @property
+    def includes( self ):
+        return self.forward.includes
+
+    @property
+    def sources( self ):
+        return self.forward.sources
+
+    def functor_name( self ) -> str:
+        """L'identifiant C++ du foncteur : le nom de l'appel, rendu identifiant."""
+        base = "".join( c if c.isalnum() or c == "_" else "_" for c in self.name )
+        if base[ 0 ].isdigit():
+            base = "_" + base
+        return f"{ base }_kernel"
+
+    def preamble_for( self, call_args_analysis ) -> str:
+        return self.forward.preamble_for( call_args_analysis, self.functor_name() )
+
+    def code_for( self, call_args_analysis ) -> str:
+        return self.forward.code_for( call_args_analysis, self.functor_name() )
+
+    @property
+    def has_backward( self ):
+        """Avoir un adjoint est ce qui rend un appel différentiable."""
+        return self.backward is not None
+
+    def for_backward( self ):
+        """L'adjoint, prêt à être lancé comme un aller ordinaire : le retour devient le noyau
+        d'un couple sans retour, sous un nom dérivé. Il garde NOS axes de batch -- ce qu'un `vmap`
+        a ajouté à l'appel vaut pour les deux sens."""
+        return Kernels( self.name + "_bwd", self.backward.inheriting( self.forward ),
+                        batch_axes = self.batch_axes )
+
+    def with_batch_axis( self ):
+        """Le même couple, mappé sur un axe de plus : ce que lance un `vmap`. Le nom de l'axe est
+        dérivé du nombre déjà présents, donc un `vmap` imbriqué en prend un frais, de façon
+        déterministe."""
+        name = f"vmap_{ len( self.batch_axes ) }"
+        return name, Kernels( self.name, self.forward, self.backward, self.batch_axes + ( name, ) )

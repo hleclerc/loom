@@ -11,7 +11,7 @@ from .JaxFramework import JaxFramework
 from ..devices.Device import Device
 from ..tensor.Dtype import Dtype
 
-from ..compilation.FfiCode import FfiCode
+from ..compilation.FfiCode import FfiCode, Kernels
 from ..util.info import info
 from .JaxFfi import call_body, call as ffi_call
 
@@ -206,7 +206,7 @@ class JaxDriver:
         return jax.vmap( func )
 
     def grad( self, func, argnums = 0 ):
-        """Gradient of a scalar-valued `func`. A `driver.call` inside it reaches its `bwd_code`
+        """Gradient of a scalar-valued `func`. A `driver.call` inside it reaches its backward kernel
         through the VJP rule the call registers (see `JaxFfi._call_with_vjp`)."""
         return jax.grad( func, argnums = argnums )
 
@@ -331,8 +331,17 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, code : FfiCode | str, output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), **kwargs ):
-        """Run the C++ `code` on the objects passed as kwargs.
+    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), **kwargs ):
+        """Lance un ou deux `FfiCode` sur les objets passés en kwargs.
+
+        Un appel prend l'ALLER, et -- si la chose doit être dérivable -- le RETOUR, tous deux
+        positionnels et dans cet ordre. Ce sont deux noyaux à part entière : le retour tourne sur
+        d'autres tampons et peut vouloir sa propre géométrie de lancement (voir `FfiCode`). C'est
+        `name` qui les identifie tous les deux -- il nomme les foncteurs (`<name>_kernel` et
+        `<name>_bwd_kernel`), préfixe la cible compilée et groupe le journal des compilations.
+
+            driver.call( FfiCode( "..." ), FfiCode( "..." ), name = "mesure", cell = cell, ... )
+
 
         The objects are built by the caller; nothing is returned. Every list below names
         attributes by dotted path (`"cell.vertex_positions"`, or `"cell"` for a whole subtree).
@@ -370,12 +379,13 @@ class JaxDriver:
         `max( what was asked for, twice what we had )` -- a capacity exceeded once tends to be
         exceeded again, so we make room rather than track a count.
         """
-        if isinstance( code, str ):
-            code = FfiCode( code )
+        kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
+        if not 1 <= len( kernels ) <= 2:
+            raise ValueError( f"driver.call: expected one kernel (the forward) or two (forward, "
+                              f"backward), got { len( kernels ) }" )
+        code = Kernels( name, *kernels )
 
-        prefix = code.name
-        if prefix:
-            prefix += "_"
+        prefix = name + "_"
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
@@ -697,9 +707,9 @@ class JaxDriver:
     #     self._register_ffi_target( module_name, code, fai )
 
     #     # register vmap batching rule (once per module)
-    #     from .FfiCode import FfiCodeParallel
+    #     from .FfiCode import FfiCode
     #     from .JaxMlirPrimitive import _vmap_rules
-    #     if isinstance( code, FfiCodeParallel ) and module_name not in _vmap_rules:
+    #     if isinstance( code, FfiCode ) and module_name not in _vmap_rules:
     #         self._register_vmap_rule( module_name, code, args, fai )
 
     #     # forward helper
@@ -963,12 +973,12 @@ class JaxDriver:
     #     return ret
 
     # def _register_vmap_rule( self, module_name: str, code, orig_args: dict, fai: CallArgsAnalysis ):
-    #     """Register a JAX vmap batching rule for an FfiCodeParallel primitive.
+    #     """Register a JAX vmap batching rule for an FfiCode primitive.
 
     #     Type-stable convention (mirrors the C++ "Cell stays Cell" choice): vmap prepends one
     #     batch axis as a leading tensor dimension on every batched value, without changing any
     #     type. An aggregate gains an entry in its instance-level `batch_axes`; a Tensor Return
-    #     gains a leading axis; the FfiCodeParallel gains a prepended batch axis whose size is read
+    #     gains a leading axis; the FfiCode gains a prepended batch axis whose size is read
     #     at runtime from the first batched input's leading shape. The axis is never a struct member.
     #     """
     #     from jax.interpreters import batching as jax_batching
@@ -1265,7 +1275,7 @@ class JaxDriver:
     #     lines.append( "" )
 
     #     # Each FfiCode decides what to emit for Metal (FfiCodeCustom keeps its hand-written body;
-    #     # FfiCodeParallel generates an MSL kernel). No isinstance: uniform polymorphic interface.
+    #     # FfiCode generates an MSL kernel). No isinstance: uniform polymorphic interface.
     #     header_lines, body = code.metal_source( "fwd", fai, module_name )
     #     lines.extend( header_lines )
 

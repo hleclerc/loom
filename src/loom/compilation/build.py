@@ -15,8 +15,11 @@ réécrit `build/build.ninja` en entier et lance `ninja` sur ses cibles. Les reb
 verrou de fichier sérialise les processus : deux ninja concurrents dans un même répertoire se
 marcheraient dessus.
 
-Les règles viennent du compilateur du device (`Compiler.ninja_rules`) : c'est lui qui sait
-compiler un `.cpp` (et demain un `.cu`). Ce module ne connaît que des chemins et des commandes.
+Les commandes viennent du compilateur du device (`Compiler.commands`) : c'est lui qui sait compiler
+un `.cpp` ou un `.cu`, et il les donne sous forme de GABARITS D'ARGV à trous nommés (`{in}`,
+`{out}`, `{depfile}`, ...). Ce module en fait la SYNTAXE ninja (`_en_regle_ninja`) ; le même gabarit
+s'exécuterait directement ou s'écrirait dans un `compile_commands.json`. Les flags appartiennent au
+compilateur, la syntaxe à qui rend la commande -- et aucune des deux couches ne connaît l'autre.
 """
 from pathlib import Path
 import subprocess
@@ -48,6 +51,21 @@ def _short_hash( *parts ) -> str:
         h.update( str( p ).encode() )
         h.update( b"\0" )
     return encode_base_62( h.hexdigest() )[ :10 ]
+
+
+# les trous d'un gabarit d'argv (`Compiler.commands`), rendus en variables ninja. `{depfile}` est
+# `$out.d` : ninja veut le depfile à côté de la sortie, et le déclare dans la règle.
+_TROUS_NINJA = {
+    "{in}": "$in", "{out}": "$out", "{depfile}": "$out.d",
+    "{includes}": "$includes", "{defines}": "$defines", "{extra}": "$extra",
+    "{libs}": "$libs", "{soname}": "$soname",
+}
+
+
+def _en_regle_ninja( argv ) -> str:
+    """Un gabarit d'argv en ligne de commande ninja. Les arguments qui ne sont pas des trous
+    passent tels quels."""
+    return " ".join( _TROUS_NINJA.get( a, a ) for a in argv )
 
 
 def _ninja_escape( s: str ) -> str:
@@ -155,8 +173,8 @@ class Build:
         self._lock = _Lock( self.root )
         self._lock.__enter__()
         self.manifest = Manifest( self.root )
-        for name, ( command, depfile, description ) in self.compiler.ninja_rules().items():
-            self.manifest.add_rule( f"{ name }_{ self.sig }", command, depfile, description )
+        for name, ( argv, depfile, description ) in self.compiler.commands().items():
+            self.manifest.add_rule( f"{ name }_{ self.sig }", _en_regle_ninja( argv ), depfile, description )
 
     def close( self ):
         self._lock.__exit__( None, None, None )

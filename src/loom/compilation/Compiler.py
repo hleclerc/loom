@@ -5,7 +5,7 @@ autour du compilateur hôte pour CUDA. C'est le seul aiguillage -- `make_library
 device il sert, il demande une commande au compilateur et gère le cache disque, pareil pour tous.
 
 Un compilateur répond à trois questions :
-  * `ninja_rules()` / `rule_for( src )` -- comment compiler une source en objet, lier une
+  * `commands()` / `rule_for( src )` -- comment compiler une source en objet, lier une
     bibliothèque, un exécutable (voir `build.py`, qui ne connaît que des chemins et des règles) ;
   * `build_signature` -- ce qui, HORS du source, change le binaire (les flags, la machine quand
     `-march=native` en fait partie) ; `JaxFfi` la met dans le nom du `.so` avec le hash du source,
@@ -114,10 +114,17 @@ class Compiler:
     def build_signature( self ) -> str:
         raise NotImplementedError
 
-    def ninja_rules( self ) -> dict:
-        """nom -> ( commande ninja, a un depfile, description ). Attendus : une règle par sorte de source
-        (`rule_for`), `link_shared`, `link_executable`. Variables disponibles dans une commande
-        de compilation : `$includes`, `$defines`, `$extra` ; de liaison : `$libs`, `$soname`."""
+    def commands( self ) -> dict:
+        """nom -> ( GABARIT d'argv, a un depfile, description ). Attendus : une entrée par sorte de
+        source (`rule_for`), plus `link_shared` et `link_executable`.
+
+        Un gabarit est une LISTE d'arguments, pas une ligne de shell, et ses trous sont nommés :
+        `{in}`, `{out}`, `{depfile}`, `{includes}`, `{defines}`, `{extra}` pour une compilation ;
+        `{in}`, `{out}`, `{libs}`, `{soname}` pour une liaison.
+
+        C'est ce qui sépare LES FLAGS ( ici, la connaissance du compilateur ) de LA SYNTAXE ( là où
+        la commande est rendue ). Le même gabarit se rend en règle ninja, s'exécute directement, ou
+        s'écrit dans un `compile_commands.json` -- sans que cette couche sache laquelle."""
         raise NotImplementedError
 
     def rule_for( self, src: Path ) -> str:
@@ -210,16 +217,19 @@ class HostCxx( Compiler ):
         if self.cxx is None:
             raise RuntimeError( "sdot: aucun compilateur C++ trouvé (SDOT_CXX, CXX, ou c++/clang++/g++ sur PATH)" )
 
-    def ninja_rules( self ):
+    def commands( self ):
         self._require()
-        flags = " ".join( self.flags() )
         # ELF : lier chaque référence INTERNE à la définition locale -- pas de PLT pour les appels
         # d'une bibliothèque générée à ses propres instanciations de templates.
-        bsymbolic = "" if sys.platform == "darwin" else "-Wl,-Bsymbolic"
+        bsymbolic = [] if sys.platform == "darwin" else [ "-Wl,-Bsymbolic" ]
         return {
-            "cxx":             ( f"{ self.cxx } { flags } $includes $defines $extra -MMD -MF $out.d -c $in -o $out", True, "c++ $in $defines" ),
-            "link_shared":     ( f"{ self.cxx } -pthread -shared { bsymbolic } $soname -o $out $in $libs", False, "link $out" ),
-            "link_executable": ( f"{ self.cxx } -pthread -o $out $in $libs", False, "link $out" ),
+            "cxx":             ( [ self.cxx, *self.flags(), "{includes}", "{defines}", "{extra}",
+                                   "-MMD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
+                                 True, "c++ $in $defines" ),
+            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *bsymbolic, "{soname}",
+                                   "-o", "{out}", "{in}", "{libs}" ], False, "link $out" ),
+            "link_executable": ( [ self.cxx, "-pthread", "-o", "{out}", "{in}", "{libs}" ],
+                                 False, "link $out" ),
         }
 
     def rule_for( self, src ):
@@ -319,16 +329,21 @@ class Nvcc( Compiler ):
     def build_signature( self ) -> str:
         return f"nvcc:{ self.nvcc }|" + " ".join( self.flags() ) + "|" + self.host.build_signature
 
-    def ninja_rules( self ):
+    def commands( self ):
         if not self.is_available():
             raise RuntimeError( "sdot: nvcc introuvable (pip install nvidia-cuda-nvcc-cu13, ou SDOT_NVCC=/chemin/nvcc)" )
-        rules = dict( self.host.ninja_rules() )
-        flags = " ".join( self.flags() )
-        bsymbolic = "" if sys.platform == "darwin" else "-Xlinker -Bsymbolic"
-        rules[ "nvcc" ]            = ( f"{ self.nvcc } { flags } $includes $defines $extra -MD -MF $out.d -c $in -o $out", True, "nvcc $in $defines" )
-        rules[ "link_shared" ]     = ( f"{ self.nvcc } -ccbin={ self.host.cxx } -shared { bsymbolic } $soname -o $out $in $libs", False, "link $out" )
-        rules[ "link_executable" ] = ( f"{ self.nvcc } -ccbin={ self.host.cxx } -o $out $in $libs", False, "link $out" )
-        return rules
+        # les `.cpp` gardent la commande hôte : un device CUDA compile les deux sortes de source
+        res = dict( self.host.commands() )
+        bsymbolic = [] if sys.platform == "darwin" else [ "-Xlinker", "-Bsymbolic" ]
+        ccbin = f"-ccbin={ self.host.cxx }"
+        res[ "nvcc" ]            = ( [ self.nvcc, *self.flags(), "{includes}", "{defines}", "{extra}",
+                                       "-MD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
+                                     True, "nvcc $in $defines" )
+        res[ "link_shared" ]     = ( [ self.nvcc, ccbin, "-shared", *bsymbolic, "{soname}",
+                                       "-o", "{out}", "{in}", "{libs}" ], False, "link $out" )
+        res[ "link_executable" ] = ( [ self.nvcc, ccbin, "-o", "{out}", "{in}", "{libs}" ],
+                                     False, "link $out" )
+        return res
 
     def rule_for( self, src ):
         return "nvcc" if Path( src ).suffix == ".cu" else "cxx"

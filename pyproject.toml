@@ -22,6 +22,10 @@ cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.
 
 [project.scripts]
 loom-toolchain = "loom.toolchain:main"
+# fabriquer le catalogue des noyaux precompiles depuis n'importe quel systeme de construction :
+# c'est l'artefact par lequel un projet exterieur produit ses noyaux a l'avance plutot qu'a
+# l'execution -- voir `loom/compilation/cli.py`
+loom-kernels = "loom.compilation.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/loom"]

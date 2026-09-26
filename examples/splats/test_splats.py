@@ -183,3 +183,46 @@ if test( "le_cout_d_une_borne_unique" ):
 
         # la borne d'une fenetre fixe coute au moins un ordre de grandeur : c'est l'argument
         assert borne > 5 * utile
+
+
+if test( "csr_contre_rembourre_les_deux_couts" ):
+    # L'OBJECTION, traitee de front : le meme index en CSR ( offsets + liste unique ) au lieu du
+    # rembourre. Si les deux images coincident, la comparaison de leurs couts est legitime -- et
+    # elle ne tourne PAS a l'avantage du rembourre.
+    #
+    # La comparaison est faite au MIEUX pour chaque forme, sinon elle ne vaut rien : on chiffre le
+    # rembourre a `tuiles x max_par_tuile`, c'est-a-dire avec la capacite la mieux choisie possible,
+    # et pas avec celle qu'on a demandee au hasard.
+    from splats import construire_index_csr, rendre_csr
+
+    for nb, largeur, hauteur in ( ( 500, 256, 256 ), ( 2000, 256, 256 ), ( 2000, 512, 512 ) ):
+        splats = _scene( nb, largeur, hauteur )
+        ecran = _ecran( largeur, hauteur )
+
+        rembourre = construire_index( splats, ecran, capacite = 512 )
+        offsets, comptes, ids_plat, total = construire_index_csr( splats, ecran )
+
+        a = rendre( splats, rembourre, ecran )
+        b = rendre_csr( splats, offsets, comptes, ids_plat, ecran )
+        ecart = float( numpy.abs( numpy.asarray( a ) - numpy.asarray( b ) ).max() )
+        # PAS bit a bit, et c'est normal : l'ordre de sommation dans une tuile depend de l'ordre des
+        # reservations atomiques, qui differe d'une representation a l'autre, et l'addition flottante
+        # n'est pas associative. L'ecart est celui d'une reassociation, pas d'un modele different.
+        assert ecart < 1e-12, f"les deux representations doivent donner la meme image ( {ecart} )"
+
+        nb_tuiles = rembourre.ids.capacity[ 0 ]
+        par_tuile = numpy.asarray( rembourre.nb_par_tuile.value ).reshape( -1 )
+        au_mieux = nb_tuiles * int( par_tuile.max() )      # la MEILLEURE capacite possible
+        demandee = nb_tuiles * rembourre.ids.capacity[ 1 ]
+        csr = total + nb_tuiles                            # la liste, plus les offsets
+
+        print( f"\n{nb} splats, {largeur}x{hauteur} : ecart entre les deux images {ecart:.1e}" )
+        print( f"  rembourre, capacite au mieux ( {par_tuile.max()} ) : {au_mieux:8d} entiers,"
+               f" 1 passe" )
+        print( f"  rembourre, capacite demandee ( {rembourre.ids.capacity[ 1 ]} ) : {demandee:8d} entiers" )
+        print( f"  CSR, taille exacte                     : {csr:8d} entiers, 2 passes"
+               f" + somme prefixe hote" )
+        print( f"  -> meme au mieux, le rembourre coute x{au_mieux / csr:.2f} la memoire du CSR" )
+
+        # le rembourre est PLUS COUTEUX en memoire, toujours : c'est le constat, pas l'inverse
+        assert au_mieux > csr

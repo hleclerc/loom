@@ -125,6 +125,22 @@ HD void inscrire( const S &splats, SI i, SI largeur, SI hauteur, SI cote,
         }
 }
 
+/// La contribution du splat `i` au pixel `( x, y )`, ajoutee a `( r, g, b )`. Ce qui suit ne depend
+/// PAS de la facon dont l'index est represente : c'est ce qui permet d'en comparer deux.
+template<class S, class TF>
+HD void contribution( const S &splats, SI i, SI x, SI y, TF &r, TF &g, TF &b ) {
+    const TF dx = TF( x ) - TF( splats.centres( i, 0 ) );
+    const TF dy = TF( y ) - TF( splats.centres( i, 1 ) );
+    const TF q = forme_quadratique( TF( splats.cov_inv( i, 0 ) ), TF( splats.cov_inv( i, 1 ) ),
+                                    TF( splats.cov_inv( i, 2 ) ), dx, dy );
+    if ( q > TF( RAYON_SIGMA * RAYON_SIGMA ) )
+        return;
+    const TF w = TF( splats.opacites( i ) ) * ( std::exp( -TF( 0.5 ) * q ) - seuil<TF>() );
+    r += w * TF( splats.couleurs( i, 0 ) );
+    g += w * TF( splats.couleurs( i, 1 ) );
+    b += w * TF( splats.couleurs( i, 2 ) );
+}
+
 /// PASSE 2 : la couleur d'un pixel, somme sur les splats de SA tuile seulement.
 template<class S, class Ids>
 HD void rendre_pixel( const S &splats, const Ids &ids, SI nb_dans_la_tuile, SI t,
@@ -132,22 +148,60 @@ HD void rendre_pixel( const S &splats, const Ids &ids, SI nb_dans_la_tuile, SI t
     using TF = Scalaire<decltype( splats.centres )>;
 
     TF r = 0, g = 0, b = 0;
-    for ( SI k = 0; k < nb_dans_la_tuile; ++k ) {
-        const SI i = SI( ids( t, k ) );
-        const TF dx = TF( x ) - TF( splats.centres( i, 0 ) );
-        const TF dy = TF( y ) - TF( splats.centres( i, 1 ) );
-        const TF q = forme_quadratique( TF( splats.cov_inv( i, 0 ) ), TF( splats.cov_inv( i, 1 ) ),
-                                        TF( splats.cov_inv( i, 2 ) ), dx, dy );
-        if ( q > TF( RAYON_SIGMA * RAYON_SIGMA ) )
-            continue;
-        const TF w = TF( splats.opacites( i ) ) * ( std::exp( -TF( 0.5 ) * q ) - seuil<TF>() );
-        r += w * TF( splats.couleurs( i, 0 ) );
-        g += w * TF( splats.couleurs( i, 1 ) );
-        b += w * TF( splats.couleurs( i, 2 ) );
-    }
+    for ( SI k = 0; k < nb_dans_la_tuile; ++k )
+        contribution( splats, SI( ids( t, k ) ), x, y, r, g, b );
     sortie( 0 ) = r;
     sortie( 1 ) = g;
     sortie( 2 ) = b;
+}
+
+/// Le meme rendu, sur un index CSR : `ids_plat` est une liste unique, la tuile `t` occupant
+/// `[ base, base + nb [`. La seule difference avec ci-dessus est la lecture de `i`.
+template<class S, class Ids>
+HD void rendre_pixel_csr( const S &splats, const Ids &ids_plat, SI base, SI nb,
+                          SI x, SI y, auto &&sortie ) {
+    using TF = Scalaire<decltype( splats.centres )>;
+
+    TF r = 0, g = 0, b = 0;
+    for ( SI k = 0; k < nb; ++k )
+        contribution( splats, SI( ids_plat( base + k ) ), x, y, r, g, b );
+    sortie( 0 ) = r;
+    sortie( 1 ) = g;
+    sortie( 2 ) = b;
+}
+
+/// PASSE 1 du CSR, premiere moitie : COMPTER, sans rien ecrire. Un compteur dense par tuile, de
+/// taille connue -- aucun ragged, aucune capacite a deviner.
+template<class S, class Comptes>
+HD void compter( const S &splats, SI i, SI largeur, SI hauteur, SI cote, const Comptes &comptes ) {
+    SI tx0, tx1, ty0, ty1;
+    if ( ! tuiles_touchees( splats, i, largeur, hauteur, cote, tx0, tx1, ty0, ty1 ) )
+        return;
+    const SI nb_tx = ( largeur + cote - 1 ) / cote;
+    for ( SI ty = ty0; ty < ty1; ++ty )
+        for ( SI tx = tx0; tx < tx1; ++tx ) {
+            auto &cellule = comptes( ty * nb_tx + tx ).ref();
+            atomic_add( cellule, std::remove_reference_t<decltype( cellule )>( 1 ) );
+        }
+}
+
+/// PASSE 1 du CSR, seconde moitie : REMPLIR, les offsets etant connus. Le curseur par tuile donne
+/// la place dans la liste unique.
+template<class S, class Offsets, class Curseurs, class Ids>
+HD void remplir( const S &splats, SI i, SI largeur, SI hauteur, SI cote,
+                 const Offsets &offsets, const Curseurs &curseurs, const Ids &ids_plat ) {
+    SI tx0, tx1, ty0, ty1;
+    if ( ! tuiles_touchees( splats, i, largeur, hauteur, cote, tx0, tx1, ty0, ty1 ) )
+        return;
+    const SI nb_tx = ( largeur + cote - 1 ) / cote;
+    for ( SI ty = ty0; ty < ty1; ++ty )
+        for ( SI tx = tx0; tx < tx1; ++tx ) {
+            const SI t = ty * nb_tx + tx;
+            auto &curseur = curseurs( t ).ref();
+            using TC = std::remove_reference_t<decltype( curseur )>;
+            const SI k = SI( atomic_fetch_add( curseur, TC( 1 ) ) );
+            ids_plat( SI( offsets( t ) ) + k ) = i;
+        }
 }
 
 /// L'ADJOINT de la passe 2, pour un pixel : chaque splat de la tuile recoit sa part.

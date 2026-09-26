@@ -201,3 +201,102 @@ def _sans_gradient( splats ):
     autre.couleurs = stop_gradient( splats.couleurs )
     autre.opacites = stop_gradient( splats.opacites )
     return autre
+
+# ── L'AUTRE REPRESENTATION : CSR, en deux passes ─────────────────────────────────────────────────
+#
+# L'index rembourre ci-dessus coute `tuiles x max_par_tuile`, alors que le contenu utile est
+# `total_des_couples`. Un CSU -- offsets + liste unique -- coute exactement l'utile. La question
+# honnete est donc : le ragged rembourre vaut-il son gaspillage ?
+#
+# Ce qu'il echange, c'est de la MEMOIRE contre une PASSE. Le rembourre inscrit en un seul balayage
+# des splats ( reserver une fente et ecrire ). Le CSR en demande deux : compter, puis -- les offsets
+# etant connus -- remplir. Entre les deux il faut une somme prefixe, et surtout il faut LIRE LE
+# TOTAL pour allouer la liste.
+#
+# Et c'est la que se trouve la vraie difference avec un JIT, pas dans le rembourrage : lire ce total
+# est une lecture HOTE d'un compte qu'un noyau vient d'ecrire. loom sait le faire ( `ShapeArray` est
+# fait pour ca ), et alloue donc EXACTEMENT. XLA ne peut pas : sous `jit` le compte est un tracer,
+# et il faut borner le total avant de tracer. Voir le tableau du README.
+
+_COMPTER = FfiCode(
+    includes = [ "splats/rendu.h" ],
+    code = """
+        splats::compter( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
+                         SI( ecran.hauteur ), SI( ecran.cote ), comptes );
+    """,
+)
+
+_REMPLIR = FfiCode(
+    includes = [ "splats/rendu.h" ],
+    code = """
+        splats::remplir( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
+                         SI( ecran.hauteur ), SI( ecran.cote ), offsets, curseurs, ids_plat );
+    """,
+)
+
+_RENDRE_CSR = FfiCode(
+    includes = [ "splats/rendu.h" ],
+    code = """
+        const SI p = SI( rangs.rang( batch_index ) );
+        const SI largeur = SI( ecran.largeur ), cote = SI( ecran.cote );
+        const SI px = p % largeur, py = p / largeur;
+        const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
+
+        splats::rendre_pixel_csr( splats, ids_plat, SI( offsets( t ) ), SI( comptes( t ) ),
+                                  px, py, image( y = py, x = px ) );
+    """,
+)
+
+
+def construire_index_csr( splats, ecran ):
+    """L'index en CSR : `( offsets, comptes, ids_plat )`, de taille EXACTE.
+
+    Trois etapes, dont une sur l'hote. La somme prefixe se fait en numpy parce qu'elle porte sur un
+    vecteur de la taille du nombre de tuiles ( 256 ici ) : ce n'est pas la ou est le travail, et la
+    faire sur le device demanderait un noyau de scan pour rien.
+
+    NON utilisable sous `jit` : lire `total` est une lecture hote d'un compte ecrit par un noyau.
+    C'est le prix de l'exactitude, et c'est exactement ce qu'un JIT ne peut pas payer.
+    """
+    import numpy
+
+    nb_tuiles = _nb_tuiles( int( ecran.largeur.raw ), int( ecran.hauteur.raw ), int( ecran.cote.raw ) )
+    tuile = Axis( ShapeVar( nb_tuiles ), name = "tuile_csr" )
+    rangs = _rangs( int( splats.nb_splats.value ), "splat" )
+
+    # 1. compter
+    comptes = IntTensor[ tuile ]()
+    driver.call( _COMPTER, name = "splats_compter",
+                 splats = splats, ecran = ecran, comptes = comptes, rangs = rangs,
+                 output_attributes = [ "comptes" ] )
+
+    # 2. la somme prefixe, sur l'hote, et le TOTAL -- qui dimensionne la liste
+    c = numpy.asarray( comptes.tensor ).reshape( -1 )
+    total = int( c.sum() )
+    offsets = IntTensor[ tuile ]( numpy.concatenate( [ [ 0 ], numpy.cumsum( c )[ :-1 ] ] ) )
+
+    # 3. remplir
+    fente = Axis( ShapeVar( max( total, 1 ) ), name = "fente_csr" )
+    ids_plat = IntTensor[ fente ]()
+    curseurs = IntTensor[ tuile ]()
+    driver.call( _REMPLIR, name = "splats_remplir",
+                 splats = splats, ecran = ecran, offsets = offsets, curseurs = curseurs,
+                 ids_plat = ids_plat, rangs = rangs,
+                 output_attributes = [ "ids_plat", "curseurs" ] )
+    return offsets, comptes, ids_plat, total
+
+
+def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
+    """Le meme rendu, sur l'index CSR. Doit donner la meme image, au bit pres."""
+    largeur, hauteur = int( ecran.largeur.raw ), int( ecran.hauteur.raw )
+    image = RealTensor[ Axis( ShapeVar( hauteur ), name = "y" ),
+                        Axis( ShapeVar( largeur ), name = "x" ), splats.rvb ]()
+    driver.call(
+        _RENDRE_CSR,
+        name = "splats_rendre_csr",
+        splats = splats, ecran = ecran, offsets = offsets, comptes = comptes,
+        ids_plat = ids_plat, image = image,
+        rangs = _rangs( largeur * hauteur, "pixel" ),
+        output_attributes = [ "image" ],
+    )
+    return image.raw

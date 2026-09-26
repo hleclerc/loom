@@ -20,11 +20,13 @@ namespace sdot {
 ///
 /// Un type dit lui-même sa forme noyau par `kernel_form( queue, io )` ; un tuple la prend membre
 /// à membre ; un arithmétique est sa propre forme.
+struct KernelFormProbe { void operator()( auto &&... ) const {} };
+
 auto kernel_form( auto &&queue, auto &&io_category, auto &&arg ) {
     using T = DECAYED_TYPE_OF( arg );
     if constexpr ( requires { arg.kernel_form( queue, io_category ); } )
         return arg.kernel_form( queue, io_category );
-    else if constexpr ( requires { apply_values( FORWARD( arg ), []( auto &&... ) {} ); } )
+    else if constexpr ( requires { apply_values( FORWARD( arg ), KernelFormProbe{} ); } )
         return apply_values( FORWARD( arg ), [&]( auto &&...values ) {
             return T::make_variant( kernel_form( queue, io_category, FORWARD( values ) )... );
         } );

@@ -59,12 +59,22 @@ peut le lire sur l'hôte. La liste doit donc être dimensionnée par une borne c
 trop petite, elle perd des splats en silence ; assez sûre, elle fait payer le pire cas à tout le
 monde.
 
-**La frontière, et il faut la dire :** ces deux capacités de loom sont *eager-only*. `ShapeArray`
+**La frontière, telle qu'on la croyait :** ces deux capacités sont *eager-only*. `ShapeArray`
 refuse explicitement un tracer, et `capacity_overflows()` rend `None` sous `jit` — « its content only
-exists at execution time, so no Python loop can look at it and try again ». **Sous `jit`, loom est
-dans la même situation que XLA** : il faut prescrire la capacité. L'avantage est donc celui d'un code
-qui tourne en eager — ce qui est le cas de beaucoup de calcul scientifique, et du solveur d'`OtPlan`,
-qui est un seul gros appel eager — pas celui d'une boucle d'entraînement compilée.
+exists at execution time, so no Python loop can look at it and try again ». Sous `jit`, il faudrait
+donc prescrire la capacité, et l'avantage ne vaudrait que pour du code eager.
+
+> **Correction (2026-09-26).** Cette frontière n'est pas une propriété d'XLA : c'est une propriété
+> de faire la relecture **en Python**. Déplacée dans le C++ du handler, elle disparaît. Un handler
+> tourne à l'exécution, donc il peut lire un compte que son propre noyau vient d'écrire sur la
+> carte, et allouer exactement dessus dans le pool d'XLA — **sous `jit` comme en eager**. C'est
+> mesuré, sur GPU, dans `tests/test_scratch_gpu.py` : une fonction compilée **une** fois, des
+> tailles allouées de 1989 / 2023 / 2040 / 2074 selon le tirage.
+>
+> Ce que ça change pour cet exemple : l'index n'a à être ni une sortie ni une capacité devinée,
+> **à condition que sa construction et sa consommation tiennent dans un seul appel**. Ce qui reste
+> vrai de la limite ci-dessus, c'est ce qui doit traverser la frontière Python : une forme de
+> **sortie**, elle, est toujours fixée au traçage.
 
 Le reste de ce que loom apporte ici n'est pas propre au ragged, et c'est tant mieux : `rendu.h` ne
 connaît de loom que `HD` et `SI` et s'indexe positionnellement ; l'adjoint est écrit à la main, en

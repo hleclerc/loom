@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 class AbstractFfiCode:
     """Le C++ qu'un appel exécute, derrière deux questions : `code_for( call_args_analysis )`, les
     instructions à l'intérieur du handler, et `preamble_for( ... )`, ce qui doit exister au niveau
@@ -102,7 +105,7 @@ class FfiCode( AbstractFfiCode ):
     plat et le redécouper en C++. Voir `examples/diffusion/README.md`, friction 3.
     """
 
-    def __init__( self, code = "", preamble = "", prologue = "", includes = (), sources = (), include_roots = (),
+    def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
                   scratch = False, _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
@@ -123,11 +126,21 @@ class FfiCode( AbstractFfiCode ):
         # sans rapport visible avec le noyau qui en a besoin. Un noyau sait où sont ses en-têtes :
         # il le dit ici.
         from . import register_include_root
+        if not include_roots and not _scaffold:
+            # LA RACINE PAR DÉFAUT : le répertoire du `.py` qui construit ce noyau. Une règle, zéro
+            # exception -- `#include "mon_noyau.h"` marche pour un fichier posé à côté, ce qui est
+            # tout ce qu'un tutoriel doit expliquer. Une disposition différente se dit
+            # explicitement.
+            import inspect
+            for cadre in inspect.stack()[ 1: ]:
+                chemin = Path( cadre.filename )
+                if chemin.is_file() and "loom/compilation" not in chemin.as_posix():
+                    include_roots = [ chemin.resolve().parent ]
+                    break
         for root in include_roots:
             register_include_root( root )
 
         self.code = code
-        self.preamble = preamble
         self.prologue = prologue
         self.sources = tuple( sources )
         self.includes = tuple( includes )
@@ -207,9 +220,11 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            # ce que l'utilisateur a écrit, verbatim, au niveau du NAMESPACE : ses `#include`, ses
-            # foncteurs, ses `using`. Loom n'y met rien -- le C++ de ce noyau est à lui.
-            return self.preamble
+            # TOUT le C++ de l'usager, verbatim, au niveau du namespace : ses `#include`, ses
+            # foncteurs, sa fonction `kernel`. Dans un NAMESPACE ANONYME, donc à liaison interne :
+            # il nomme ses structs comme il veut, et deux noyaux liés dans une même bibliothèque
+            # (`compilation/catalogue.py`) ne se marchent pas dessus.
+            return "namespace {\n" + self.code + "\n} // namespace anonyme\n"
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
         return ( f"struct { functor } {{\n"
@@ -226,7 +241,11 @@ class FfiCode( AbstractFfiCode ):
         prologue = ( self.prologue + "\n" ) if self.prologue else ""
 
         if not self._scaffold:
-            return prologue + self.code
+            # L'APPEL, et il est fixe : `kernel( queue, batch_axes, args )`. Trois choses, et la
+            # deuxième est ce qui rend cette forme aussi capable que l'échafaudage -- les axes de
+            # batch de l'appel sont une VALEUR que le noyau compose avec les siens
+            # (`batch_axes + args.<tenseur>.axes()`), au lieu d'un domaine qu'on lui impose.
+            return prologue + "kernel( queue, global_batch_indices, args );"
 
         names = list( call_args_analysis.args )
         mapped = ", ".join( call_args_analysis.args[ n ].cpp_run_parallel_pair() for n in names )
@@ -244,7 +263,7 @@ class FfiCode( AbstractFfiCode ):
         jamais héritée -- c'est tout l'intérêt de l'avoir sortie."""
         if self.includes and self.sources:
             return self
-        res = FfiCode( self.code, self.preamble, self.prologue, self.includes or other.includes,
+        res = FfiCode( self.code, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, self.include_roots or other.include_roots,
                        scratch = self.scratch,
                        _scaffold = self._scaffold,

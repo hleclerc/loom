@@ -8,6 +8,7 @@
 #include "../kernels/CpuHostMemorySpace.h"
 #include "../kernels/Ptr.h" // IWYU pragma: export
 #include "AxisNames.h" // IWYU pragma: export
+#include "../algorithms/CartesianIndices.h" // IWYU pragma: export  (axes())
 #include "TupleRep.h" // IWYU pragma: export
 #include "StridedIterator.h" // IWYU pragma: export
 #include <type_traits>
@@ -115,6 +116,11 @@ public:
     // est nul on retype simplement le Ptr vers la zone kernel cible, sinon on transfère
     // (alloc + copy selon io_category). Appelle ensuite cont( vue_kernel ).
        auto          kernel_form            ( auto &&queue, auto io_category ) const;
+
+    /// NOTRE DOMAINE : un item par élément, chaque coordonnée portant le nom de son axe. C'est ce
+    /// qu'on passe à `run_parallel`, et c'est bien défini -- contrairement aux axes d'un AGRÉGAT,
+    /// qui en a souvent qu'on ne parcourt pas ( `Splats` a `splat`, mais aussi `rvb` ).
+    HD auto          axes                   () const;
 
        auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
        auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)

@@ -21,6 +21,10 @@ UTP HD DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
         _strides( strides ), _shape( shape ), _data( reinterpret_cast<RawByte *>( data.raw ), data.memory_space ) {
 }
 
+UTP HD auto DTP::axes() const {
+    return CartesianIndices<Shape,AxisNames>{ _shape };
+}
+
 UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
     using KMS = typename DECAYED_TYPE_OF( queue )::DefaultKernelMemorySpace;
 

@@ -15,8 +15,6 @@ retrouver le champ de diffusivite `k` a partir de la temperature observee apres 
 
 `driver.grad` traverse les 20 appels ; le noyau compile une fois.
 """
-from pathlib import Path
-
 from loom import Aggregate, Axis, CtShapeVar, RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
 
@@ -45,30 +43,87 @@ def axes( n ):
     return grille.y, grille.x
 
 
-# LES DEUX NOYAUX, et c'est tout ce que Python en dit : un appel a NOTRE fonction C++.
+# LES DEUX NOYAUX. Tout le C++ est ICI, en clair : on lit le tutoriel sans naviguer dans les
+# fichiers. Seule la PHYSIQUE reste un en-tete ( `pas.h` ), parce que c'est le code qu'on avait deja
+# et qu'on ne veut surtout pas reecrire -- il ne sait rien de loom.
 #
-# `preamble` est du C++ emis au niveau du namespace, verbatim : nos `#include`, et rien que ce qu'on
-# y met. `code` est le corps du handler, ou loom a assemble `args` -- un objet dont les membres
-# portent les noms de nos kwargs, plus `queue`, `machine` et `errors`.
+# Loom appelle une fonction a signature fixe :
 #
-# Ce qui se passe dedans -- le parcours de la grille, le choix du parallelisme -- vit dans
-# `include/diffusion/noyaux.h` et n'a aucune trace ici. Un usager qui prefere Kokkos ou OpenMP
-# change ce fichier-la, pas celui-ci.
+#     void kernel( auto &&queue, auto &&batch_axes, auto &&args )
 #
-# `include_roots` dit ou vit ce C++. Un noyau sait ou sont ses en-tetes ; ca n'a pas a etre une
-# incantation de module, prononcee avant tout le reste et sans rapport visible avec lui.
-_RACINE = Path( __file__ ).resolve().parent / "include"
-
+#   queue       le contexte d'execution. `queue.run_parallel` est SON outil, pas une obligation :
+#               un usager Kokkos ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et
+#               les formes de `args`.
+#   batch_axes  le domaine de batch de l'appel ( ce qu'un `vmap` ajoute ) -- une VALEUR, qu'on
+#               compose avec le sien par `+`.
+#   args        nos arguments sous leurs noms Python, plus `machine` et `errors`.
+#
+# Le domaine vient d'une VUE ( `args.suivant.axes()` ) : les axes d'une vue sont exactement ses
+# dimensions, sans ambiguite. `item` porte des coordonnees NOMMEES, qu'on lit par `coord`.
+#
+# ( `include_roots` n'est pas dit : par defaut c'est le repertoire de CE fichier, donc `pas.h` se
+#   trouve tout seul. )
 _avant = FfiCode(
-    include_roots = [ _RACINE ],
-    preamble = '#include "diffusion/noyaux.h"',
-    code = "diffusion::pas( args );",
+    includes = [ "pas.h" ],
+    code = """
+        struct UnPas {
+            HD void operator()( auto item, auto &&args ) const {
+                const SI j = coord( item, y ), i = coord( item, x );
+                args.suivant( j, i ) = diffusion::pas_explicite(
+                    args.grille.temperature, args.grille.diffusivite, j, i,
+                    SI( args.grille.ny ), SI( args.grille.nx ), args.coef );
+            }
+        };
+
+        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+            queue.run_parallel( UnPas(), batch_axes + args.suivant.axes(), args );
+        }
+    """,
 )
 
-# L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom.
+# L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom. Il
+# tourne sur d'autres tampons, donc rien ne l'oblige a la meme geometrie que l'aller.
 _arriere = FfiCode(
-    preamble = '#include "diffusion/noyaux.h"',
-    code = "diffusion::pas_adjoint( args );",
+    includes = [ "pas.h" ],
+    code = """
+        struct UnPasAdjoint {
+            HD void operator()( auto item, auto &&args ) const {
+                const SI m = SI( args.grille.ny ), n = SI( args.grille.nx );
+                const SI j = coord( item, y ), i = coord( item, x );
+
+                // `coef` est une constante du probleme, jamais perturbee : son gradient demanderait
+                // une reduction globale, et il n'est pas ecrit.
+                static_assert( DECAYED_TYPE_OF( args.grad_for_coef.is_valid() )::value == 0,
+                    "diffusion : le gradient par rapport au coefficient dt/h^2 n'est pas implemente" );
+
+                // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un zero
+                // symbolique il faut quand meme ecrire le gradient nul.
+                constexpr bool nulle = DECAYED_TYPE_OF( args.grad_for_suivant.surely_null() )::value;
+
+                if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.temperature.is_valid() )::value ) {
+                    if constexpr ( nulle )
+                        args.grad_for_grille.temperature( j, i ) = 0;
+                    else
+                        args.grad_for_grille.temperature( j, i ) = diffusion::adjoint_temperature(
+                            args.grille.temperature, args.grille.diffusivite,
+                            args.grad_for_suivant, j, i, m, n, args.coef );
+                }
+
+                if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.diffusivite.is_valid() )::value ) {
+                    if constexpr ( nulle )
+                        args.grad_for_grille.diffusivite( j, i ) = 0;
+                    else
+                        args.grad_for_grille.diffusivite( j, i ) = diffusion::adjoint_diffusivite(
+                            args.grille.temperature, args.grille.diffusivite,
+                            args.grad_for_suivant, j, i, m, n, args.coef );
+                }
+            }
+        };
+
+        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+            queue.run_parallel( UnPasAdjoint(), batch_axes + args.grille.temperature.axes(), args );
+        }
+    """,
 )
 
 

@@ -21,6 +21,12 @@
 
 namespace sdot {
 
+// ── la forme libre, declaree ailleurs ─────────────────────────────────────────────────────
+/// déclarée par `run_parallel.h` ( qui nous inclut ) : la forme LIBRE, que la méthode ci-dessous
+/// appelle. Redéclarée ici pour que la méthode puisse la nommer sans dépendre de l'ordre des
+/// inclusions.
+auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest );
+
 /// Le contexte d'exécution CUDA : un FLUX, et les deux formes de lancement qu'un kernel peut
 /// demander (`submit_kernel`, `submit_kernel_grouped`) -- le pendant de `CpuQueue.h`, même
 /// contrat, trouvé par ADL depuis `run_parallel`, qui ne sait rien du device.
@@ -43,6 +49,19 @@ struct CudaQueue {
     /// ce qu'un noyau peut savoir de cette carte ( voir `Machine.h` ). Interroge le driver UNE
     /// fois : les attributs ne changent pas, et un appel par noyau serait du temps perdu.
     Machine machine() const;
+
+
+    /// LANCER : `queue.run_parallel( Foncteur(), domaine, args )`.
+    ///
+    /// Trois choses, et pas une liste de paires ( io, valeur ) : `args` traverse en UN morceau, son
+    /// `kernel_form` engendré portant la politique d'io de chaque argument. Le foncteur reçoit donc
+    /// `( item, args )`, où `args` est la forme KERNEL -- mêmes données, sans la queue.
+    ///
+    /// La forme libre `sdot::run_parallel( queue, domaine, func, io, valeur, ... )` reste là pour
+    /// qui veut une autre politique ou un sous-ensemble.
+    auto run_parallel( auto &&func, auto &&items, auto &&args ) {
+        return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ), MutList(), FORWARD( args ) );
+    }
 
     cudaStream_t stream;
 };

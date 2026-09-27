@@ -36,6 +36,12 @@ namespace sdot {
 /// `thread_index` est unique et STABLE pour tout ce qu'un fil traite (une ligne de scratch par
 /// fil), et `nb_threads` est leur compte.
 ///
+// ── la forme libre, declaree ailleurs ─────────────────────────────────────────────────────
+/// déclarée par `run_parallel.h` ( qui nous inclut ) : la forme LIBRE, que la méthode ci-dessous
+/// appelle. Redéclarée ici pour que la méthode puisse la nommer sans dépendre de l'ordre des
+/// inclusions.
+auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest );
+
 /// Une poignée trivialement copiable, comme l'était la queue SYCL.
 struct CpuQueue {
     /// zone mémoire par défaut vue par les kernels lancés sur cette queue (un contexte
@@ -52,6 +58,19 @@ struct CpuQueue {
     /// un `std::vector` sur le tas, il n'y a pas de limite materielle a annoncer.
     Machine machine() const {
         return { SI( pool->nb_workers() ), 1, cpu_notional_local_mem_bytes, 1 };
+    }
+
+
+    /// LANCER : `queue.run_parallel( Foncteur(), domaine, args )`.
+    ///
+    /// Trois choses, et pas une liste de paires ( io, valeur ) : `args` traverse en UN morceau, son
+    /// `kernel_form` engendré portant la politique d'io de chaque argument. Le foncteur reçoit donc
+    /// `( item, args )`, où `args` est la forme KERNEL -- mêmes données, sans la queue.
+    ///
+    /// La forme libre `sdot::run_parallel( queue, domaine, func, io, valeur, ... )` reste là pour
+    /// qui veut une autre politique ou un sous-ensemble.
+    auto run_parallel( auto &&func, auto &&items, auto &&args ) {
+        return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ), MutList(), FORWARD( args ) );
     }
 
     CpuThreadPool *pool;

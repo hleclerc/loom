@@ -378,30 +378,53 @@ def _render_call( code, ca, device ):
     queue_decl = device.cpp_queue_decl()
     body = code.code_for( ca )
 
-    # LES ARGUMENTS ASSEMBLÉS : un agrégat dont les membres portent les noms des kwargs, plus
-    # `queue`, `machine` et `errors`. C'est ce que reçoit la fonction noyau de l'utilisateur.
+    # LES ARGUMENTS ASSEMBLÉS -- deux structs, parce qu'ils ne vivent pas au même endroit.
     #
-    # Pourquoi un agrégat et pas une liste de paramètres : l'ordre des kwargs cesse de compter, et
-    # ajouter un argument à l'appel ne touche plus la signature du C++. La struct est un TEMPLATE
-    # déduit à l'instanciation (CTAD sur agrégat, C++20), exactement comme les agrégats de l'appel.
+    # `<nom>_args` est côté HÔTE : il porte `queue`, `machine`, `errors`, les arguments de l'appel et
+    # la politique d'io que Python a déduite pour chacun ( `<nom>_io` ). C'est ce que reçoit la
+    # fonction `kernel` de l'usager.
+    #
+    # `<nom>_kargs` est ce qui traverse jusqu'au KERNEL : mêmes données, retypées dans la zone
+    # mémoire du kernel, sans la `queue` ( qui ne peut pas traverser ) et sans les politiques ( leur
+    # travail est fait ). C'est ce que reçoit le foncteur. Le passage est un `kernel_form`, comme
+    # pour n'importe quel agrégat -- donc `run_parallel` n'a rien de spécial à savoir.
     #
     # Émis pour la forme générale seulement : un noyau `per_item` rend une source inchangée.
     args_struct = ""
     if code.is_handler:
-        membres = [ ( "queue", "queue", True ), ( "machine", "queue.machine()", False ),
-                    ( "errors", ERRORS_VAR_NAME, False ) ]
-        for nom, arg in ca.args.items():
-            membres.append( ( nom, nom, False ) )
-            membres.append( ( f"{ nom }_io", arg.cpp_io_expr(), False ) )
+        noms = list( ca.args )
+        kargs, hargs = code.args_name() + "_k", code.args_name()
 
-        tparams = ", ".join( f"class T_{ nom }" for nom, _, _ in membres )
-        champs = "".join( f"    T_{ nom } { '&' if ref else '' }{ nom };\n"
-                          for nom, _, ref in membres )
-        args_struct = ( f"\n// les arguments de cet appel, assemblés. Voir `FfiCode`.\n"
-                        f"template<{ tparams }>\n"
-                        f"struct { code.args_name() } {{\n{ champs }}};\n" )
-        body = ( f"    { code.args_name() } args{{ "
-                 + ", ".join( expr for _, expr, _ in membres ) + " };\n" ) + body
+        champs_k = [ ( "machine", "machine" ), ( "errors", ERRORS_VAR_NAME ) ]
+        champs_k += [ ( n, n ) for n in noms ]
+        tp_k = ", ".join( f"class T_{ n }" for n, _ in champs_k )
+        decl_k = "".join( f"    T_{ n } { n };\n" for n, _ in champs_k )
+
+        champs_h = [ ( "queue", "queue", True ), ( "machine", "queue.machine()", False ),
+                     ( "errors", ERRORS_VAR_NAME, False ) ]
+        # l'allocateur, SUR DEMANDE ( `FfiCode( scratch = True )` ) : allouer est une operation
+        # HOTE, donc il vit dans `args` et pas dans la forme kernel.
+        if scratch:
+            champs_h.append( ( "scratch", "scratch", True ) )
+        for n in noms:
+            champs_h.append( ( n, n, False ) )
+            champs_h.append( ( f"{ n }_io", ca.args[ n ].cpp_io_expr(), False ) )
+        tp_h = ", ".join( f"class T_{ n }" for n, _, _ in champs_h )
+        decl_h = "".join( f"    T_{ n } { '&' if r else '' }{ n };\n" for n, _, r in champs_h )
+
+        # ce qui traverse : chaque argument avec SA politique, `errors` en MutList ( le noyau y écrit )
+        passe = [ "machine", f"sdot::kernel_form( q, MutList(), { ERRORS_VAR_NAME } )" ]
+        passe += [ f"sdot::kernel_form( q, { n }_io, { n } )" for n in noms ]
+
+        args_struct = (
+            f"\n// ce qui traverse jusqu'au kernel ( voir `FfiCode` )\n"
+            f"template<{ tp_k }>\nstruct { kargs } {{\n{ decl_k }}};\n"
+            f"\n// les arguments de cet appel, assemblés, côté hôte\n"
+            f"template<{ tp_h }>\nstruct { hargs } {{\n{ decl_h }\n"
+            f"    auto kernel_form( auto &&q, auto ) const {{\n"
+            f"        return { kargs }{{ " + ", ".join( passe ) + " };\n    }\n};\n" )
+
+        body = ( f"    { hargs } args{{ " + ", ".join( e for _, e, _ in champs_h ) + " };\n" ) + body
 
     if scratch:
         queue_decl += "\n    " + device.cpp_scratch_decl()

@@ -8,30 +8,51 @@ points, aucun ragged, aucune géométrie, aucun scratch.
 Ce n'est pas une démonstration : c'est un **test de généralité**. La question posée est « qu'est-ce
 que, dans loom, est général, et qu'est-ce qui n'est que du sdot déguisé ? ». Le bilan est en bas.
 
-**Trois couches, et c'est la leçon de l'exemple** :
+**Deux fichiers, et c'est la leçon de l'exemple** :
 
 ```
-include/diffusion/pas.h      la PHYSIQUE. Des fonctions libres sur des vues indexées
-                             positionnellement -- elle ne sait pas qu'elle sera parallèle,
-                             ni dérivable, ni appelée depuis Python.
-include/diffusion/noyaux.h   LE LANCEMENT. C'est ici, et nulle part ailleurs, que le
-                             parallélisme se décide. Le fichier qu'on remplace si on
-                             préfère Kokkos, SYCL, OpenMP ou une simple boucle.
-diffusion.py                 ce que loom écrit : l'enrobage FFI, la liaison des tampons,
-                             l'adjoint côté Jax. Une ligne de C++ par noyau.
-test_diffusion.py            les tests
+pas.h              la PHYSIQUE, et c'est le seul en-tête. Des fonctions libres sur des vues
+                   indexées positionnellement -- elle ne sait pas qu'elle sera parallèle, ni
+                   dérivable, ni appelée depuis Python. C'est le code qu'on avait DÉJÀ.
+diffusion.py       tout le reste, en clair : les deux noyaux avec leur C++ inline, et l'appel.
+test_diffusion.py  les tests
 ```
 
-Le partage est le point : **loom écrit l'enrobage, pas le noyau.** Les interfaces de Jax et de Torch
-sont lourdes *et* différentes — c'est ça qu'on ne veut pas écrire deux fois. Le reste, non :
+Le C++ du lancement est **dans** `diffusion.py`, pas dans un troisième fichier : on lit le tutoriel
+sans naviguer. Loom appelle une fonction à signature fixe, et n'écrit que ce qui fait mal —
+l'enrobage FFI, la liaison des tampons, l'adjoint côté Jax :
 
 ```python
 _avant = FfiCode(
-    include_roots = [ _RACINE ],
-    includes = [ "diffusion/noyaux.h" ],
-    code = "diffusion::pas( queue, grille, coef, suivant );",
+    includes = [ "pas.h" ],
+    code = """
+        struct UnPas {
+            HD void operator()( auto item, auto &&args ) const {
+                const SI j = coord( item, y ), i = coord( item, x );
+                args.suivant( j, i ) = diffusion::pas_explicite(
+                    args.grille.temperature, args.grille.diffusivite, j, i,
+                    SI( args.grille.ny ), SI( args.grille.nx ), args.coef );
+            }
+        };
+
+        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+            queue.run_parallel( UnPas(), batch_axes + args.suivant.axes(), args );
+        }
+    """,
 )
 ```
+
+Les trois paramètres de `kernel` sont tout le contrat :
+
+| | |
+|---|---|
+| `queue` | le contexte d'exécution. `queue.run_parallel` est **son** outil, pas une obligation : un usager Kokkos, SYCL ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et les formes de `args`. |
+| `batch_axes` | le domaine de batch de l'appel (ce qu'un `vmap` ajoute) — une **valeur**, qu'on compose avec le sien par `+`. |
+| `args` | nos arguments sous leurs noms Python, plus `machine` ([`Machine.h`](../../include/loom/support/kernels/Machine.h)), `errors`, et `scratch` si on l'a demandé. |
+
+Le domaine vient d'une **vue** (`args.suivant.axes()`) : les axes d'une vue sont exactement ses
+dimensions, sans ambiguïté — un agrégat, lui, en a souvent qu'on ne parcourt pas. Et
+`include_roots` n'est pas dit : par défaut c'est le répertoire du `.py`, donc `pas.h` se trouve seul.
 
 ```bash
 errand test_diffusion

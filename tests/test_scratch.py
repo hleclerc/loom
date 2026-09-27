@@ -39,28 +39,33 @@ import numpy
 # un corps qui boucle sur sa propre taille ne fait alors rien. La première version de ce test
 # bornait sur l'entrée et écrivait à travers un pointeur nul -- c'est ce segfault qui a révélé le
 # refus du CPU.
-_CORPS = """
-    // ce que seul le noyau sait : combien d'entrées sont positives. Aucune borne n'a été donnée,
-    // ni par Python ni par XLA.
-    SI n = 0;
-    for ( SI i = 0; i < valeurs.shape( 0 ); ++i )
-        if ( valeurs( i ) > 0 )
-            ++n;
+_CODE = """
+    void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+        // ce que seul le noyau sait : combien d'entrees sont positives. Aucune borne n'a ete
+        // donnee, ni par Python ni par XLA.
+        SI n = 0;
+        for ( SI i = 0; i < args.valeurs.shape( 0 ); ++i )
+            if ( args.valeurs( i ) > 0 )
+                ++n;
 
-    // ... et on alloue EXACTEMENT ça, dans le pool d'XLA, le temps de l'appel.
-    auto compact = scratch.view<double>( n );
+        // ... et on alloue EXACTEMENT ca. `scratch` est dans `args` : allouer est une operation
+        // hote, donc il n'a rien a faire dans la forme kernel.
+        auto compact = args.scratch.template view<double>( n );
 
-    SI k = 0;
-    for ( SI i = 0; i < valeurs.shape( 0 ) && k < compact.shape( 0 ); ++i )
-        if ( valeurs( i ) > 0 )
-            compact( k++ ) = valeurs( i );
+        // la boucle est bornee par LA VUE et pas par l'entree : c'est ce qui rend un refus
+        // inoffensif ( voir Scratch.h ).
+        SI k = 0;
+        for ( SI i = 0; i < args.valeurs.shape( 0 ) && k < compact.shape( 0 ); ++i )
+            if ( args.valeurs( i ) > 0 )
+                compact( k++ ) = args.valeurs( i );
 
-    double s = 0;
-    for ( SI i = 0; i < compact.shape( 0 ); ++i )
-        s += compact( i );
+        double s = 0;
+        for ( SI i = 0; i < compact.shape( 0 ); ++i )
+            s += compact( i );
 
-    somme( 0 ) = s;
-    somme( 1 ) = double( compact.shape( 0 ) );
+        args.somme( 0 ) = s;
+        args.somme( 1 ) = double( compact.shape( 0 ) );
+    }
 """
 
 
@@ -71,7 +76,7 @@ def _appel( valeurs ):
     somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
     try:
         driver.call(
-            FfiCode.handler( code = _CORPS, scratch = True ),
+            FfiCode( code = _CODE, scratch = True ),
             name = "test_scratch_positifs",
             valeurs = v,
             somme = somme,
@@ -124,7 +129,7 @@ if test( "sous_jit" ):
         v = RealTensor[ Axis( ShapeVar( n ), name = "num_point" ) ]( x )
         somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
         driver.call(
-            FfiCode.handler( code = _CORPS, scratch = True ),
+            FfiCode( code = _CODE, scratch = True ),
             name = "test_scratch_positifs",
             valeurs = v,
             somme = somme,

@@ -39,34 +39,41 @@ import numpy
 compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
 
 
-_CORPS = """
-    SI n = valeurs.shape( 0 );
+_CODE = """
+    void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+        SI n = args.valeurs.shape( 0 );
 
-    // 1. un noyau compte, sur la carte
-    auto cpt = scratch.view<int>( 1 );
-    cpt.fill_with( queue, 0 );
-    run_parallel( queue, range( n ), loom_tests::Compter{}, OutList(), cpt, InpList(), valeurs );
+        // 1. un noyau compte, sur la carte. On passe par la forme LIBRE de `run_parallel` : `cpt`
+        //    est un scratch, il ne vient pas de `args`, donc la forme courte ne s'applique pas.
+        auto cpt = args.scratch.template view<int>( 1 );
+        cpt.fill_with( queue, 0 );
+        run_parallel( queue, indices_over( n ), loom_tests::Compter(),
+                      OutList(), cpt, InpList(), args.valeurs );
 
-    // 2. l'HOTE lit ce que le noyau vient d'ecrire. `Ptr::value()` ferait ca, mais il est marque
-    //    `HD` alors que son chemin de transfert est HOTE seul -> le compilateur CUDA le refuse
-    //    sous `--Werror cross-execution-space-call`. D'ou le `copy` direct.
-    int m_hote = 0;
-    copy( Ptr<int,CpuHostMemorySpace>( &m_hote ), cpt.data(), 1 );
-    SI m = SI( m_hote );
+        // 2. l'HOTE lit ce que le noyau vient d'ecrire. `Ptr::value()` ferait ca, mais il est
+        //    marque `HD` alors que son chemin de transfert est HOTE seul -> le compilateur CUDA le
+        //    refuse sous `--Werror cross-execution-space-call`. D'ou le `copy` direct.
+        int m_hote = 0;
+        copy( Ptr<int,CpuHostMemorySpace>( &m_hote ), cpt.data(), 1 );
+        SI m = SI( m_hote );
 
-    // 3. ... et on alloue EXACTEMENT ca
-    auto compact = scratch.view<double>( m );
-    cpt.fill_with( queue, 0 );
-    run_parallel( queue, range( n ), loom_tests::Compacter{}, OutList(), compact, OutList(), cpt, InpList(), valeurs );
+        // 3. ... et on alloue EXACTEMENT ca
+        auto compact = args.scratch.template view<double>( m );
+        cpt.fill_with( queue, 0 );
+        run_parallel( queue, indices_over( n ), loom_tests::Compacter(),
+                      OutList(), compact, OutList(), cpt, InpList(), args.valeurs );
 
-    // 4. de quoi verifier : la somme des positifs, et la taille qui a ete allouee
-    run_parallel( queue, range( m ), loom_tests::Sommer{}, OutList(), somme, InpList(), compact );
-    run_parallel( queue, range( 1 ), loom_tests::Poser{}, OutList(), somme, InpList(), double( m ) );
+        // 4. de quoi verifier : la somme des positifs, et la taille qui a ete allouee
+        run_parallel( queue, indices_over( m ), loom_tests::Sommer(),
+                      OutList(), args.somme, InpList(), compact );
+        run_parallel( queue, indices_over( SI( 1 ) ), loom_tests::Poser(),
+                      OutList(), args.somme, InpList(), double( m ) );
+    }
 """
 
 
 def _code():
-    return FfiCode.handler( code = _CORPS, scratch = True,
+    return FfiCode( code = _CODE, scratch = True,
                             includes = [ "loom_tests/scratch_gpu.h" ] )
 
 

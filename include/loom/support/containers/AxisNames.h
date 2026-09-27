@@ -46,6 +46,32 @@ template<class Name,class Head,class... Tl> struct AxisPos<Name,Tuple<Head,Tl...
     static constexpr int value = std::is_same_v<Head,Name> ? 0 : ( rest < 0 ? -1 : rest + 1 );
 };
 
+/// LA COORDONNÉE d'un multi-indice le long d'un axe nommé : `coord( item, y )`.
+///
+/// Un multi-indice est un `Tuple` d'`AxisIndex` ( voir `CartesianIndices` ). Un TENSEUR le consomme
+/// par nom tout seul -- `suivant( item )` -- mais un en-tête écrit à la main veut des ENTIERS : ses
+/// fonctions prennent `( j, i )`. C'est ce que ceci rend.
+///
+/// ( `item[ y ]` serait plus court, mais `Tuple` ne peut pas connaître les axes : c'est `AxisNames.h`
+///   qui inclut `Tuple.h`, pas l'inverse. Il faudrait un type enveloppe pour les multi-indices
+///   nommés, transparent partout où `x( batch_index )` s'écrit déjà. )
+template<class Axis>
+HD constexpr auto coord( const auto &item, Axis axis ) {
+    using I = DECAYED_TYPE_OF( item );
+    if constexpr ( I::ct_size == 0 )
+        // pas de `static_assert( false )` : il serait évalué même dans une branche écartée. Appeler
+        // un membre qui n'existe pas nomme l'axe fautif dans le message du compilateur.
+        return axis.this_multi_index_has_no_such_axis();
+    else {
+        auto head = item[ Ct<int,0>() ];
+        using H = DECAYED_TYPE_OF( head );
+        if constexpr ( IsAxisIndex<H>::value && std::is_same_v<typename H::axis_type,Axis> )
+            return head.index;
+        else
+            return coord( item.without_index( Ct<int,0>() ), axis );
+    }
+}
+
 /// `Tuple` d'axes « tous non nommés » dimensionné comme `shape` (on n'en prend que le type :
 /// valeur par défaut d'`AxisNames`).
 HD constexpr auto unnamed_axes( auto shape ) {

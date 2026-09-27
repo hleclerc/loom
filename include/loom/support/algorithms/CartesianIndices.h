@@ -78,6 +78,24 @@ struct CartesianIndices {
     Shape shape;
 };
 
+/// concaténation de deux `Tuple` au niveau des TYPES ( pour les noms d'axes d'un domaine composé ).
+template<class,class> struct TupleCat;
+template<class... A,class... B> struct TupleCat<Tuple<A...>,Tuple<B...>> { using type = Tuple<A...,B...>; };
+
+/// COMPOSER DEUX DOMAINES : `batch_axes + args.suivant.axes()`.
+///
+/// C'est la piece qui rend la forme generale aussi capable que l'echafaudage : un corps qui lance
+/// lui-meme n'ignore plus les axes de batch de l'appel, il les AJOUTE aux siens. Et comme les
+/// indices de batch sont optionnels ( voir `AxisNames.h` ), chaque tenseur ne consomme que les
+/// coordonnees qu'il a -- un scalaire de rang 0 les ignore toutes. Un seul corps, batche ou non.
+template<class S1,class N1,class S2,class N2>
+HD auto operator+( const CartesianIndices<S1,N1> &a, const CartesianIndices<S2,N2> &b ) {
+    auto shape = a.shape.apply_values( [&]( auto &&...as ) {
+        return b.shape.apply_values( [&]( auto &&...bs ) { return tuple( as..., bs... ); } );
+    } );
+    return CartesianIndices<DECAYED_TYPE_OF( shape ),typename TupleCat<N1,N2>::type>{ shape };
+}
+
 /// UN DOMAINE DE LANCEMENT QU'ON CHOISIT : un item par point de la forme donnée.
 ///
 /// C'est ce qui manquait quand `run_parallel` était engendré pour vous : le seul domaine possible

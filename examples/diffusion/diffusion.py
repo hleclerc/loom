@@ -17,12 +17,6 @@ retrouver le champ de diffusivite `k` a partir de la temperature observee apres 
 """
 from pathlib import Path
 
-import loom.compilation as compilation
-
-# le C++ de CE paquet, enregistre aupres de loom exactement comme sdot enregistre le sien :
-# loom ne connait pas ses usagers par leur nom.
-compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
-
 from loom import Aggregate, Axis, CtShapeVar, RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
 
@@ -51,57 +45,29 @@ def axes( n ):
     return grille.y, grille.x
 
 
-# DEUX noyaux : l'aller fait le pas, le retour rend les deux gradients. Les deux se
-# contentent d'appeler l'en-tete -- c'est le C++ qu'on avait deja qui travaille. C'est
-# l'APPEL qui les prend tous les deux, et qui porte le nom ( voir `FfiCode` ).
-# C'est LE CORPS qui lance : `indices_over( ny, nx )` dit le domaine -- un work-item par cellule,
-# et deux coordonnees, celles que la grille a deja. Le parallelisme d'un noyau n'est pas un axe de
-# `vmap`, et ne devrait pas avoir a s'en deguiser un.
-_avant = FfiCode.handler(
-    includes = [ "diffusion/pas.h" ],
-    functors = { "un_pas": """
-        const SI j = item[ 0_c ], i = item[ 1_c ];
-        suivant( y = j, x = i ) = diffusion::pas_explicite(
-            grille.temperature, grille.diffusivite, j, i, SI( grille.ny ), SI( grille.nx ), coef );
-    """ },
-    code = """
-        launch( indices_over( grille.ny, grille.nx ), un_pas{} );
-    """,
+# LES DEUX NOYAUX, et c'est tout ce que Python en dit : un appel a NOTRE fonction C++.
+#
+# Le corps est du C++ recopie dans le handler, ou `queue` et les arguments de l'appel sont declares.
+# Ce qui se passe dedans -- le parcours de la grille, le choix du parallelisme -- vit dans
+# `include/diffusion/noyaux.h` et n'a aucune trace ici. Un usager qui prefere Kokkos ou OpenMP
+# change ce fichier-la, pas celui-ci.
+#
+# `include_roots` dit ou vit ce C++. Un noyau sait ou sont ses en-tetes ; ca n'a pas a etre une
+# incantation de module, prononcee avant tout le reste et sans rapport visible avec lui.
+_RACINE = Path( __file__ ).resolve().parent / "include"
+
+_avant = FfiCode(
+    include_roots = [ _RACINE ],
+    includes = [ "diffusion/noyaux.h" ],
+    code = "diffusion::pas( queue, grille, coef, suivant );",
 )
 
-_arriere = FfiCode.handler(
-    includes = [ "diffusion/pas.h" ],
-    functors = { "un_pas_adjoint": """
-        const SI n = SI( grille.nx ), m = SI( grille.ny );
-        const SI j = item[ 0_c ], i = item[ 1_c ];
-
-        // `coef` est une constante du probleme, jamais perturbee : son gradient demanderait une
-        // reduction globale ( une somme atomique sur toute la grille ), et il n'est pas ecrit.
-        static_assert( DECAYED_TYPE_OF( grad_for_coef.is_valid() )::value == 0,
-            "diffusion : le gradient par rapport au coefficient dt/h^2 n'est pas implemente" );
-
-        // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un zero
-        // symbolique il faut quand meme ecrire le gradient nul.
-        constexpr bool nulle = DECAYED_TYPE_OF( grad_for_suivant.surely_null() )::value;
-
-        if constexpr ( DECAYED_TYPE_OF( grad_for_grille.temperature.is_valid() )::value ) {
-            if constexpr ( nulle )
-                grad_for_grille.temperature( y = j, x = i ) = 0;
-            else
-                grad_for_grille.temperature( y = j, x = i ) = diffusion::adjoint_temperature(
-                    grille.temperature, grille.diffusivite, grad_for_suivant, j, i, m, n, coef );
-        }
-
-        if constexpr ( DECAYED_TYPE_OF( grad_for_grille.diffusivite.is_valid() )::value ) {
-            if constexpr ( nulle )
-                grad_for_grille.diffusivite( y = j, x = i ) = 0;
-            else
-                grad_for_grille.diffusivite( y = j, x = i ) = diffusion::adjoint_diffusivite(
-                    grille.temperature, grille.diffusivite, grad_for_suivant, j, i, m, n, coef );
-        }
-    """ },
+# L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom.
+_arriere = FfiCode(
+    includes = [ "diffusion/noyaux.h" ],
     code = """
-        launch( indices_over( grille.ny, grille.nx ), un_pas_adjoint{} );
+        diffusion::pas_adjoint( queue, grille, coef, grad_for_suivant,
+                                grad_for_grille, grad_for_coef );
     """,
 )
 

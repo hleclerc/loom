@@ -29,105 +29,82 @@ class AbstractFfiCode:
 
 
 class FfiCode( AbstractFfiCode ):
-    """Un noyau : le C++ qui s'exécute PAR ITEM, plus ce que l'appel doit savoir pour le lancer.
+    """UN NOYAU : le C++ que l'appel exécute, et ce qu'il faut pour le compiler.
 
-    = Le corps, et rien que le corps
+    = Ce que loom écrit, et ce qu'il n'écrit pas
 
-    `code` est ce qui se passe POUR UN ITEM. Il devient l'`operator()` d'un foncteur NOMMÉ, au
-    niveau du namespace, dont les paramètres sont dérivés des arguments de l'appel : ajouter un
-    argument à l'appel le fait apparaître dans la signature ET dans le `run_parallel`, sans que le
-    corps change. C'est la bonne idée de tout ceci, et elle ne bouge pas.
+    `code` est le corps DU HANDLER, recopié tel quel. Loom écrit tout ce qui l'entoure -- et c'est
+    tout ce qu'il a à écrire, parce que c'est là qu'est la douleur : l'enrobage FFI, la liaison des
+    tampons aux vues, la construction des agrégats, le semis des sorties, l'adjoint côté Jax. Les
+    interfaces de Jax et de Torch sont lourdes ET différentes ; c'est ça qu'on ne veut pas écrire
+    deux fois.
 
-    Un foncteur nommé, et pas une lambda : un compilateur de device (nvcc) est à l'aise avec un
-    struct dont l'`operator()` est un template membre explicite, et bute sur une lambda qui
-    traverse vers du code device.
+    Dans le corps, loom met à disposition `queue` et les arguments de l'appel sous leurs noms
+    Python. Ce qu'on en fait ne le regarde pas :
 
-    Trois noms sont RÉSERVÉS (injectés par l'échafaudage, ce ne sont pas des arguments d'appel) :
-    `batch_index` (le multi-indice de l'item), `thread_index` (le numéro du work-item,
-    `0..nb_threads-1`, stable sur tous les items que ce work-item traite -- c'est avec lui qu'on
-    indexe un scratch PAR FIL) et `nb_threads`. Un corps qui ne s'en sert pas les ignore. Un kwarg
-    de l'appel ne doit pas porter un de ces noms : il masquerait le paramètre injecté.
+        FfiCode(
+            include_roots = [ ma_racine ],
+            includes = [ "diffusion/noyaux.h" ],
+            code = "diffusion::pas( queue, grille, coef, suivant );",
+        )
+
+    Le parcours, le choix du parallélisme, la géométrie de lancement vivent alors dans NOTRE C++ --
+    un fichier ordinaire, qui se compile et se teste sans loom, et qu'on remplace par du Kokkos, du
+    SYCL, de l'OpenMP ou une simple boucle sans toucher à Python. `run_parallel` est l'outil que
+    loom propose, pas une obligation qu'il impose.
 
     = Un noyau ne se contient pas lui-même
 
-    L'adjoint n'est PAS un champ de l'aller : c'est un autre noyau, et c'est l'APPEL qui en prend
+    L'adjoint n'est pas un champ de l'aller : c'est un autre noyau, et c'est l'APPEL qui en prend
     plusieurs.
 
         driver.call(
-            FfiCode( "le corps aller", max_nb_threads = "..." ),
-            FfiCode( "le corps retour", prologue = "..." ),      # optionnel
-            name = "update_outputs",
+            FfiCode( code = "monpaquet::avant( queue, ... );" ),
+            FfiCode( code = "monpaquet::arriere( queue, ... );" ),   # optionnel
+            name = "un_pas",
             ... )
 
-    Il tourne sur d'autres tampons (les résidus et les cotangentes), fait un autre travail, et n'a
-    aucune raison de vouloir la même géométrie de lancement que l'aller -- un gather peut devenir
-    une accumulation, un balayage peut devenir un tri. Tant qu'il était une paire de champs `bwd_*`,
-    il héritait de force du plafond, du groupe et de la mémoire partagée de l'aller.
+    Il tourne sur d'autres tampons (les cotangentes), fait un autre travail, et n'a aucune raison de
+    vouloir la même géométrie que l'aller. Le NOM est sur l'appel : il identifie le couple, préfixe
+    la cible compilée et groupe le journal des compilations.
 
-    Le NOM est sur l'appel, pas sur le noyau : il identifie le couple (les deux foncteurs en
-    dérivent, `<name>_kernel` et `<name>_bwd_kernel`), il préfixe la cible compilée et il groupe le
-    journal des compilations. Le porter sur chaque noyau obligeait à en écrire deux et à les tenir
-    cohérents à la main.
+    = Où vit le C++
 
-    = La géométrie de lancement est du C++, pas des chaînes évaluées ailleurs
-
-    `run_parallel` ne lit pas la géométrie sur un objet Python : il la DÉTECTE sur le foncteur
-    (`requires { func.max_nb_threads( args... ); }`, voir `run_parallel.cxx`), et ces hooks
-    reçoivent les arguments de l'appel. Ce sont donc de vraies fonctions C++, et c'est ainsi
-    qu'on les écrit ici : `max_nb_threads`, `group_size` et `local_mem_elems` sont des CORPS DE
-    MÉTHODE, émis seulement s'ils sont donnés, avec les arguments de l'appel en portée sous leurs
-    propres noms -- exactement comme le corps.
-
-      max_nb_threads = "return scratch.words.shape( 0 );"
-
-    Ce que ça achète, par rapport aux chaînes d'expression d'avant : la portée est visible (c'est
-    une signature), une faute est une erreur de compilation à l'endroit qu'on lit, et surtout le
-    calcul peut s'appuyer sur les CONSTANTES DE L'ALGORITHME, qui sont en C++. Le budget de
-    mémoire partagée d'un tri radix est une propriété de ce tri ; il n'a rien à faire dans une
-    f-string Python qui recopie `NB_BUCKETS` « kept in sync by hand ».
-
-    `max_nb_threads` borne le nombre de work-items (de GROUPES si `group_size` est donné)
-    lancés : un scratch PAR FIL est alors dimensionné sur les travailleurs concurrents et non sur
-    les items, donc un gros batch ne fait pas exploser la mémoire. Rien de tout ça n'entre dans la
-    source : ce sont des valeurs lues à l'EXÉCUTION, donc un même noyau compilé sert toutes les
-    machines.
-
-    `group_size` fait passer à un SECOND niveau de parallélisme : chaque item lancé devient un
-    work-GROUP de `group_size` voies coopérantes. Il EXIGE `local_mem_elems` (la taille, en
-    `int32`, du scratch de mémoire locale partagé par les voies) -- `run_parallel` ne prend le
-    chemin coopératif que si les deux hooks existent, donc l'un sans l'autre serait silencieusement
-    ignoré : c'est refusé ici. Le jeu des noms réservés change alors : `batch_index` garde son sens
-    (quel item ce GROUPE traite), et `thread_index`/`nb_threads` cèdent la place à `group_index`
-    (le numéro du groupe, stable sur les items qu'il enjambe -- c'est lui qui indexe un scratch PAR
-    GROUPE), `local_index` (le rang de la voie dans son groupe), `local_size`, `group` (pour
-    `group_barrier`), `local_scratch` (la vue `int32` partagée, dimensionnée par `local_mem_elems`,
-    dont l'accès sans course est l'affaire du corps) et `sub_group` (le niveau warp). Comme le
-    `group_index` d'un groupe -- donc sa ligne de scratch -- est RÉUTILISÉ d'un item à l'autre, un
-    corps DOIT finir par un `group_barrier` après sa dernière lecture de cette ligne.
-
-    = Le reste
+    `include_roots` : les racines `-I` de CE noyau. Un noyau sait où sont ses en-têtes -- ça n'a pas
+    à être une incantation de module (`compilation.register_include_root`) prononcée avant tout le
+    reste et sans rapport visible avec lui.
 
     `includes` : les en-têtes dont le corps a besoin, émis après ceux du runtime. `sources` : les
     unités C++ qu'il LIE (`"sdot/x.cpp"` ou `( "sdot/x.cpp", { "DEF": "1" } )`), compilées une fois
     par (source, defines, compilateur) et partagées par tous les noyaux qui les nomment.
 
-    `prologue` : une instruction C++ émise VERBATIM avant le lancement, dans la portée du
-    HANDLER -- où `queue` et les agrégats de l'appel sont déclarés. C'est la position d'une
-    pré-passe unique qu'un corps par item ne peut pas exprimer. Mettre une sortie accumulée à zéro
-    n'en fait plus partie : toute sortie part semée (voir `CallArg_Tensor.cpp_seed_member`).
+    `prologue` : une instruction C++ émise avant le corps, dans la même portée. Vestige de l'époque
+    où le corps était par item et ne pouvait pas exprimer une pré-passe ; un corps qui est le
+    handler n'en a plus besoin.
 
-    = L'échappatoire : un corps qui est TOUT le handler
+    `scratch = True` fait lier l'allocateur d'XLA, donc `scratch.view<T>( n )` dans le corps : de la
+    mémoire dimensionnée à l'exécution, à une taille que seul le noyau connaît, sous `jit` comme en
+    eager. Voir `support/kernels/Scratch.h` et `tests/test_scratch_gpu.py`.
 
-    `FfiCode.handler( ... )` construit un noyau dont le corps n'est pas échafaudé mais recopié tel
-    quel dans le handler -- à lui d'appeler `run_parallel`, ou de ne pas le faire du tout. C'est ce
-    qu'il faut pour du code HÔTE qui a besoin de la `queue` et pilote lui-même son parallélisme :
-    le solveur de transport d'`OtPlan` est exactement ça (cent diagrammes dans un seul appel).
-    Rare, mais réel -- et jusqu'ici l'échappatoire existait sans que rien ne la nomme.
+    = LE SUCRE : un corps par item ( `FfiCode.per_item` )
+
+    Quand le parallélisme du noyau EST celui de l'appel -- un item par multi-indice de batch, ce
+    qu'un `vmap` fabrique -- loom peut écrire le foncteur ET son lancement, et le corps n'est plus
+    que ce qui se passe pour un item. Trois noms sont alors réservés : `batch_index`,
+    `thread_index`, `nb_threads` (ou, en coopératif, `group_index`, `local_index`, `local_size`,
+    `group`, `local_scratch`, `sub_group`). La géométrie se déclare en corps de méthode du foncteur
+    engendré : `max_nb_threads`, `group_size`, `local_mem_elems` -- `group_size` exige
+    `local_mem_elems`, sans quoi le chemin coopératif serait silencieusement ignoré.
+
+    Le piège, et c'est pour ça que ce n'est plus le défaut : le domaine engendré est
+    `global_batch_indices` et RIEN D'AUTRE. Un noyau dont le parallélisme n'est pas un axe de `vmap`
+    -- une grille cartésienne, parcourue en (j, i) -- devait s'en déguiser un, matérialiser un rang
+    plat et le redécouper en C++. Voir `examples/diffusion/README.md`, friction 3.
     """
 
-    def __init__( self, code = "", prologue = "", includes = (), sources = (),
+    def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  scratch = False, functors = {}, _scaffold = True ) -> None:
+                  scratch = False, _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -135,17 +112,26 @@ class FfiCode( AbstractFfiCode ):
         if local_mem_elems and not group_size:
             raise ValueError( "FfiCode: `local_mem_elems` without `group_size` -- there is no "
                               "work-group to share it" )
-        if functors and _scaffold:
-            raise ValueError( "FfiCode: `functors` va avec un corps QUI LANCE LUI-MÊME -- un noyau "
-                              "échafaudé n'a qu'un foncteur, le sien, et son lancement est "
-                              "engendré. Voir `FfiCode.handler`." )
+        if ( max_nb_threads or group_size or local_mem_elems ) and not _scaffold:
+            raise ValueError( "FfiCode: une géométrie de lancement (`max_nb_threads`, "
+                              "`group_size`, `local_mem_elems`) est faite de MÉTHODES du foncteur "
+                              "engendré -- un corps qui lance lui-même n'en a pas. Passez-la à "
+                              "`run_parallel` là où vous lancez, ou utilisez `FfiCode.per_item`." )
+
+        # OÙ VIT LE C++ DE CE NOYAU. C'était un appel de module à part
+        # (`compilation.register_include_root( ... )`), donc une incantation avant toute chose et
+        # sans rapport visible avec le noyau qui en a besoin. Un noyau sait où sont ses en-têtes :
+        # il le dit ici.
+        from . import register_include_root
+        for root in include_roots:
+            register_include_root( root )
 
         self.code = code
         self.prologue = prologue
         self.sources = tuple( sources )
         self.includes = tuple( includes )
+        self.include_roots = tuple( include_roots )
         self.scratch = bool( scratch )
-        self.functors = dict( functors )
         self._scaffold = _scaffold
 
         # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
@@ -157,12 +143,20 @@ class FfiCode( AbstractFfiCode ):
 
     @classmethod
     def handler( cls, code = "", **kwargs ):
-        """Un noyau dont le corps EST le handler : recopié tel quel, aucun foncteur, aucun
-        `run_parallel` engendré. Voir la docstring de la classe."""
-        if any( kwargs.get( k ) for k in ( "max_nb_threads", "group_size", "local_mem_elems" ) ):
-            raise ValueError( "FfiCode.handler: a verbatim handler launches itself, so it has no "
-                              "functor for a launch hook to live on" )
-        return cls( code, _scaffold = False, **kwargs )
+        """Redondant : c'est ce que fait `FfiCode` tout court depuis qu'un corps qui lance lui-même
+        est la forme NORMALE. Gardé parce que des appels existants le nomment."""
+        return cls( code, **kwargs )
+
+    @classmethod
+    def per_item( cls, code = "", **kwargs ):
+        """LE SUCRE : un corps par ITEM, et loom engendre pour vous le foncteur ET son lancement.
+
+        C'est commode quand le parallélisme du noyau EST celui de l'appel -- un item par
+        multi-indice de batch, ce qu'un `vmap` fabrique. Ça ne l'est pas sinon : le domaine engendré
+        est `global_batch_indices` et rien d'autre, donc un noyau qui veut parcourir une grille en
+        (j, i) devait se déguiser un axe de batch plat ( voir `examples/diffusion/README.md`,
+        friction 3 ). Dans ce cas, écrivez le lancement -- c'est `FfiCode` tout court."""
+        return cls( code, _scaffold = True, **kwargs )
 
     # ---- ce que l'appel demande ( il passe le nom du foncteur, qu'il est seul à connaître ) ----
 
@@ -212,13 +206,10 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            # un corps qui lance lui-même a besoin de foncteurs, et ils doivent être au niveau du
-            # NAMESPACE : C++ interdit les méthodes template dans une classe locale, donc on ne
-            # peut pas les écrire au milieu du handler. Sans ça, `FfiCode.handler` obligeait à
-            # sortir un en-tête à côté -- ce qui le rendait inutilisable en pratique.
-            names = list( call_args_analysis.args )
-            return "".join( self._functor_decl( nom, corps, names )
-                            for nom, corps in self.functors.items() )
+            # rien. Le C++ de ce noyau vit dans SES en-têtes, foncteurs compris -- et c'est là qu'il
+            # doit être : un foncteur y déclare ses propres paramètres au lieu de les hériter de
+            # l'ordre des kwargs Python, et le fichier se compile et se teste sans loom.
+            return ""
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
         return ( f"struct { functor } {{\n"
@@ -226,24 +217,6 @@ class FfiCode( AbstractFfiCode ):
                  f"    template<{ ', '.join( 'class ' + t for t in tparams ) }>\n"
                  f"    HD void operator()( { ', '.join( f'{ t } { n }' for t, n in params ) } ) const {{\n"
                  f"        { self.code }\n"
-                 f"    }}\n"
-                 f"}};\n" )
-
-    def _functor_decl( self, nom, corps, names ):
-        """Un foncteur nommé, dont les paramètres sont ceux de l'appel -- comme pour un noyau
-        échafaudé, donc le corps nomme ses arguments exactement pareil.
-
-        Le premier paramètre s'appelle `item` : sous un domaine que l'appelant choisit, ce n'est
-        plus un indice de batch. `batch_index` reste disponible sous son ancien nom, pour qu'un
-        corps déplacé depuis un noyau échafaudé continue de compiler."""
-        tparams, params = self._params( names )
-        params = [ ( "T_item", "item" ) ] + params[ 1: ]
-        tparams = [ "T_item" ] + [ t for t in tparams if t != "BatchIndex" ]
-        return ( f"struct { nom } {{\n"
-                 f"    template<{ ', '.join( 'class ' + t for t in tparams ) }>\n"
-                 f"    HD void operator()( { ', '.join( f'{ t } { n }' for t, n in params ) } ) const {{\n"
-                 f"        [[maybe_unused]] const auto &batch_index = item;\n"
-                 f"        { corps }\n"
                  f"    }}\n"
                  f"}};\n" )
 
@@ -272,8 +245,9 @@ class FfiCode( AbstractFfiCode ):
         if self.includes and self.sources:
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
-                       self.sources or other.sources, scratch = self.scratch,
-                       functors = self.functors, _scaffold = self._scaffold,
+                       self.sources or other.sources, self.include_roots or other.include_roots,
+                       scratch = self.scratch,
+                       _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
         return res

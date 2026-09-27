@@ -8,10 +8,29 @@ points, aucun ragged, aucune géométrie, aucun scratch.
 Ce n'est pas une démonstration : c'est un **test de généralité**. La question posée est « qu'est-ce
 que, dans loom, est général, et qu'est-ce qui n'est que du sdot déguisé ? ». Le bilan est en bas.
 
+**Trois couches, et c'est la leçon de l'exemple** :
+
 ```
-include/diffusion/pas.h   le C++ qu'on avait DÉJÀ : la physique et ses deux adjoints
-diffusion.py              l'enrobage loom : deux agrégats, deux noyaux, ~40 lignes utiles
-test_diffusion.py         les tests
+include/diffusion/pas.h      la PHYSIQUE. Des fonctions libres sur des vues indexées
+                             positionnellement -- elle ne sait pas qu'elle sera parallèle,
+                             ni dérivable, ni appelée depuis Python.
+include/diffusion/noyaux.h   LE LANCEMENT. C'est ici, et nulle part ailleurs, que le
+                             parallélisme se décide. Le fichier qu'on remplace si on
+                             préfère Kokkos, SYCL, OpenMP ou une simple boucle.
+diffusion.py                 ce que loom écrit : l'enrobage FFI, la liaison des tampons,
+                             l'adjoint côté Jax. Une ligne de C++ par noyau.
+test_diffusion.py            les tests
+```
+
+Le partage est le point : **loom écrit l'enrobage, pas le noyau.** Les interfaces de Jax et de Torch
+sont lourdes *et* différentes — c'est ça qu'on ne veut pas écrire deux fois. Le reste, non :
+
+```python
+_avant = FfiCode(
+    include_roots = [ _RACINE ],
+    includes = [ "diffusion/noyaux.h" ],
+    code = "diffusion::pas( queue, grille, coef, suivant );",
+)
 ```
 
 ```bash
@@ -55,6 +74,10 @@ zéro silencieux.
 
 ## Les frictions, dans l'ordre où on les rencontre
 
+0. ~~**`compilation.register_include_root( ... )`**~~ **Réglé** : c'était une incantation de
+   module, prononcée avant tout autre import et sans rapport visible avec le noyau qui en a besoin.
+   Un noyau sait où sont ses en-têtes, et le dit dans l'appel : `FfiCode( include_roots = [ ... ] )`.
+
 1. **Tout s'appelle `sdot`.** Le C++ de loom vit dans `namespace sdot` ; les variables
    d'environnement sont `SDOT_BUILD_DIR`, `SDOT_CACHE_DIR`, `SDOT_KERNELS`, `SDOT_EXTERNALS` ; le
    cache est `~/.cache/sdot` ; les messages d'erreur disent « sdot: » ; le functor par défaut d'un
@@ -66,7 +89,7 @@ zéro silencieux.
    et `driver` est redevenu la couche basse. La friction était de passer par lui.
 
 3. ~~**Le batch d'un appel ne vient que des agrégats.**~~ et ~~**« Qui suis-je ? » n'a pas de
-   réponse.**~~ **Dissoutes** — et c'est instructif, parce que ni l'une ni l'autre n'était le
+   réponse.**~~ **Dissoutes**, deux fois — et c'est instructif, parce que ni l'une ni l'autre n'était le
    problème. Les deux étaient des symptômes d'une seule cause : **le lancement était implicite.**
 
    Le scaffold écrivait toujours `run_parallel( queue, global_batch_indices, ... )`, et
@@ -87,6 +110,14 @@ zéro silencieux.
 
    `Cellules`, `new_batch_axis`, l'`iota`, le rang, le décodage : tout a disparu (−29 lignes).
    Et « qui suis-je ? » ne se pose plus, parce que l'item EST le multi-indice qu'on a demandé.
+
+   **Puis une seconde fois, plus loin.** Le remède ci-dessus faisait encore écrire le foncteur et
+   le lancement *en Python*, sous forme de chaînes. La bonne réponse était plus simple : le C++ de ce
+   noyau vit dans **ses propres en-têtes**, foncteurs compris, et Python n'en dit qu'une ligne. Un
+   foncteur y déclare ses propres paramètres au lieu de les hériter de l'ordre des kwargs, et le
+   fichier se compile et se teste **sans loom**. Les deux mécanismes que loom avait gagnés pour
+   l'étape précédente (`functors = { ... }` et un `launch` injecté) sont devenus inutiles le jour
+   même, et ont été retirés.
 
    Ce que ça coûte, et il faut le dire : un corps qui lance lui-même ignore
    `global_batch_indices`, donc **il ne participe plus à `vmap`** tout seul. Pour cet exemple c'est

@@ -98,7 +98,7 @@ def _nb_tuiles( largeur, hauteur, cote = COTE ):
     return ( ( largeur + cote - 1 ) // cote ) * ( ( hauteur + cote - 1 ) // cote )
 
 
-_INSCRIRE = FfiCode(
+_INSCRIRE = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI i = SI( rangs.rang( batch_index ) );
@@ -107,7 +107,7 @@ _INSCRIRE = FfiCode(
     """,
 )
 
-_RENDRE = FfiCode(
+_RENDRE = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( rangs.rang( batch_index ) );
@@ -120,7 +120,7 @@ _RENDRE = FfiCode(
     """,
 )
 
-_RENDRE_BWD = FfiCode(
+_RENDRE_BWD = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( rangs.rang( batch_index ) );
@@ -218,7 +218,7 @@ def _sans_gradient( splats ):
 # fait pour ca ), et alloue donc EXACTEMENT. XLA ne peut pas : sous `jit` le compte est un tracer,
 # et il faut borner le total avant de tracer. Voir le tableau du README.
 
-_COMPTER = FfiCode(
+_COMPTER = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         splats::compter( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
@@ -226,7 +226,7 @@ _COMPTER = FfiCode(
     """,
 )
 
-_REMPLIR = FfiCode(
+_REMPLIR = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         splats::remplir( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
@@ -234,7 +234,7 @@ _REMPLIR = FfiCode(
     """,
 )
 
-_RENDRE_CSR = FfiCode(
+_RENDRE_CSR = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( rangs.rang( batch_index ) );

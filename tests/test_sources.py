@@ -1,4 +1,4 @@
-"""Les noyaux MULTI-FICHIERS : `FfiCode( sources = [ ( "x.cpp", { "DEF": ... } ) ] )`.
+"""Les noyaux MULTI-FICHIERS : `FfiCode.per_item( sources = [ ( "x.cpp", { "DEF": ... } ) ] )`.
 
 Une source de domaine est compilée une fois par (source, defines, compilateur) en un `.o` que
 tous les noyaux qui la nomment lient -- le code qu'on ne veut pas réinstancier dans chaque
@@ -20,7 +20,7 @@ def _scaled( scale ):
     num = Axis( ShapeVar( 3 ), name = "num" )
     res = IntTensor[ num ]()
     driver.call(
-        FfiCode( code = "for ( int i = 0; i < 3; ++i ) res( i ) = scaled( i + 1 );",
+        FfiCode.per_item( code = "for ( int i = 0; i < 3; ++i ) res( i ) = scaled( i + 1 );",
             includes = [ str( HERE / "scaled.h" ) ],
             sources = [ ( str( HERE / "scaled.cpp" ), { "SCALE": str( scale ) } ) ] ),
         name = f"test_sources_scaled_{ scale }",

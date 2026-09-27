@@ -1,4 +1,4 @@
-"""La facilité « kernel de GROUPE » (`FfiCode( group_size = ... )`), pour elle-même.
+"""La facilité « kernel de GROUPE » (`FfiCode.per_item( group_size = ... )`), pour elle-même.
 
 Elle n'était exercée que par `OtPlan1d`, à travers un tri radix coopératif et un balayage de
 transport optimal : quand elle casse, le symptôme est un coût de transport faux de 3 %, ce qui
@@ -30,7 +30,7 @@ def _sum_over_lanes( group_size ):
     res = IntTensor[ num_group ]()
 
     driver.call(
-        FfiCode( code = """
+        FfiCode.per_item( code = """
                 local_scratch[ local_index ] = local_index;
                 group_barrier( group );
                 if ( local_index == 0 ) {
@@ -69,7 +69,7 @@ def _runtime_subgroup_width( group_size ):
     res = IntTensor[ num_group ]()
 
     driver.call(
-        FfiCode( code = """
+        FfiCode.per_item( code = """
                 if ( local_index == 0 )
                     res( group_index ) = SI( sub_group.get_local_linear_range() );
             """,
@@ -104,7 +104,7 @@ def _probe( group_size, expr, tag ):
     num_lane = Axis( ShapeVar( group_size ), name = "num_lane" )
     res = IntTensor[ num_lane ]()
     driver.call(
-        FfiCode( code = f"res( local_index ) = SI( { expr } );",
+        FfiCode.per_item( code = f"res( local_index ) = SI( { expr } );",
             max_nb_threads = "return 1;",
             group_size = f"return { group_size };",
             local_mem_elems = f"return { group_size };" ),

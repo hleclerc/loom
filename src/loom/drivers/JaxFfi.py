@@ -378,19 +378,6 @@ def _render_call( code, ca, device ):
     queue_decl = device.cpp_queue_decl()
     body = code.code_for( ca )
 
-    # UN CORPS QUI LANCE LUI-MÊME reçoit `launch` : le lancement, sans redire les politiques d'io
-    # de l'appel ( Python les connaît attribut par attribut, voir `cpp_run_parallel_pair` ). C'est
-    # une commodité et pas une contrainte -- `queue` et les arguments sont là, donc `run_parallel`
-    # reste appelable directement quand on veut une autre politique ou moins d'arguments.
-    #
-    # Il est préfixé au CORPS et non au contexte, parce qu'il capture les arguments et que ceux-ci
-    # sont déclarés plus bas dans le gabarit.
-    if code.is_handler:
-        paires = ", ".join( arg.cpp_run_parallel_pair() for arg in ca.args.values() )
-        body = ( "    [[maybe_unused]] auto launch = [&]( auto &&items, auto &&func, auto &&...extra ) {\n"
-                 f"        return run_parallel( queue, FORWARD( items ), FORWARD( func ), { paires }"
-                 ", FORWARD( extra )... );\n"
-                 "    };\n" ) + body
     if scratch:
         queue_decl += "\n    " + device.cpp_scratch_decl()
         # le POURQUOI est perdu en route : `ScratchAllocator::Allocate` emet la raison dans un

@@ -22,6 +22,11 @@ class AbstractFfiCode:
         recompilerait tout le dépôt pour une capacité que personne n'utilise."""
         return False
 
+    @property
+    def is_handler( self ) -> bool:
+        """Si le corps EST le handler -- donc si c'est LUI qui lance. Faux par défaut."""
+        return False
+
 
 class FfiCode( AbstractFfiCode ):
     """Un noyau : le C++ qui s'exécute PAR ITEM, plus ce que l'appel doit savoir pour le lancer.
@@ -122,7 +127,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  scratch = False, _scaffold = True ) -> None:
+                  scratch = False, functors = {}, _scaffold = True ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -130,12 +135,17 @@ class FfiCode( AbstractFfiCode ):
         if local_mem_elems and not group_size:
             raise ValueError( "FfiCode: `local_mem_elems` without `group_size` -- there is no "
                               "work-group to share it" )
+        if functors and _scaffold:
+            raise ValueError( "FfiCode: `functors` va avec un corps QUI LANCE LUI-MÊME -- un noyau "
+                              "échafaudé n'a qu'un foncteur, le sien, et son lancement est "
+                              "engendré. Voir `FfiCode.handler`." )
 
         self.code = code
         self.prologue = prologue
         self.sources = tuple( sources )
         self.includes = tuple( includes )
         self.scratch = bool( scratch )
+        self.functors = dict( functors )
         self._scaffold = _scaffold
 
         # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
@@ -163,6 +173,11 @@ class FfiCode( AbstractFfiCode ):
     @property
     def wants_scratch( self ):
         return self.scratch
+
+    @property
+    def is_handler( self ):
+        """Le corps EST le handler : c'est LUI qui lance. Voir `FfiCode.handler`."""
+        return not self._scaffold
 
     def _params( self, names ):
         """Les paramètres de l'`operator()` : les réservés, puis un par argument de l'appel --
@@ -197,7 +212,13 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            return ""
+            # un corps qui lance lui-même a besoin de foncteurs, et ils doivent être au niveau du
+            # NAMESPACE : C++ interdit les méthodes template dans une classe locale, donc on ne
+            # peut pas les écrire au milieu du handler. Sans ça, `FfiCode.handler` obligeait à
+            # sortir un en-tête à côté -- ce qui le rendait inutilisable en pratique.
+            names = list( call_args_analysis.args )
+            return "".join( self._functor_decl( nom, corps, names )
+                            for nom, corps in self.functors.items() )
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
         return ( f"struct { functor } {{\n"
@@ -205,6 +226,24 @@ class FfiCode( AbstractFfiCode ):
                  f"    template<{ ', '.join( 'class ' + t for t in tparams ) }>\n"
                  f"    HD void operator()( { ', '.join( f'{ t } { n }' for t, n in params ) } ) const {{\n"
                  f"        { self.code }\n"
+                 f"    }}\n"
+                 f"}};\n" )
+
+    def _functor_decl( self, nom, corps, names ):
+        """Un foncteur nommé, dont les paramètres sont ceux de l'appel -- comme pour un noyau
+        échafaudé, donc le corps nomme ses arguments exactement pareil.
+
+        Le premier paramètre s'appelle `item` : sous un domaine que l'appelant choisit, ce n'est
+        plus un indice de batch. `batch_index` reste disponible sous son ancien nom, pour qu'un
+        corps déplacé depuis un noyau échafaudé continue de compiler."""
+        tparams, params = self._params( names )
+        params = [ ( "T_item", "item" ) ] + params[ 1: ]
+        tparams = [ "T_item" ] + [ t for t in tparams if t != "BatchIndex" ]
+        return ( f"struct { nom } {{\n"
+                 f"    template<{ ', '.join( 'class ' + t for t in tparams ) }>\n"
+                 f"    HD void operator()( { ', '.join( f'{ t } { n }' for t, n in params ) } ) const {{\n"
+                 f"        [[maybe_unused]] const auto &batch_index = item;\n"
+                 f"        { corps }\n"
                  f"    }}\n"
                  f"}};\n" )
 
@@ -234,7 +273,7 @@ class FfiCode( AbstractFfiCode ):
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, scratch = self.scratch,
-                       _scaffold = self._scaffold,
+                       functors = self.functors, _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
         return res
@@ -271,6 +310,10 @@ class Kernels( AbstractFfiCode ):
     @property
     def wants_scratch( self ):
         return self.forward.wants_scratch
+
+    @property
+    def is_handler( self ):
+        return self.forward.is_handler
 
     def functor_name( self ) -> str:
         """L'identifiant C++ du foncteur : le nom de l'appel, rendu identifiant."""

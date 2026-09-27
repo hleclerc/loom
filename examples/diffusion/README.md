@@ -65,17 +65,32 @@ zéro silencieux.
    classe, qui EST la déclaration de type (`IntTensor[ x ]( [ 0, 1, 2 ] )` ne peut pas se tromper),
    et `driver` est redevenu la couche basse. La friction était de passer par lui.
 
-3. **Le batch d'un appel ne vient que des agrégats.** `CallArgsAnalysis` collecte `batch_axes` sur
-   les arguments qui en ont ; un **tenseur nu** portant le même axe est ignoré en silence, le
-   noyau reçoit un `batch_index` vide, et ça échoue en `static_assert` au fond de
-   `TensorView.cxx`, pas en Python. D'où l'agrégat `Cellules`, qui n'existe que pour porter l'axe.
-   (La docstring de `tensor/batch.py` connaît déjà le cas — « un axe de batch peut atteindre un
-   appel par un tenseur NU » — mais l'analyse, elle, ne le gère pas.)
+3. ~~**Le batch d'un appel ne vient que des agrégats.**~~ et ~~**« Qui suis-je ? » n'a pas de
+   réponse.**~~ **Dissoutes** — et c'est instructif, parce que ni l'une ni l'autre n'était le
+   problème. Les deux étaient des symptômes d'une seule cause : **le lancement était implicite.**
 
-4. **« Qui suis-je ? » n'a pas de réponse** côté noyau : le scaffold injecte `batch_index`,
-   `thread_index`, `nb_threads` — pas le rang plat de l'item. **À moitié réglé** : il n'y a plus de
-   `np.arange` hôte (`IntTensor[ cellule ].iota()` bâtit l'indice sur le device), mais il faut
-   encore le passer en argument. Le vrai remède serait que le scaffold l'injecte.
+   Le scaffold écrivait toujours `run_parallel( queue, global_batch_indices, ... )`, et
+   `global_batch_indices` ne se remplit que des axes de `vmap`. Un noyau dont le parallélisme
+   n'est pas un axe de `vmap` — une grille cartésienne, parcourue en (j, i) — n'avait donc aucun
+   moyen de le dire. D'où la cascade : fabriquer un axe de batch plat de `ny · nx`, **matérialiser
+   un `iota` int64 de n² éléments** pour porter le rang, l'envelopper dans un agrégat-prétexte
+   (`Cellules`, dont la docstring admettait qu'il ne servait à rien), et redécouper `j = p / n,
+   i = p % n` dans les **deux** noyaux — pour retrouver deux coordonnées que la donnée avait déjà.
+   Sur une grille 128², cela faisait 131 ko alloués et traversés par appel, 40 appels par gradient,
+   pour calculer une division euclidienne.
+
+   Le remède est que **l'utilisateur lance lui-même** (`FfiCode.handler( functors = { ... } )`) :
+
+   ```python
+   code = "launch( indices_over( grille.ny, grille.nx ), un_pas{} );"
+   ```
+
+   `Cellules`, `new_batch_axis`, l'`iota`, le rang, le décodage : tout a disparu (−29 lignes).
+   Et « qui suis-je ? » ne se pose plus, parce que l'item EST le multi-indice qu'on a demandé.
+
+   Ce que ça coûte, et il faut le dire : un corps qui lance lui-même ignore
+   `global_batch_indices`, donc **il ne participe plus à `vmap`** tout seul. Pour cet exemple c'est
+   gratuit (il ne se `vmap` pas) ; en général il faudrait composer les deux domaines.
 
 5. ~~**Pas d'`arange`, pas de `linspace`, pas de `ones`.**~~ **Réglé**, et sur les tenseurs plutôt
    que sur le driver : `zeros`, `ones`, `full`, `iota`, `linspace`, `random`, qui lisent leur forme

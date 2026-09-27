@@ -23,9 +23,8 @@ import loom.compilation as compilation
 # loom ne connait pas ses usagers par leur nom.
 compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
 
-from loom import Aggregate, Axis, CtShapeVar, IntTensor, RealTensor, driver
+from loom import Aggregate, Axis, CtShapeVar, RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
-from loom.tensor import new_batch_axis
 
 
 class Grille( Aggregate ):
@@ -45,17 +44,6 @@ class Grille( Aggregate ):
     nx          : CtShapeVar
 
 
-class Cellules( Aggregate ):
-    """« Qui suis-je ? », pour le work-item qui traite une cellule : son rang plat `j * nx + i`.
-
-    Cet agregat n'existe QUE pour porter l'axe de batch. Un `driver.call` prend son parcours
-    ( `global_batch_indices` ) des `batch_axes` de ses arguments AGREGATS uniquement : un tenseur
-    NU qui porterait le meme axe est ignore, et le noyau se retrouve avec un `batch_index` vide --
-    ce qui echoue au fond d'une erreur de template C++, pas en Python. Voir le README.
-    """
-    rang        : IntTensor
-
-
 def axes( n ):
     """Les deux axes d'une grille `n x n` : de quoi batir ses champs avec les fabriques
     ( `RealTensor[ y, x ].ones()`, `.linspace( 0, 1, x )`, ... ) sans jamais repeter la forme."""
@@ -66,22 +54,26 @@ def axes( n ):
 # DEUX noyaux : l'aller fait le pas, le retour rend les deux gradients. Les deux se
 # contentent d'appeler l'en-tete -- c'est le C++ qu'on avait deja qui travaille. C'est
 # l'APPEL qui les prend tous les deux, et qui porte le nom ( voir `FfiCode` ).
-_avant = FfiCode(
+# C'est LE CORPS qui lance : `indices_over( ny, nx )` dit le domaine -- un work-item par cellule,
+# et deux coordonnees, celles que la grille a deja. Le parallelisme d'un noyau n'est pas un axe de
+# `vmap`, et ne devrait pas avoir a s'en deguiser un.
+_avant = FfiCode.handler(
     includes = [ "diffusion/pas.h" ],
-    code = """
-        const SI n = SI( grille.nx ), m = SI( grille.ny );
-        const SI p = SI( cellules.rang( batch_index ) ), j = p / n, i = p % n;
-
+    functors = { "un_pas": """
+        const SI j = item[ 0_c ], i = item[ 1_c ];
         suivant( y = j, x = i ) = diffusion::pas_explicite(
-            grille.temperature, grille.diffusivite, j, i, m, n, coef );
+            grille.temperature, grille.diffusivite, j, i, SI( grille.ny ), SI( grille.nx ), coef );
+    """ },
+    code = """
+        launch( indices_over( grille.ny, grille.nx ), un_pas{} );
     """,
 )
 
-_arriere = FfiCode(
+_arriere = FfiCode.handler(
     includes = [ "diffusion/pas.h" ],
-    code = """
+    functors = { "un_pas_adjoint": """
         const SI n = SI( grille.nx ), m = SI( grille.ny );
-        const SI p = SI( cellules.rang( batch_index ) ), j = p / n, i = p % n;
+        const SI j = item[ 0_c ], i = item[ 1_c ];
 
         // `coef` est une constante du probleme, jamais perturbee : son gradient demanderait une
         // reduction globale ( une somme atomique sur toute la grille ), et il n'est pas ecrit.
@@ -107,6 +99,9 @@ _arriere = FfiCode(
                 grad_for_grille.diffusivite( y = j, x = i ) = diffusion::adjoint_diffusivite(
                     grille.temperature, grille.diffusivite, grad_for_suivant, j, i, m, n, coef );
         }
+    """ },
+    code = """
+        launch( indices_over( grille.ny, grille.nx ), un_pas_adjoint{} );
     """,
 )
 
@@ -121,12 +116,6 @@ def pas( u, k, coef ):
     grille.temperature = u
     grille.diffusivite = k
 
-    # « qui suis-je ? » : un work-item par cellule, et son rang plat. La CLASSE dit le type, donc
-    # l'iota est entier sans qu'on ait a le repeter -- et il est bati sur le device.
-    cellule = new_batch_axis( ny * nx, prefix = "cellule" )
-    cellules = Cellules( batch_axes = [ cellule ] )
-    cellules.rang = IntTensor[ cellule ].iota()
-
     suivant = RealTensor[ grille.y, grille.x ]()
 
     driver.call(
@@ -134,7 +123,6 @@ def pas( u, k, coef ):
         _arriere,
         name = "diffusion_pas",
         grille = grille,
-        cellules = cellules,
         coef = RealTensor( float( coef ) ),
         suivant = suivant,
         output_attributes = [ "suivant" ],

@@ -78,4 +78,25 @@ struct CartesianIndices {
     Shape shape;
 };
 
+/// UN DOMAINE DE LANCEMENT QU'ON CHOISIT : un item par point de la forme donnée.
+///
+/// C'est ce qui manquait quand `run_parallel` était engendré pour vous : le seul domaine possible
+/// était `global_batch_indices`, qui ne se remplit que des axes de `vmap`. Un noyau dont le
+/// parallélisme n'est PAS un axe de `vmap` -- une grille cartésienne, parcourue en (j, i) -- devait
+/// donc fabriquer un axe de batch plat, matérialiser le rang dans un tampon, et le redécouper en
+/// C++. Voir l'historique d'`examples/diffusion`, qui faisait exactement ça.
+///
+/// Les extents GARDENT LEUR TYPE : un `Ct<SI,N>` reste connu à la compilation, donc le corps peut
+/// dérouler dessus. Les items sont des multi-indices NUS ( `item[ 0_c ]`, `item[ 1_c ]` ) -- ce que
+/// veut un en-tête écrit à la main, dont les fonctions prennent des entiers.
+HD auto indices_over( auto &&...extents ) {
+    auto shape = tuple( FORWARD( extents )... );
+    return CartesianIndices<DECAYED_TYPE_OF( shape )>{ shape };
+}
+
+/// MANQUE ENCORE, et c'est ce qu'il faudra pour composer avec `vmap` : un domaine NOMMÉ ( dont les
+/// items portent `y = j, x = i`, donc consommables par nom ) et un moyen de le concaténer avec
+/// `global_batch_indices`. Un corps qui lance lui-même ignore aujourd'hui les axes de batch de
+/// l'appel, donc il ne se `vmap` pas tout seul.
+
 } // namespace sdot

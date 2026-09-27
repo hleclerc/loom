@@ -378,6 +378,31 @@ def _render_call( code, ca, device ):
     queue_decl = device.cpp_queue_decl()
     body = code.code_for( ca )
 
+    # LES ARGUMENTS ASSEMBLÉS : un agrégat dont les membres portent les noms des kwargs, plus
+    # `queue`, `machine` et `errors`. C'est ce que reçoit la fonction noyau de l'utilisateur.
+    #
+    # Pourquoi un agrégat et pas une liste de paramètres : l'ordre des kwargs cesse de compter, et
+    # ajouter un argument à l'appel ne touche plus la signature du C++. La struct est un TEMPLATE
+    # déduit à l'instanciation (CTAD sur agrégat, C++20), exactement comme les agrégats de l'appel.
+    #
+    # Émis pour la forme générale seulement : un noyau `per_item` rend une source inchangée.
+    args_struct = ""
+    if code.is_handler:
+        membres = [ ( "queue", "queue", True ), ( "machine", "queue.machine()", False ),
+                    ( "errors", ERRORS_VAR_NAME, False ) ]
+        for nom, arg in ca.args.items():
+            membres.append( ( nom, nom, False ) )
+            membres.append( ( f"{ nom }_io", arg.cpp_io_expr(), False ) )
+
+        tparams = ", ".join( f"class T_{ nom }" for nom, _, _ in membres )
+        champs = "".join( f"    T_{ nom } { '&' if ref else '' }{ nom };\n"
+                          for nom, _, ref in membres )
+        args_struct = ( f"\n// les arguments de cet appel, assemblés. Voir `FfiCode`.\n"
+                        f"template<{ tparams }>\n"
+                        f"struct { code.args_name() } {{\n{ champs }}};\n" )
+        body = ( f"    { code.args_name() } args{{ "
+                 + ", ".join( expr for _, expr, _ in membres ) + " };\n" ) + body
+
     if scratch:
         queue_decl += "\n    " + device.cpp_scratch_decl()
         # le POURQUOI est perdu en route : `ScratchAllocator::Allocate` emet la raison dans un
@@ -395,7 +420,7 @@ def _render_call( code, ca, device ):
         queue_decl    = queue_decl,
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
-        preamble      = code.preamble_for( ca ),
+        preamble      = code.preamble_for( ca ) + args_struct,
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'
                                  for n in ca.axis_names ),

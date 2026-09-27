@@ -47,7 +47,10 @@ def axes( n ):
 
 # LES DEUX NOYAUX, et c'est tout ce que Python en dit : un appel a NOTRE fonction C++.
 #
-# Le corps est du C++ recopie dans le handler, ou `queue` et les arguments de l'appel sont declares.
+# `preamble` est du C++ emis au niveau du namespace, verbatim : nos `#include`, et rien que ce qu'on
+# y met. `code` est le corps du handler, ou loom a assemble `args` -- un objet dont les membres
+# portent les noms de nos kwargs, plus `queue`, `machine` et `errors`.
+#
 # Ce qui se passe dedans -- le parcours de la grille, le choix du parallelisme -- vit dans
 # `include/diffusion/noyaux.h` et n'a aucune trace ici. Un usager qui prefere Kokkos ou OpenMP
 # change ce fichier-la, pas celui-ci.
@@ -58,17 +61,14 @@ _RACINE = Path( __file__ ).resolve().parent / "include"
 
 _avant = FfiCode(
     include_roots = [ _RACINE ],
-    includes = [ "diffusion/noyaux.h" ],
-    code = "diffusion::pas( queue, grille, coef, suivant );",
+    preamble = '#include "diffusion/noyaux.h"',
+    code = "diffusion::pas( args );",
 )
 
 # L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom.
 _arriere = FfiCode(
-    includes = [ "diffusion/noyaux.h" ],
-    code = """
-        diffusion::pas_adjoint( queue, grille, coef, grad_for_suivant,
-                                grad_for_grille, grad_for_coef );
-    """,
+    preamble = '#include "diffusion/noyaux.h"',
+    code = "diffusion::pas_adjoint( args );",
 )
 
 

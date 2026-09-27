@@ -2,6 +2,7 @@
 
 #include "CudaGlobalMemorySpace.h"
 #include "CudaKernelMemorySpace.h"
+#include "Machine.h"
 #include "CpuHostMemorySpace.h"
 #include "../common_macros.h"
 #include "../common_types.h"
@@ -39,6 +40,10 @@ struct CudaQueue {
     explicit CudaQueue( cudaStream_t stream ) : stream( stream ) {}
     CudaQueue() : stream( 0 ) {}
 
+    /// ce qu'un noyau peut savoir de cette carte ( voir `Machine.h` ). Interroge le driver UNE
+    /// fois : les attributs ne changent pas, et un appel par noyau serait du temps perdu.
+    Machine machine() const;
+
     cudaStream_t stream;
 };
 
@@ -48,6 +53,33 @@ inline void cuda_check( cudaError_t err, const char *what ) {
     if ( err != cudaSuccess )
         throw std::runtime_error( std::string( "CUDA: " ) + what + ": " + cudaGetErrorString( err ) );
 }
+
+/// les attributs de la carte, lus UNE fois. `nb_workers` est le nombre de fils qui peuvent etre
+/// residents en meme temps ( SMs x fils par SM ) : c'est ce sur quoi dimensionner un scratch PAR
+/// FIL. `suggested_group` est la largeur de warp, decoupage naturel d'un algorithme cooperatif --
+/// et non le `block = 128` du lancement plat, qui est un detail interne a ce fichier.
+inline const Machine &cuda_machine() {
+    static const Machine m = [] {
+        int dev = 0;
+        cuda_check( cudaGetDevice( &dev ), "get device" );
+        auto attr = [&]( cudaDeviceAttr a, const char *what ) {
+            int v = 0;
+            cuda_check( cudaDeviceGetAttribute( &v, a, dev ), what );
+            return SI( v );
+        };
+        const SI warp = attr( cudaDevAttrWarpSize, "warp size" );
+        return Machine{
+            attr( cudaDevAttrMultiProcessorCount, "SM count" )
+                * attr( cudaDevAttrMaxThreadsPerMultiProcessor, "threads per SM" ),
+            warp,
+            attr( cudaDevAttrMaxSharedMemoryPerBlock, "shared mem per block" ),
+            warp,
+        };
+    }();
+    return m;
+}
+
+inline Machine CudaQueue::machine() const { return cuda_machine(); }
 
 // ── relecture / écriture hôte d'un élément en mémoire globale (`Ptr::value` / `Ptr::set`) ──
 template<class T>

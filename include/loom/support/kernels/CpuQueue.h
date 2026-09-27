@@ -5,6 +5,7 @@
 #include "../common_macros.h"
 #include "../common_types.h"
 #include "CpuThreadPool.h"
+#include "Machine.h"
 #include "QueueEvent.h"
 #include "IoCategory.h"
 #include "Reducer.h"
@@ -45,6 +46,13 @@ struct CpuQueue {
 
     void run_threads( int nb_threads, const std::function<void( int )> &job ) const { pool->run_threads( nb_threads, job ); }
     int  nb_workers () const { return pool->nb_workers(); }
+
+    /// ce qu'un noyau peut savoir de cette machine ( voir `Machine.h` ). Pas de voies, donc pas de
+    /// sub-group : tout est a 1, et le budget de memoire partagee est notionnel -- `CpuQueue` prend
+    /// un `std::vector` sur le tas, il n'y a pas de limite materielle a annoncer.
+    Machine machine() const {
+        return { SI( pool->nb_workers() ), 1, cpu_notional_local_mem_bytes, 1 };
+    }
 
     CpuThreadPool *pool;
 };

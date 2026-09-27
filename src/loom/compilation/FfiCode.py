@@ -102,7 +102,7 @@ class FfiCode( AbstractFfiCode ):
     plat et le redécouper en C++. Voir `examples/diffusion/README.md`, friction 3.
     """
 
-    def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
+    def __init__( self, code = "", preamble = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
                   scratch = False, _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
@@ -127,6 +127,7 @@ class FfiCode( AbstractFfiCode ):
             register_include_root( root )
 
         self.code = code
+        self.preamble = preamble
         self.prologue = prologue
         self.sources = tuple( sources )
         self.includes = tuple( includes )
@@ -206,10 +207,9 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            # rien. Le C++ de ce noyau vit dans SES en-têtes, foncteurs compris -- et c'est là qu'il
-            # doit être : un foncteur y déclare ses propres paramètres au lieu de les hériter de
-            # l'ordre des kwargs Python, et le fichier se compile et se teste sans loom.
-            return ""
+            # ce que l'utilisateur a écrit, verbatim, au niveau du NAMESPACE : ses `#include`, ses
+            # foncteurs, ses `using`. Loom n'y met rien -- le C++ de ce noyau est à lui.
+            return self.preamble
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
         return ( f"struct { functor } {{\n"
@@ -244,7 +244,7 @@ class FfiCode( AbstractFfiCode ):
         jamais héritée -- c'est tout l'intérêt de l'avoir sortie."""
         if self.includes and self.sources:
             return self
-        res = FfiCode( self.code, self.prologue, self.includes or other.includes,
+        res = FfiCode( self.code, self.preamble, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, self.include_roots or other.include_roots,
                        scratch = self.scratch,
                        _scaffold = self._scaffold,
@@ -289,12 +289,20 @@ class Kernels( AbstractFfiCode ):
     def is_handler( self ):
         return self.forward.is_handler
 
-    def functor_name( self ) -> str:
-        """L'identifiant C++ du foncteur : le nom de l'appel, rendu identifiant."""
+    def cpp_base_name( self ) -> str:
+        """Le nom de l'appel, rendu identifiant C++. Tout ce qui est engendré pour cet appel en
+        dérive, et c'est ce qui les garde distincts quand un catalogue lie plusieurs noyaux dans une
+        seule bibliothèque."""
         base = "".join( c if c.isalnum() or c == "_" else "_" for c in self.name )
-        if base[ 0 ].isdigit():
-            base = "_" + base
-        return f"{ base }_kernel"
+        return "_" + base if base[ 0 ].isdigit() else base
+
+    def functor_name( self ) -> str:
+        """L'identifiant C++ du foncteur engendré ( forme `per_item` )."""
+        return f"{ self.cpp_base_name() }_kernel"
+
+    def args_name( self ) -> str:
+        """L'identifiant C++ de l'agrégat d'arguments ( forme générale )."""
+        return f"{ self.cpp_base_name() }_args"
 
     def preamble_for( self, call_args_analysis ) -> str:
         return self.forward.preamble_for( call_args_analysis, self.functor_name() )

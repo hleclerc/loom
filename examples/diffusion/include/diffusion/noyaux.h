@@ -12,8 +12,13 @@
 //              Il ne sait pas comment on parallelise, et n'a pas a le savoir.
 //
 // D'ou vient l'interet : ce fichier est celui qu'on remplace si on prefere Kokkos, SYCL, OpenMP ou
-// une simple boucle sequentielle. loom nous remet une `queue` et des vues -- le reste nous
-// appartient. `run_parallel` ci-dessous est l'outil de loom, pas une obligation de loom.
+// une simple boucle sequentielle. `run_parallel` ci-dessous est l'outil de loom, pas une obligation
+// de loom.
+//
+// CE QUE LOOM NOUS REMET est un seul objet, `args`, dont les membres portent les noms des kwargs de
+// l'appel -- plus `queue`, `machine` ( voir loom/support/kernels/Machine.h ) et `errors`, et une
+// politique d'io par argument ( `<nom>_io` ). Nos fonctions sont donc des templates sur ce type :
+// l'ordre des kwargs ne compte pas, et ajouter un argument a l'appel ne touche pas ce fichier.
 
 #include "pas.h"
 
@@ -39,11 +44,15 @@ struct UnPas {
 
 /// UN PAS, sur toute la grille. Le domaine est celui de la DONNEE -- deux coordonnees, pas un rang
 /// plat a redecouper.
-void pas( auto &queue, const auto &grille, const auto &coef, const auto &suivant ) {
-    sdot::run_parallel( queue, sdot::indices_over( grille.ny, grille.nx ), UnPas{},
-                        sdot::InpList(), grille,
-                        sdot::InpList(), coef,
-                        sdot::OutList(), suivant );
+///
+/// Les politiques d'io viennent de `args` ( `a.grille_io` ) et non d'un tag ecrit ici : loom les a
+/// deduites de ce que l'appel declare en sortie, attribut par attribut. Un tag nu marcherait aussi
+/// aujourd'hui, mais ce serait redire -- et moins juste le jour ou un device transferera.
+void pas( auto &a ) {
+    sdot::run_parallel( a.queue, sdot::indices_over( a.grille.ny, a.grille.nx ), UnPas{},
+                        a.grille_io,   a.grille,
+                        a.coef_io,     a.coef,
+                        a.suivant_io,  a.suivant );
 }
 
 /// l'adjoint pour UNE cellule : les deux gradients, en gather pur ( voir `pas.h` ).
@@ -81,15 +90,13 @@ struct UnPasAdjoint {
 };
 
 /// l'adjoint du pas, sur toute la grille. Meme domaine que l'aller -- c'est le meme parcours.
-void pas_adjoint( auto &queue, const auto &grille, const auto &coef,
-                  const auto &grad_for_suivant, const auto &grad_for_grille,
-                  const auto &grad_for_coef ) {
-    sdot::run_parallel( queue, sdot::indices_over( grille.ny, grille.nx ), UnPasAdjoint{},
-                        sdot::InpList(), grille,
-                        sdot::InpList(), coef,
-                        sdot::InpList(), grad_for_suivant,
-                        sdot::OutList(), grad_for_grille,
-                        sdot::InpList(), grad_for_coef );
+void pas_adjoint( auto &a ) {
+    sdot::run_parallel( a.queue, sdot::indices_over( a.grille.ny, a.grille.nx ), UnPasAdjoint{},
+                        a.grille_io,           a.grille,
+                        a.coef_io,             a.coef,
+                        a.grad_for_suivant_io, a.grad_for_suivant,
+                        a.grad_for_grille_io,  a.grad_for_grille,
+                        a.grad_for_coef_io,    a.grad_for_coef );
 }
 
 } // namespace diffusion

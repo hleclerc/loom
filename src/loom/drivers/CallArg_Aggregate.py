@@ -281,6 +281,9 @@ class CallArg_Aggregate( CallArg ):
         cats = ", ".join( c.cpp_io_list() for c in self._fields( "cpp_member" ) )
         return f"{ self.io_type_name }{{ { cats } }}"
 
+    def cpp_io_expr( self ):
+        return f"{ self.name }_io"
+
     def cpp_run_parallel_pair( self ):
         # the policy VARIABLE declared beside us (`cpp_root_decl` emits `<name>_io`): a category
         # per member, not one blanket tag for the whole aggregate.

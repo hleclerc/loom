@@ -87,6 +87,11 @@ class CallArg:
         overrides this to hand its per-member POLICY instead of one blanket tag."""
         return f"{ self.cpp_io_list() }, { self.name }"
 
+    def cpp_io_expr( self ):
+        """Notre politique d'io comme UNE expression C++ ( un tag pour nous, une variable de
+        politique par membre pour un agrégat ). C'est ce qu'un membre de `<nom>_args` porte."""
+        return self.cpp_io_list()
+
     def cpp_io_list( self ):
         """This member's io category, as the tag `run_parallel` speaks (see kernels/IoCategory.h).
 

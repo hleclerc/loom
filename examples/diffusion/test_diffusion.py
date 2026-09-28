@@ -12,7 +12,7 @@ from loom import RealTensor, driver
 from errand import test
 from loom.testing import check_grad
 
-from diffusion import axes, evolution, pas
+from diffusion import evolution, pas
 
 
 def _grille( n, f ):
@@ -59,8 +59,7 @@ if test( "le_bord_reste_impose" ):
     # les cellules du bord portent une temperature imposee : un pas ne doit pas y toucher, quoi
     # que fasse l'interieur.
     n = 12
-    y, x = axes( n )
-    u = RealTensor[ y, x ].random( seed = 3 ).raw
+    u = RealTensor[ n, n ].random( seed = 3 ).raw
     v = pas( u, 0.15 )
 
     for j in range( n ):
@@ -94,8 +93,7 @@ if test( "on_remonte_le_temps" ):
         ecart = evolution( u, coef, nb_pas ) - observee
         return ( ecart * ecart ).sum()
 
-    y, x = axes( n )
-    u = RealTensor[ y, x ].zeros().raw
+    u = RealTensor[ n, n ].zeros().raw
     perte_jit = driver.jit( perte )
     gradient = driver.jit( driver.grad( perte ) )
 

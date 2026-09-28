@@ -93,7 +93,7 @@ template<class... A,class... B> struct TupleCat<Tuple<A...>,Tuple<B...>> { using
 template<class> struct TupleHead;
 template<class H,class... T> struct TupleHead<Tuple<H,T...>> { using type = H; };
 
-/// COMPOSER DEUX DOMAINES : `batch_axes + args.suivant.axes()`.
+/// COMPOSER DEUX DOMAINES : `batch_axes + args.suivant.domain()`.
 ///
 /// C'est la piece qui rend la forme generale aussi capable que l'echafaudage : un corps qui lance
 /// lui-meme n'ignore plus les axes de batch de l'appel, il les AJOUTE aux siens. Et comme les
@@ -101,7 +101,7 @@ template<class H,class... T> struct TupleHead<Tuple<H,T...>> { using type = H; }
 /// coordonnees qu'il a -- un scalaire de rang 0 les ignore toutes. Un seul corps, batche ou non.
 ///
 /// L'UNION, ET PAS LA CONCATENATION : un tenseur batche porte DEJA l'axe de batch dans ses propres
-/// axes, donc `batch_axes + args.suivant.axes()` le nommerait deux fois -- le domaine aurait alors
+/// axes, donc `batch_axes + args.suivant.domain()` le nommerait deux fois -- le domaine aurait alors
 /// nb_batch fois trop d'items, et chaque element serait ecrit plusieurs fois. Un axe NOMME deja
 /// present est donc saute ( on garde l'extent du premier ). Les axes anonymes, eux, ne se
 /// dedupliquent pas : deux dimensions sans nom sont deux dimensions.

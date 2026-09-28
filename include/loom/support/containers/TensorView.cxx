@@ -27,7 +27,7 @@ UTP HD auto DTP::size( auto axis ) const {
     return _shape[ Ct<int,pos>() ];
 }
 
-UTP HD auto DTP::axes() const {
+UTP HD auto DTP::domain() const {
     return CartesianIndices<Shape,AxisNames>{ _shape };
 }
 

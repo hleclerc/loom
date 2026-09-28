@@ -120,7 +120,14 @@ public:
     /// NOTRE DOMAINE : un item par élément, chaque coordonnée portant le nom de son axe. C'est ce
     /// qu'on passe à `run_parallel`, et c'est bien défini -- contrairement aux axes d'un AGRÉGAT,
     /// qui en a souvent qu'on ne parcourt pas ( `Splats` a `splat`, mais aussi `rvb` ).
-    HD auto          axes                   () const;
+    ///
+    /// Il porte les EXTENTS, qui sont des données d'exécution : c'est pour ça que c'est une
+    /// méthode, là où `axes` ci-dessous est une constante de compilation.
+    HD auto          domain                 () const;
+
+    /// NOS AXES, comme un ensemble ( voir `Coords.h` ) : de quoi soustraire et itérer, sans
+    /// extents. Purement des types, donc gratuit -- et le même nom que `coords.axes`.
+    static constexpr typename detail::AxesOfTuple<_AxisNames>::type axes = {};
 
     /// notre taille le long d'un axe NOMME ( `args.suivant.size( y )` ).
     HD auto          size                   ( auto axis ) const;

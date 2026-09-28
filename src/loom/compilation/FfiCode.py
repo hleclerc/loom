@@ -248,7 +248,7 @@ class FfiCode( AbstractFfiCode ):
             # L'APPEL, et il est fixe : `kernel( queue, batch_axes, args )`. Trois choses, et la
             # deuxième est ce qui rend cette forme aussi capable que l'échafaudage -- les axes de
             # batch de l'appel sont une VALEUR que le noyau compose avec les siens
-            # (`batch_axes + args.<tenseur>.axes()`), au lieu d'un domaine qu'on lui impose.
+            # (`batch_axes + args.<tenseur>.domain()`), au lieu d'un domaine qu'on lui impose.
             return prologue + "kernel( queue, global_batch_indices, args );"
 
         names = list( call_args_analysis.args )

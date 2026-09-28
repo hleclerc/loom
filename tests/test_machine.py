@@ -29,7 +29,7 @@ _CODE = """
     };
 
     void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-        queue.run_parallel( PoserMachine(), batch_axes + args.champs.axes(), args );
+        queue.run_parallel( PoserMachine(), batch_axes + args.champs.domain(), args );
     }
 """
 

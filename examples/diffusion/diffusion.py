@@ -11,16 +11,8 @@ CE QUE L'EXEMPLE MONTRE : le corps du noyau ne compte JAMAIS de dimensions. Il d
 les parcourt, et se deplace le long de l'un d'eux. Le meme corps vaut donc en 2D, en 3D, batche ou
 non -- et un `vmap` lui ajoute un axe sans qu'il sache qu'il existe ( c'est teste ).
 """
-from loom import Axis, RealTensor, ShapeVar, driver
+from loom import RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
-
-
-def axes( n ):
-    """Les deux axes d'une grille `n x n`.
-
-    Deux tenseurs qui PARTAGENT ces axes sont sur la meme grille -- ce qu'une paire d'entiers ne
-    dirait pas, et ce sur quoi tout le reste s'appuie."""
-    return Axis( ShapeVar( n ), name = "y" ), Axis( ShapeVar( n ), name = "x" )
 
 
 # LE NOYAU, en clair : on lit le tutoriel sans naviguer dans les fichiers.
@@ -76,7 +68,7 @@ _avant = FfiCode(
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPas(), args.suivant.axes(), args, batch_axes );
+                queue.run_parallel( UnPas(), args.suivant.domain(), args, batch_axes );
             }
         }
     """,
@@ -141,7 +133,7 @@ _arriere = FfiCode(
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPasAdjoint(), args.temperature.axes(), args, batch_axes );
+                queue.run_parallel( UnPasAdjoint(), args.temperature.domain(), args, batch_axes );
             }
         }
     """,
@@ -153,12 +145,11 @@ def pas( u, coef ):
 
     `u` est un tenseur du driver de forme `( ny, nx )` et `coef` vaut `dt k / h^2` -- la
     diffusivite est CONSTANTE. Renvoie la temperature mise a jour, derivable par rapport a `u`."""
-    ny, nx = u.shape
-    y = Axis( ShapeVar( ny ), name = "y" )
-    x = Axis( ShapeVar( nx ), name = "x" )
-
-    temperature = RealTensor[ y, x ]( u )
-    suivant = RealTensor[ y, x ]()
+    # AUCUN vocabulaire d'axe : `RealTensor[ *u.shape ]` fabrique des axes anonymes a partir de la
+    # forme ( ils recoivent des noms distincts a l'abaissement, `a0` / `a1` ), et `suivant` reprend
+    # LES MEMES -- c'est ce qui dit a loom que les deux tenseurs sont sur la meme grille.
+    temperature = RealTensor[ *u.shape ]( u )
+    suivant = RealTensor[ *temperature.axes ]()
 
     driver.call(
         _avant,
@@ -177,3 +168,22 @@ def evolution( u, coef, nb_pas ):
     for _ in range( nb_pas ):
         u = pas( u, coef )
     return u
+
+
+if __name__ == "__main__":
+    # de quoi voir l'exemple tourner sans rien installer : `python diffusion.py`
+    import numpy
+
+    n, nb_pas, coef = 21, 40, 0.2
+    centre = ( n - 1 ) / 2
+    u = numpy.array( [ [ 0.0 if j in ( 0, n - 1 ) or i in ( 0, n - 1 ) else
+                         float( numpy.exp( - ( ( i - centre ) ** 2 + ( j - centre ) ** 2 ) / 8 ) )
+                         for i in range( n ) ] for j in range( n ) ] )
+
+    chaud = float( numpy.asarray( u ).max() )
+    v = evolution( driver.array( u ), coef, nb_pas )
+    print( f"{ nb_pas } pas de diffusion sur une grille { n }x{ n } ( c = { coef } )" )
+    print( f"  pic  { chaud:.4f} -> { float( numpy.asarray( v ).max() ):.4f}" )
+    # la somme DECROIT : le bord est impose a 0, donc la chaleur s'echappe par les cotes.
+    print( f"  somme { float( numpy.asarray( u ).sum() ):.4f}"
+           f" -> { float( numpy.asarray( v ).sum() ):.4f}   ( elle fuit par le bord )" )

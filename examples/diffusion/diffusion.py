@@ -44,84 +44,149 @@ def axes( n ):
 
 
 # LES DEUX NOYAUX. Tout le C++ est ICI, en clair : on lit le tutoriel sans naviguer dans les
-# fichiers. Seule la PHYSIQUE reste un en-tete ( `pas.h` ), parce que c'est le code qu'on avait deja
-# et qu'on ne veut surtout pas reecrire -- il ne sait rien de loom.
+# fichiers. Le `namespace { }` est a nous -- nos `#include` vont donc ou on veut, et il donne a tout
+# ce qu'il contient une liaison INTERNE ( plusieurs noyaux finissent lies dans une meme
+# bibliotheque, voir `compilation/catalogue.py` ).
 #
-# Loom appelle une fonction a signature fixe :
-#
-#     void kernel( auto &&queue, auto &&batch_axes, auto &&args )
+# Loom appelle `void kernel( auto &&queue, auto &&batch_axes, auto &&args )` :
 #
 #   queue       le contexte d'execution. `queue.run_parallel` est SON outil, pas une obligation :
 #               un usager Kokkos ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et
 #               les formes de `args`.
-#   batch_axes  le domaine de batch de l'appel ( ce qu'un `vmap` ajoute ) -- une VALEUR, qu'on
-#               compose avec le sien par `+`.
-#   args        nos arguments sous leurs noms Python, plus `machine` et `errors`.
+#   batch_axes  le domaine de batch de l'appel ( ce qu'un `vmap` ajoute ) -- une VALEUR.
+#   args        nos arguments sous leurs noms Python, plus `machine` et `errors`. `TF` est le
+#               scalaire reel de l'appel.
 #
-# Le domaine vient d'une VUE ( `args.suivant.axes()` ) : les axes d'une vue sont exactement ses
-# dimensions, sans ambiguite. `item` porte des coordonnees NOMMEES, qu'on lit par `coord`.
-#
-# ( `include_roots` n'est pas dit : par defaut c'est le repertoire de CE fichier, donc `pas.h` se
-#   trouve tout seul. )
+# CE QUE LES AXES ACHETENT, et c'est le sujet de l'exemple : le corps ne compte jamais de
+# dimensions. `coords.axes - batch_axes` donne les axes PROPRES du noyau, `for_each` les deroule a
+# la compilation, et `coords + axis` decale la coordonnee de CET axe en laissant les autres --
+# y compris celles du batch. Le stencil est donc ecrit une fois, en dimension quelconque, et il ne
+# sait pas qu'il peut etre batche.
 _avant = FfiCode(
-    includes = [ "pas.h" ],
     code = """
-        struct UnPas {
-            HD void operator()( auto item, auto &&args ) const {
-                const SI j = coord( item, y ), i = coord( item, x );
-                args.suivant( j, i ) = diffusion::pas_explicite(
-                    args.grille.temperature, args.grille.diffusivite, j, i,
-                    SI( args.grille.ny ), SI( args.grille.nx ), args.coef );
-            }
-        };
+        namespace {
+            HD TF conductance( TF ka, TF kb ) { return TF( 0.5 ) * ( ka + kb ); }
 
-        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-            queue.run_parallel( UnPas(), batch_axes + args.suivant.axes(), args );
+            struct UnPas {
+                /// le bord porte une temperature imposee : il n'est jamais mis a jour.
+                HD bool on_boundary( auto coords, auto main_axes, const auto &args ) const {
+                    return any_of( main_axes, [&]( auto axis ) {
+                        return coords[ axis ] == 0
+                            || coords[ axis ] + 1 == args.suivant.size( axis );
+                    } );
+                }
+
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    const auto main_axes = coords.axes - batch_axes;
+
+                    const TF uc = args.grille.temperature( coords );
+                    if ( on_boundary( coords, main_axes, args ) ) {
+                        args.suivant( coords ) = uc;
+                        return;
+                    }
+
+                    const TF kc = args.grille.diffusivite( coords );
+                    TF somme = 0;
+                    for_each( main_axes, [&]( auto axis ) {
+                        somme += conductance( kc, TF( args.grille.diffusivite( coords + axis ) ) )
+                               * ( TF( args.grille.temperature( coords + axis ) ) - uc );
+                        somme += conductance( kc, TF( args.grille.diffusivite( coords - axis ) ) )
+                               * ( TF( args.grille.temperature( coords - axis ) ) - uc );
+                    } );
+                    args.suivant( coords ) = uc + TF( args.coef ) * somme;
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( UnPas(), batch_axes + args.suivant.axes(), args, batch_axes );
+            }
         }
     """,
 )
 
-# L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom. Il
-# tourne sur d'autres tampons, donc rien ne l'oblige a la meme geometrie que l'aller.
+# L'adjoint est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom. Les
+# deux adjoints s'ecrivent en GATHER pur -- chaque cellule lit ses voisines et ecrit sa seule
+# valeur -- donc sans accumulation atomique.
 _arriere = FfiCode(
-    includes = [ "pas.h" ],
     code = """
-        struct UnPasAdjoint {
-            HD void operator()( auto item, auto &&args ) const {
-                const SI m = SI( args.grille.ny ), n = SI( args.grille.nx );
-                const SI j = coord( item, y ), i = coord( item, x );
+        namespace {
+            HD TF conductance( TF ka, TF kb ) { return TF( 0.5 ) * ( ka + kb ); }
 
-                // `coef` est une constante du probleme, jamais perturbee : son gradient demanderait
-                // une reduction globale, et il n'est pas ecrit.
-                static_assert( DECAYED_TYPE_OF( args.grad_for_coef.is_valid() )::value == 0,
-                    "diffusion : le gradient par rapport au coefficient dt/h^2 n'est pas implemente" );
-
-                // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un zero
-                // symbolique il faut quand meme ecrire le gradient nul.
-                constexpr bool nulle = DECAYED_TYPE_OF( args.grad_for_suivant.surely_null() )::value;
-
-                if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.temperature.is_valid() )::value ) {
-                    if constexpr ( nulle )
-                        args.grad_for_grille.temperature( j, i ) = 0;
-                    else
-                        args.grad_for_grille.temperature( j, i ) = diffusion::adjoint_temperature(
-                            args.grille.temperature, args.grille.diffusivite,
-                            args.grad_for_suivant, j, i, m, n, args.coef );
+            struct UnPasAdjoint {
+                HD bool interieure( auto coords, auto main_axes, const auto &args ) const {
+                    return ! any_of( main_axes, [&]( auto axis ) {
+                        return coords[ axis ] == 0
+                            || coords[ axis ] + 1 == args.grille.temperature.size( axis );
+                    } );
                 }
 
-                if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.diffusivite.is_valid() )::value ) {
-                    if constexpr ( nulle )
-                        args.grad_for_grille.diffusivite( j, i ) = 0;
-                    else
-                        args.grad_for_grille.diffusivite( j, i ) = diffusion::adjoint_diffusivite(
-                            args.grille.temperature, args.grille.diffusivite,
-                            args.grad_for_suivant, j, i, m, n, args.coef );
+                /// vrai si `coords` decale de `d` le long de `axis` est encore dans la grille
+                HD bool dedans( auto coords, auto axis, SI d, const auto &args ) const {
+                    const SI c = coords[ axis ] + d;
+                    return c >= 0 && c < args.grille.temperature.size( axis );
                 }
+
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    const auto main_axes = coords.axes - batch_axes;
+
+                    // `coef` est une constante du probleme, jamais perturbee : son gradient
+                    // demanderait une reduction globale, et il n'est pas ecrit.
+                    static_assert( DECAYED_TYPE_OF( args.grad_for_coef.is_valid() )::value == 0,
+                        "diffusion : le gradient par rapport a dt/h^2 n'est pas implemente" );
+
+                    // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un
+                    // zero symbolique il faut quand meme ecrire le gradient nul.
+                    constexpr bool nulle = DECAYED_TYPE_OF( args.grad_for_suivant.surely_null() )::value;
+
+                    const TF c  = TF( args.coef );
+                    const TF kc = TF( args.grille.diffusivite( coords ) );
+                    const TF uc = TF( args.grille.temperature( coords ) );
+                    const bool ici = interieure( coords, main_axes, args );
+
+                    TF g_temp = nulle ? TF( 0 ) : TF( args.grad_for_suivant( coords ) );
+                    TF g_diff = 0;
+
+                    if constexpr ( ! nulle ) {
+                        for_each( main_axes, [&]( auto axis ) {
+                            for ( SI d = -1; d <= 1; d += 2 ) {
+                                if ( ! dedans( coords, axis, d, args ) )
+                                    continue;
+                                const auto voisin = d > 0 ? coords + axis : coords - axis;
+                                const TF kv = TF( args.grille.diffusivite( voisin ) );
+                                const TF uv = TF( args.grille.temperature( voisin ) );
+                                const TF kf = conductance( kc, kv );
+                                const bool la = ! on_bord( voisin, main_axes, args );
+
+                                if ( ici ) {
+                                    g_temp -= c * kf * TF( args.grad_for_suivant( coords ) );
+                                    g_diff += c * TF( 0.5 ) * TF( args.grad_for_suivant( coords ) ) * ( uv - uc );
+                                }
+                                if ( la ) {
+                                    g_temp += c * kf * TF( args.grad_for_suivant( voisin ) );
+                                    g_diff += c * TF( 0.5 ) * TF( args.grad_for_suivant( voisin ) ) * ( uc - uv );
+                                }
+                            }
+                        } );
+                    }
+
+                    if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.temperature.is_valid() )::value )
+                        args.grad_for_grille.temperature( coords ) = g_temp;
+                    if constexpr ( DECAYED_TYPE_OF( args.grad_for_grille.diffusivite.is_valid() )::value )
+                        args.grad_for_grille.diffusivite( coords ) = g_diff;
+                }
+
+                HD bool on_bord( auto coords, auto main_axes, const auto &args ) const {
+                    return any_of( main_axes, [&]( auto axis ) {
+                        return coords[ axis ] == 0
+                            || coords[ axis ] + 1 == args.grille.temperature.size( axis );
+                    } );
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( UnPasAdjoint(), batch_axes + args.grille.temperature.axes(),
+                                    args, batch_axes );
             }
-        };
-
-        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-            queue.run_parallel( UnPasAdjoint(), batch_axes + args.grille.temperature.axes(), args );
         }
     """,
 )

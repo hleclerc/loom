@@ -121,3 +121,30 @@ if test( "on_retrouve_la_diffusivite" ):
     print( f"perte {depart:.3e} -> {arrivee:.3e}   ( x{depart / max( arrivee, 1e-30 ):.0f} ),"
            f"   || k - k_vraie || = {ecart_k:.3f}" )
     assert arrivee < depart / 20
+
+
+if test( "le_meme_corps_se_batche_sans_le_savoir" ):
+    # CE QUE LES AXES ACHETENT. Le stencil est ecrit une fois, sans compter de dimensions :
+    # `coords.axes - batch_axes` lui donne ses axes PROPRES, `for_each` les deroule, et
+    # `coords + axis` ne decale que l'axe nomme. Un `vmap` ajoute donc un axe SANS que le corps
+    # change -- et sans qu'il sache qu'il existe.
+    import jax
+    import numpy
+
+    n, nb = 8, 3
+    rng = numpy.random.default_rng( 0 )
+    u = rng.normal( size = ( nb, n, n ) )
+    k = numpy.full( ( n, n ), 0.2 )
+
+    # la reference : un appel par lot, a la main
+    ref = numpy.stack( [ numpy.asarray( pas( driver.array( u[ b ] ), driver.array( k ), 0.1 ) )
+                         for b in range( nb ) ] )
+
+    # le meme, vmape sur le premier axe de `u` ( `k` n'est PAS mappe : il traverse tel quel )
+    batche = jax.vmap( lambda uu: pas( uu, driver.array( k ), 0.1 ), in_axes = 0 )
+    got = numpy.asarray( batche( driver.array( u ) ) )
+
+    assert got.shape == ref.shape, ( got.shape, ref.shape )
+    ecart = float( numpy.abs( ref - got ).max() )
+    assert ecart == 0.0, ecart
+    print( f"vmap : { nb } lots, ecart exactement { ecart }" )

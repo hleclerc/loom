@@ -63,6 +63,13 @@ struct CudaQueue {
         return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ), MutList(), FORWARD( args ) );
     }
 
+    /// la meme, en passant UNE valeur de plus au foncteur -- typiquement `batch_axes`, dont le corps
+    /// a besoin pour isoler ses axes propres ( `coords.axes - batch_axes` ).
+    auto run_parallel( auto &&func, auto &&items, auto &&args, auto &&extra ) {
+        return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ),
+                                   MutList(), FORWARD( args ), InpList(), FORWARD( extra ) );
+    }
+
     cudaStream_t stream;
 };
 

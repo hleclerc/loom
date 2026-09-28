@@ -416,7 +416,15 @@ def _render_call( code, ca, device ):
         passe = [ "machine", f"sdot::kernel_form( q, MutList(), { ERRORS_VAR_NAME } )" ]
         passe += [ f"sdot::kernel_form( q, { n }_io, { n } )" for n in noms ]
 
-        args_struct = (
+        # `TF` : le scalaire des reels de l'appel ( ce que `RealTensor` produit quand on ne precise
+        # rien, donc `driver.ftype` ). Un corps l'ecrit sans avoir a le deriver d'une vue.
+        # `cpp_name` rend l'ALIAS `TF` tant que la taille est laissee au driver ; ici on veut le
+        # type resolu, sinon on ecrirait `using TF = TF;`.
+        from ..drivers.driver import driver as _driver
+        tf = ( "\n/// le scalaire reel de cet appel ( `driver.ftype` )\n"
+               f"using TF = { _driver.ftype.cpp_name };\n" )
+
+        args_struct = ( tf +
             f"\n// ce qui traverse jusqu'au kernel ( voir `FfiCode` )\n"
             f"template<{ tp_k }>\nstruct { kargs } {{\n{ decl_k }}};\n"
             f"\n// les arguments de cet appel, assemblés, côté hôte\n"
@@ -443,7 +451,7 @@ def _render_call( code, ca, device ):
         queue_decl    = queue_decl,
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
-        preamble      = code.preamble_for( ca ) + args_struct,
+        preamble      = args_struct + code.preamble_for( ca ),
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'
                                  for n in ca.axis_names ),

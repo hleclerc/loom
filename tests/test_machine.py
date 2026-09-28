@@ -19,8 +19,8 @@ _CHAMPS = ( "nb_workers", "sub_group_width", "local_mem_bytes", "suggested_group
 # tout le C++ est ici : `Machine` se lit dans le kernel sous les memes noms que sur l'hote.
 _CODE = """
     struct PoserMachine {
-        HD void operator()( auto item, auto &&args ) const {
-            const SI k = coord( item, num_champ );
+        HD void operator()( auto coords, auto &&args ) const {
+            const SI k = coords[ num_champ ];
             args.champs( k ) = k == 0 ? args.machine.nb_workers
                              : k == 1 ? args.machine.sub_group_width
                              : k == 2 ? args.machine.local_mem_bytes

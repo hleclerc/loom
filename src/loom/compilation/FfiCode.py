@@ -220,11 +220,15 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            # TOUT le C++ de l'usager, verbatim, au niveau du namespace : ses `#include`, ses
-            # foncteurs, sa fonction `kernel`. Dans un NAMESPACE ANONYME, donc à liaison interne :
-            # il nomme ses structs comme il veut, et deux noyaux liés dans une même bibliothèque
-            # (`compilation/catalogue.py`) ne se marchent pas dessus.
-            return "namespace {\n" + self.code + "\n} // namespace anonyme\n"
+            # TOUT le C++ de l'usager, VERBATIM, au niveau du namespace : ses `#include`, ses
+            # foncteurs, sa fonction `kernel`. Loom n'y touche pas -- y compris pour le namespace
+            # anonyme, que l'usager écrit lui-même : sinon ses `#include` se retrouveraient DANS ce
+            # namespace, et loom avec eux.
+            #
+            # Ce namespace n'est pas décoratif : `compilation/catalogue.py` compile chaque noyau
+            # dans son propre objet puis les lie dans UNE bibliothèque, donc deux `kernel` à nom
+            # fixe sans liaison interne seraient une violation d'ODR.
+            return self.code
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
         return ( f"struct { functor } {{\n"

@@ -21,6 +21,12 @@ UTP HD DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
         _strides( strides ), _shape( shape ), _data( reinterpret_cast<RawByte *>( data.raw ), data.memory_space ) {
 }
 
+UTP HD auto DTP::size( auto axis ) const {
+    constexpr int pos = AxisPos<DECAYED_TYPE_OF( axis ),AxisNames>::value;
+    static_assert( pos >= 0, "TensorView::size : ce tenseur n'a pas cet axe" );
+    return _shape[ Ct<int,pos>() ];
+}
+
 UTP HD auto DTP::axes() const {
     return CartesianIndices<Shape,AxisNames>{ _shape };
 }
@@ -42,7 +48,11 @@ UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
 
 UTP HD auto DTP::operator()( const auto &index, auto ...rem ) const {
     using I = DECAYED_TYPE_OF( index );
-    if constexpr ( IsAxisIndex<I>::value )
+    if constexpr ( IsCoords<I>::value )
+        // des coordonnees NOMMEES : on consomme le tuple qu'elles portent. Le `Tuple` nu reste
+        // accepte juste en dessous -- les deux marchent, comme convenu.
+        return operator()( index.values, rem... );
+    else if constexpr ( IsAxisIndex<I>::value )
         // index = (nom = valeur) -> squeeze de l'axe nommé, puis on continue
         return squeeze( index )( rem... );
     else if constexpr ( HAS_CONSTEXPR_SIZE( index ) ) {

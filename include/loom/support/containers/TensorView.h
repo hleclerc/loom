@@ -122,6 +122,9 @@ public:
     /// qui en a souvent qu'on ne parcourt pas ( `Splats` a `splat`, mais aussi `rvb` ).
     HD auto          axes                   () const;
 
+    /// notre taille le long d'un axe NOMME ( `args.suivant.size( y )` ).
+    HD auto          size                   ( auto axis ) const;
+
        auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
        auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)
        void          fill_with              ( TF value );                                 ///< boucle simple côté hôte (gardée par directly_accessible)

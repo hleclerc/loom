@@ -8,51 +8,62 @@ points, aucun ragged, aucune géométrie, aucun scratch.
 Ce n'est pas une démonstration : c'est un **test de généralité**. La question posée est « qu'est-ce
 que, dans loom, est général, et qu'est-ce qui n'est que du sdot déguisé ? ». Le bilan est en bas.
 
-**Deux fichiers, et c'est la leçon de l'exemple** :
+**Deux fichiers**, et le C++ du noyau est **dans** le `.py` : on lit le tutoriel sans naviguer.
 
 ```
-pas.h              la PHYSIQUE, et c'est le seul en-tête. Des fonctions libres sur des vues
-                   indexées positionnellement -- elle ne sait pas qu'elle sera parallèle, ni
-                   dérivable, ni appelée depuis Python. C'est le code qu'on avait DÉJÀ.
-diffusion.py       tout le reste, en clair : les deux noyaux avec leur C++ inline, et l'appel.
+pas.h              la PHYSIQUE, seul en-tête. Le code qu'on avait DÉJÀ, qui ne sait pas
+                   qu'il sera parallèle, ni dérivable, ni appelé depuis Python.
+diffusion.py       les deux noyaux avec leur C++ inline, et l'appel.
 test_diffusion.py  les tests
 ```
 
-Le C++ du lancement est **dans** `diffusion.py`, pas dans un troisième fichier : on lit le tutoriel
-sans naviguer. Loom appelle une fonction à signature fixe, et n'écrit que ce qui fait mal —
-l'enrobage FFI, la liaison des tampons, l'adjoint côté Jax :
+## Ce que les axes achètent
 
-```python
-_avant = FfiCode(
-    includes = [ "pas.h" ],
-    code = """
-        struct UnPas {
-            HD void operator()( auto item, auto &&args ) const {
-                const SI j = coord( item, y ), i = coord( item, x );
-                args.suivant( j, i ) = diffusion::pas_explicite(
-                    args.grille.temperature, args.grille.diffusivite, j, i,
-                    SI( args.grille.ny ), SI( args.grille.nx ), args.coef );
-            }
-        };
+Le corps ne compte **jamais** de dimensions :
 
-        void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-            queue.run_parallel( UnPas(), batch_axes + args.suivant.axes(), args );
-        }
-    """,
-)
+```cpp
+HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+    const auto main_axes = coords.axes - batch_axes;          // mes axes, pas ceux du vmap
+
+    const TF uc = args.grille.temperature( coords );
+    if ( on_boundary( coords, main_axes, args ) ) { args.suivant( coords ) = uc; return; }
+
+    const TF kc = args.grille.diffusivite( coords );
+    TF somme = 0;
+    for_each( main_axes, [&]( auto axis ) {                   // déroulé à la compilation
+        somme += conductance( kc, TF( args.grille.diffusivite( coords + axis ) ) )
+               * ( TF( args.grille.temperature( coords + axis ) ) - uc );
+        somme += conductance( kc, TF( args.grille.diffusivite( coords - axis ) ) )
+               * ( TF( args.grille.temperature( coords - axis ) ) - uc );
+    } );
+    args.suivant( coords ) = uc + TF( args.coef ) * somme;
+}
 ```
 
-Les trois paramètres de `kernel` sont tout le contrat :
+Trois primitives, et tout en découle :
+
+| | |
+|---|---|
+| `coords[ axis ]` | la coordonnée **par nom**, pas par position. |
+| `coords ± axis` | le voisin le long de **cet** axe ; les autres coordonnées ne bougent pas — y compris celles du batch. C'est ce qui rend le stencil écrivable une fois. |
+| `coords.axes - batch_axes` | mes axes propres. Une **soustraction d'ensembles**, faite à la compilation. |
+
+Conséquence, et elle est testée (`le_meme_corps_se_batche_sans_le_savoir`) : **un `vmap` ajoute un axe
+sans que le corps change, et sans qu'il sache qu'il existe** — écart exactement `0.0` contre la
+boucle faite à la main. Le même corps vaut en 2-D, en 3-D, batché ou non.
+
+Loom appelle `void kernel( auto &&queue, auto &&batch_axes, auto &&args )` et n'écrit que ce qui fait
+mal — l'enrobage FFI, la liaison des tampons, l'adjoint côté Jax :
 
 | | |
 |---|---|
 | `queue` | le contexte d'exécution. `queue.run_parallel` est **son** outil, pas une obligation : un usager Kokkos, SYCL ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et les formes de `args`. |
-| `batch_axes` | le domaine de batch de l'appel (ce qu'un `vmap` ajoute) — une **valeur**, qu'on compose avec le sien par `+`. |
-| `args` | nos arguments sous leurs noms Python, plus `machine` ([`Machine.h`](../../include/loom/support/kernels/Machine.h)), `errors`, et `scratch` si on l'a demandé. |
+| `batch_axes` | le domaine de batch de l'appel — une **valeur**, qu'on compose (`+`, qui fait l'**union** : un tenseur batché porte déjà l'axe) ou qu'on soustrait. |
+| `args` | nos arguments sous leurs noms Python, plus `machine` ([`Machine.h`](../../include/loom/support/kernels/Machine.h)), `errors`, et `scratch` si on l'a demandé. `TF` est le scalaire réel de l'appel. |
 
-Le domaine vient d'une **vue** (`args.suivant.axes()`) : les axes d'une vue sont exactement ses
-dimensions, sans ambiguïté — un agrégat, lui, en a souvent qu'on ne parcourt pas. Et
-`include_roots` n'est pas dit : par défaut c'est le répertoire du `.py`, donc `pas.h` se trouve seul.
+Le `namespace { }` est écrit par l'usager : ses `#include` vont donc où il veut, et il donne à tout
+ce qu'il contient une liaison interne — nécessaire, puisque plusieurs noyaux finissent liés dans une
+même bibliothèque. Et `include_roots` n'est pas dit : par défaut c'est le répertoire du `.py`.
 
 ```bash
 errand test_diffusion

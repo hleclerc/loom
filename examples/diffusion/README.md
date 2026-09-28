@@ -8,14 +8,12 @@ points, aucun ragged, aucune géométrie, aucun scratch.
 Ce n'est pas une démonstration : c'est un **test de généralité**. La question posée est « qu'est-ce
 que, dans loom, est général, et qu'est-ce qui n'est que du sdot déguisé ? ». Le bilan est en bas.
 
-**Deux fichiers**, et le C++ du noyau est **dans** le `.py` : on lit le tutoriel sans naviguer.
+**Un seul fichier**, `diffusion.py` : le C++ du noyau est dedans, en clair. On lit le tutoriel sans
+naviguer.
 
-```
-pas.h              la PHYSIQUE, seul en-tête. Le code qu'on avait DÉJÀ, qui ne sait pas
-                   qu'il sera parallèle, ni dérivable, ni appelé depuis Python.
-diffusion.py       les deux noyaux avec leur C++ inline, et l'appel.
-test_diffusion.py  les tests
-```
+    du/dt = k Δu, pas de temps explicite, température imposée au bord, k CONSTANTE
+
+    u'( a ) = u( a ) + c · Σ_{b voisine} ( u( b ) − u( a ) ),   c = dt·k / h²
 
 ## Ce que les axes achètent
 
@@ -25,18 +23,15 @@ Le corps ne compte **jamais** de dimensions :
 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
     const auto main_axes = coords.axes - batch_axes;          // mes axes, pas ceux du vmap
 
-    const TF uc = args.grille.temperature( coords );
-    if ( on_boundary( coords, main_axes, args ) ) { args.suivant( coords ) = uc; return; }
+    const TF uc = args.temperature( coords );
+    if ( on_bord( coords, main_axes, args ) ) { args.suivant( coords ) = uc; return; }
 
-    const TF kc = args.grille.diffusivite( coords );
     TF somme = 0;
     for_each( main_axes, [&]( auto axis ) {                   // déroulé à la compilation
-        somme += conductance( kc, TF( args.grille.diffusivite( coords + axis ) ) )
-               * ( TF( args.grille.temperature( coords + axis ) ) - uc );
-        somme += conductance( kc, TF( args.grille.diffusivite( coords - axis ) ) )
-               * ( TF( args.grille.temperature( coords - axis ) ) - uc );
+        somme += args.temperature( coords + axis )
+               + args.temperature( coords - axis ) - 2 * uc;
     } );
-    args.suivant( coords ) = uc + TF( args.coef ) * somme;
+    args.suivant( coords ) = uc + args.coef * somme;
 }
 ```
 
@@ -52,13 +47,16 @@ Conséquence, et elle est testée (`le_meme_corps_se_batche_sans_le_savoir`) : *
 sans que le corps change, et sans qu'il sache qu'il existe** — écart exactement `0.0` contre la
 boucle faite à la main. Le même corps vaut en 2-D, en 3-D, batché ou non.
 
+Noter ce qui n'est **pas** écrit : aucune conversion `TF(...)`. Un tenseur de rang 0 se convertit
+tout seul en scalaire, donc `args.temperature( coords + axis ) - uc` se lit comme la formule.
+
 Loom appelle `void kernel( auto &&queue, auto &&batch_axes, auto &&args )` et n'écrit que ce qui fait
 mal — l'enrobage FFI, la liaison des tampons, l'adjoint côté Jax :
 
 | | |
 |---|---|
 | `queue` | le contexte d'exécution. `queue.run_parallel` est **son** outil, pas une obligation : un usager Kokkos, SYCL ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et les formes de `args`. |
-| `batch_axes` | le domaine de batch de l'appel — une **valeur**, qu'on compose (`+`, qui fait l'**union** : un tenseur batché porte déjà l'axe) ou qu'on soustrait. |
+| `batch_axes` | les axes que l'appel a ajoutés. Une **valeur** : on la soustrait, ou on la compose (`+` fait l'**union**, pas la concaténation — un tenseur batché porte déjà l'axe). |
 | `args` | nos arguments sous leurs noms Python, plus `machine` ([`Machine.h`](../../include/loom/support/kernels/Machine.h)), `errors`, et `scratch` si on l'a demandé. `TF` est le scalaire réel de l'appel. |
 
 Le `namespace { }` est écrit par l'usager : ses `#include` vont donc où il veut, et il donne à tout
@@ -75,15 +73,20 @@ errand test_diffusion
 
     u'( a ) = u( a ) + dt/h² · Σ_{b voisine} K( a, b ) ( u( b ) − u( a ) ),   K = ( k_a + k_b ) / 2
 
-L'histoire est celle d'un étranger : « j'ai déjà ce solveur en C++, je veux le mettre dans une
-boucle d'optimisation ». Donc on retrouve le champ de diffusivité `k` à partir de la température
-observée après N pas, par descente de gradient à travers toute la chaîne.
+L'histoire est celle d'un étranger qui veut mettre son solveur dans une boucle d'optimisation. Ici :
+**remonter le temps** — retrouver l'état initial à partir de la température observée après N pas, par
+descente de gradient à travers toute la chaîne. La perte tombe d'un facteur 1,8·10⁶.
 
-Les deux adjoints sont écrits à la main dans `pas.h` — la dérivée d'un solveur fait partie du
-solveur. Ils s'écrivent en **gather pur** (chaque cellule lit ses quatre voisines et écrit sa seule
-valeur), donc sans accumulation atomique : `k( a )` n'entre que dans les faces qui touchent `a`, et
-`u( a )` que dans la sortie de `a` et de ses voisines. `check_grad` les confronte à la différence
-finie — accord à 9 chiffres sur les deux.
+L'adjoint est écrit à la main — la dérivée d'un solveur fait partie du solveur — et il est lui aussi
+générique en dimension. Il s'écrit en **gather pur** (chaque cellule lit ses voisines et écrit sa
+seule valeur), donc sans accumulation atomique : `u( a )` n'entre que dans la sortie de `a` et de ses
+voisines. `check_grad` le confronte à la différence finie — accord à 9 chiffres.
+
+Le pas de descente n'est pas un réglage à tâtonner : `evolution` **contracte** (la diffusion ne fait
+que lisser), donc la hessienne de la perte a ses valeurs propres ≤ 2 et tout pas au-delà de ~0,5
+diverge. C'est aussi pourquoi l'inversion est lente, et pourquoi c'est la **perte** qui est assertée
+et pas `u` : remonter le temps est mal posé, la diffusion efface les hautes fréquences et rien ne
+peut les restituer.
 
 Le seul gradient non écrit est celui de `dt/h²`, qui lui demanderait une réduction globale ; un
 `static_assert` sur `grad_for_coef.is_valid()` le dit à la compilation plutôt que de rendre un
@@ -91,15 +94,12 @@ zéro silencieux.
 
 ## Ce qui a marché sans rien demander à personne
 
-- **L'agrégat → struct C++.** `Grille` déclare deux champs et deux axes ; le noyau reçoit
-  `grille.temperature`, `grille.diffusivite`, avec les mêmes noms des deux côtés. Rien à écrire.
-- **Le C++ existant n'a rien appris.** `TensorView` s'indexe positionnellement (`u( j, i )`), donc
-  `pas.h` ne contient aucun vocabulaire loom : `HD`, `SI`, et c'est tout. Un en-tête qu'on avait
-  déjà reste un en-tête qu'on avait déjà.
+- **Les noms traversent.** Un argument de l'appel arrive sous son nom Python (`args.temperature`),
+  et un axe déclaré `"y"` s'écrit `y` dans le noyau. Rien à déclarer deux fois.
 - **Le VJP.** L'adjoint est branché par `driver.grad` sans qu'on déclare quoi que ce soit, et les
   catégories `NoneTensor` / `ZeroTensor` font vraiment tomber les termes à la compilation.
-- **`register_include_root`** : un paquet tiers enregistre son propre `-I`, exactement comme sdot.
-  loom ne connaît pas ses usagers par leur nom, et ça se vérifie.
+- **La racine des en-têtes** est le répertoire du `.py` par défaut : un paquet tiers n'a rien à
+  déclarer, et loom ne connaît pas ses usagers par leur nom.
 - **Les fabriques de tenseurs.** `IntTensor[ cellule ].iota()`, `RealTensor[ y, x ].ones()`,
   `.linspace( 0, 1, x )`, `.random( seed = 3 )` : la forme vient des axes, le type vient de la
   classe, et `driver` n'apparaît plus nulle part sauf `grad` / `jit` / `call`.
@@ -134,14 +134,15 @@ zéro silencieux.
    Sur une grille 128², cela faisait 131 ko alloués et traversés par appel, 40 appels par gradient,
    pour calculer une division euclidienne.
 
-   Le remède est que **l'utilisateur lance lui-même** (`FfiCode.handler( functors = { ... } )`) :
+   Le remède est que **l'utilisateur lance lui-même**, sur le domaine de la donnée :
 
-   ```python
-   code = "launch( indices_over( grille.ny, grille.nx ), un_pas{} );"
+   ```cpp
+   queue.run_parallel( UnPas(), args.suivant.axes(), args, batch_axes );
    ```
 
-   `Cellules`, `new_batch_axis`, l'`iota`, le rang, le décodage : tout a disparu (−29 lignes).
-   Et « qui suis-je ? » ne se pose plus, parce que l'item EST le multi-indice qu'on a demandé.
+   `Cellules`, `new_batch_axis`, l'`iota`, le rang, le décodage : tout a disparu. Et « qui
+   suis-je ? » ne se pose plus, parce que l'item EST le multi-indice qu'on a demandé — nommé, donc
+   lisible par `coords[ y ]` au lieu d'une position à compter.
 
    **Puis une seconde fois, plus loin.** Le remède ci-dessus faisait encore écrire le foncteur et
    le lancement *en Python*, sous forme de chaînes. La bonne réponse était plus simple : le C++ de ce

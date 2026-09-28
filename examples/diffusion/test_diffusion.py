@@ -42,12 +42,10 @@ if test( "le_mode_propre_decroit_du_facteur_exact" ):
     # a la precision de la machine. C'est le stencil lui-meme qui est teste, pas une tendance.
     n = 17
     coef = 0.2                                     # dt / h^2, sous la limite de stabilite ( 0.25 )
-    y, x = axes( n )
     u = _mode_propre( n )
-    k = RealTensor[ y, x ].ones().raw
 
     attendu = 1 + coef * ( 4 * math.cos( math.pi / ( n - 1 ) ) - 4 )
-    v = pas( u, k, coef )
+    v = pas( u, coef )
 
     for j in range( 1, n - 1 ):
         for i in range( 1, n - 1 ):
@@ -63,9 +61,7 @@ if test( "le_bord_reste_impose" ):
     n = 12
     y, x = axes( n )
     u = RealTensor[ y, x ].random( seed = 3 ).raw
-    # une diffusivite qui croit vers le coin bas-droit : la somme des deux coordonnees
-    k = ( 0.5 + 0.25 * ( RealTensor[ y, x ].linspace( 0, 1, x ) + RealTensor[ y, x ].linspace( 0, 1, y ) ) ).raw
-    v = pas( u, k, 0.15 )
+    v = pas( u, 0.15 )
 
     for j in range( n ):
         for i in range( n ):
@@ -75,51 +71,50 @@ if test( "le_bord_reste_impose" ):
 
 
 if test( "l_adjoint_est_celui_du_solveur" ):
-    # LE test qui compte : les deux adjoints ecrits a la main dans `pas.h`, confrontes a la
-    # difference finie, a travers UNE CHAINE de pas ( l'adjoint doit la remonter ).
+    # LE test qui compte : l'adjoint, confronte a la difference finie, a travers UNE CHAINE de pas
+    # ( il doit la remonter ).
     n = 9
     coef = 0.18
     u0 = _bosse( n )
-    k0 = _grille( n, lambda j, i: 1.0 + 0.3 * math.sin( 2 * i ) * math.cos( 3 * j ) )
 
-    ad, df = check_grad( lambda u: evolution( u, k0, coef, 3 ), u0, seed = 11 )
+    ad, df = check_grad( lambda u: evolution( u, coef, 3 ), u0, seed = 11 )
     print( f"d/du  : adjoint {float( ad ):+.9f}   diff. finie {float( df ):+.9f}" )
 
-    ad, df = check_grad( lambda k: evolution( u0, k, coef, 3 ), k0, seed = 12 )
-    print( f"d/dk  : adjoint {float( ad ):+.9f}   diff. finie {float( df ):+.9f}" )
 
+if test( "on_remonte_le_temps" ):
+    # CE POUR QUOI on a rendu le solveur derivable : une inversion. On observe la temperature apres
+    # `nb_pas` pas de diffusion, et on retrouve l'etat INITIAL par descente de gradient a travers
+    # toute la chaine -- le tout compile une fois ( `driver.jit` ).
+    n, nb_pas, coef = 14, 6, 0.2
 
-if test( "on_retrouve_la_diffusivite" ):
-    # CE POUR QUOI on a rendu le solveur derivable : une inversion. On observe la temperature
-    # apres `nb_pas` pas avec une diffusivite inconnue, et on la retrouve par descente de
-    # gradient a travers toute la chaine -- le tout compile une fois ( `driver.jit` ).
-    n, nb_pas, coef = 14, 10, 0.2
-    u0 = _bosse( n )
+    vrai = _bosse( n )
+    observee = evolution( vrai, coef, nb_pas )
 
-    vraie = _grille( n, lambda j, i: 1.5 if ( 3 <= i < 8 and 4 <= j < 10 ) else 0.6 )
-    observee = evolution( u0, vraie, coef, nb_pas )
-
-    def perte( k ):
-        ecart = evolution( u0, k, coef, nb_pas ) - observee
+    def perte( u ):
+        ecart = evolution( u, coef, nb_pas ) - observee
         return ( ecart * ecart ).sum()
 
     y, x = axes( n )
-    k = RealTensor[ y, x ].ones().raw
+    u = RealTensor[ y, x ].zeros().raw
     perte_jit = driver.jit( perte )
     gradient = driver.jit( driver.grad( perte ) )
 
-    depart = float( perte_jit( k ) )
-    for _ in range( 120 ):
-        k = k - 3.0 * gradient( k )
-    arrivee = float( perte_jit( k ) )
+    # le pas : `evolution` CONTRACTE ( la diffusion ne fait que lisser ), donc les valeurs
+    # singulieres de sa jacobienne sont <= 1 et la hessienne de la perte a ses valeurs propres
+    # <= 2. Un pas au-dela de ~0.5 diverge -- c'est ce qui rend l'inversion lente, pas un
+    # reglage a tatonner.
+    depart = float( perte_jit( u ) )
+    for _ in range( 400 ):
+        u = u - 0.4 * gradient( u )
+    arrivee = float( perte_jit( u ) )
 
-    # c'est la PERTE qu'on asserte, pas `k` : l'inversion est mal posee ( la ou la temperature ne
-    # varie pas, `k` n'a aucun effet observable ), donc sans regularisation on retrouve un champ
-    # qui explique les donnees, pas le champ vrai. Ce qui est teste ici, c'est que le gradient
-    # traverse bien les dix appels.
-    ecart_k = float( ( ( k - vraie ) ** 2 ).sum() ) ** 0.5
+    # c'est la PERTE qu'on asserte, pas `u` : remonter le temps est mal pose ( la diffusion efface
+    # les hautes frequences, que rien ne peut restituer ), donc sans regularisation on retrouve un
+    # etat qui explique les donnees, pas l'etat vrai. Ce qui est teste ici, c'est que le gradient
+    # traverse bien les six appels.
+    ecart_u = float( ( ( u - vrai ) ** 2 ).sum() ) ** 0.5
     print( f"perte {depart:.3e} -> {arrivee:.3e}   ( x{depart / max( arrivee, 1e-30 ):.0f} ),"
-           f"   || k - k_vraie || = {ecart_k:.3f}" )
+           f"   || u - u_vrai || = {ecart_u:.3f}" )
     assert arrivee < depart / 20
 
 
@@ -134,14 +129,12 @@ if test( "le_meme_corps_se_batche_sans_le_savoir" ):
     n, nb = 8, 3
     rng = numpy.random.default_rng( 0 )
     u = rng.normal( size = ( nb, n, n ) )
-    k = numpy.full( ( n, n ), 0.2 )
 
     # la reference : un appel par lot, a la main
-    ref = numpy.stack( [ numpy.asarray( pas( driver.array( u[ b ] ), driver.array( k ), 0.1 ) )
-                         for b in range( nb ) ] )
+    ref = numpy.stack( [ numpy.asarray( pas( driver.array( u[ b ] ), 0.1 ) ) for b in range( nb ) ] )
 
-    # le meme, vmape sur le premier axe de `u` ( `k` n'est PAS mappe : il traverse tel quel )
-    batche = jax.vmap( lambda uu: pas( uu, driver.array( k ), 0.1 ), in_axes = 0 )
+    # le meme, vmape sur le premier axe de `u`
+    batche = jax.vmap( lambda uu: pas( uu, 0.1 ), in_axes = 0 )
     got = numpy.asarray( batche( driver.array( u ) ) )
 
     assert got.shape == ref.shape, ( got.shape, ref.shape )

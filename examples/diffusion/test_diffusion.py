@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 
-from loom import RealTensor, driver
+import loom
 from errand import test
 from loom.testing import check_grad
 
@@ -18,7 +18,7 @@ from diffusion import evolution, pas
 def _grille( n, f ):
     """Un champ `n x n` donne cellule par cellule. La CLASSE porte le type ( des reels ), donc
     il n'y a rien a declarer de plus -- et `driver` n'a pas a apparaitre."""
-    return RealTensor( [ [ float( f( j, i ) ) for i in range( n ) ] for j in range( n ) ] ).raw
+    return loom.RealTensor( [ [ float( f( j, i ) ) for i in range( n ) ] for j in range( n ) ] ).raw
 
 
 def _mode_propre( n ):
@@ -59,7 +59,7 @@ if test( "le_bord_reste_impose" ):
     # les cellules du bord portent une temperature imposee : un pas ne doit pas y toucher, quoi
     # que fasse l'interieur.
     n = 12
-    u = RealTensor[ n, n ].random( seed = 3 ).raw
+    u = loom.RealTensor[ n, n ].random( seed = 3 ).raw
     v = pas( u, 0.15 )
 
     for j in range( n ):
@@ -83,7 +83,7 @@ if test( "l_adjoint_est_celui_du_solveur" ):
 if test( "on_remonte_le_temps" ):
     # CE POUR QUOI on a rendu le solveur derivable : une inversion. On observe la temperature apres
     # `nb_pas` pas de diffusion, et on retrouve l'etat INITIAL par descente de gradient a travers
-    # toute la chaine -- le tout compile une fois ( `driver.jit` ).
+    # toute la chaine -- le tout compile une fois ( `loom.driver.jit` ).
     n, nb_pas, coef = 14, 6, 0.2
 
     vrai = _bosse( n )
@@ -93,9 +93,9 @@ if test( "on_remonte_le_temps" ):
         ecart = evolution( u, coef, nb_pas ) - observee
         return ( ecart * ecart ).sum()
 
-    u = RealTensor[ n, n ].zeros().raw
-    perte_jit = driver.jit( perte )
-    gradient = driver.jit( driver.grad( perte ) )
+    u = loom.RealTensor[ n, n ].zeros().raw
+    perte_jit = loom.driver.jit( perte )
+    gradient = loom.driver.jit( loom.driver.grad( perte ) )
 
     # le pas : `evolution` CONTRACTE ( la diffusion ne fait que lisser ), donc les valeurs
     # singulieres de sa jacobienne sont <= 1 et la hessienne de la perte a ses valeurs propres
@@ -129,11 +129,11 @@ if test( "le_meme_corps_se_batche_sans_le_savoir" ):
     u = rng.normal( size = ( nb, n, n ) )
 
     # la reference : un appel par lot, a la main
-    ref = numpy.stack( [ numpy.asarray( pas( driver.array( u[ b ] ), 0.1 ) ) for b in range( nb ) ] )
+    ref = numpy.stack( [ numpy.asarray( pas( loom.driver.array( u[ b ] ), 0.1 ) ) for b in range( nb ) ] )
 
     # le meme, vmape sur le premier axe de `u`
     batche = jax.vmap( lambda uu: pas( uu, 0.1 ), in_axes = 0 )
-    got = numpy.asarray( batche( driver.array( u ) ) )
+    got = numpy.asarray( batche( loom.driver.array( u ) ) )
 
     assert got.shape == ref.shape, ( got.shape, ref.shape )
     ecart = float( numpy.abs( ref - got ).max() )

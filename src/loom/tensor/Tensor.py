@@ -99,10 +99,41 @@ class Tensor( Attribute ):
             return object.__new__( cls )
         return object.__new__( Tensor.class_for( _declared_dtype( cls, kwargs.get( "template_kwargs", {} ) ) ) )
 
-    def __init__( self, value = None, /, *, template_args = (), template_kwargs = {}, scope = None ) -> None:
+    def __init__( self, value = None, /, *, axes = None, template_args = (), template_kwargs = {}, scope = None ) -> None:
         self.device = Device.factory( template_kwargs.get( "device", None ) )
         self.dtype = _declared_dtype( type( self ), template_kwargs )
-        self.axes = self._read_axes( template_args, scope )
+
+        # D'OU VIENNENT LES AXES, dans l'ordre :
+        #
+        #   `RealTensor[ num_vertex, dim ]( ... )`  les crochets -- la forme des DECLARATIONS, dans
+        #                                           un agrégat ( `RealTensor[ "num_vertex", "dim" ]` )
+        #   `RealTensor( axes = t.axes )`           nommés, hors déclaration, où les crochets se
+        #                                           lisent mal
+        #   `RealTensor( u )`                       AUCUN des deux : on les déduit de la forme de la
+        #                                           valeur, en axes anonymes ( ils reçoivent des noms
+        #                                           distincts à l'abaissement, `a0` / `a1` )
+        #
+        # Le dernier cas est ce qui permet d'écrire un exemple sans prononcer le mot « axe ». Il ne
+        # change rien au rang 0 ( `RealTensor( 17 )` n'a toujours aucun axe ), et il ne touche pas
+        # `wrap()`, qui reste SANS axes -- c'est son contrat pour un résultat qui n'en a pas
+        # (`matmul`).
+        declared = template_args if template_args else ( axes if axes is not None else () )
+        deduits = not declared and value is not None
+        if deduits:
+            declared = _dense_shape_of( value )
+        self.axes = self._read_axes( declared, scope )
+
+        # UN AXE DEDUIT NE REVENDIQUE AUCUNE IDENTITE. On ne nous a pas dit ce que ces dimensions
+        # SIGNIFIENT ; on a juste lu une forme. Le marquer est necessaire : `_binary` aligne les
+        # opérandes par IDENTITE D'AXE, donc sans ça `IntTensor( [1,2,3] ) + IntTensor( [10,20,30] )`
+        # verrait deux axes distincts et rendrait un 3x3 au lieu d'un élémentaire -- un résultat
+        # FAUX, en silence. Marqués, ils retombent sur le broadcast POSITIONNEL, qui est ce que la
+        # docstring de `_binary` promet depuis toujours pour un `Tensor( array )` nu.
+        #
+        # Le chemin NOYAU, lui, s'en sert normalement : `ffi_call` a besoin d'un axe par dimension,
+        # et `Tensor.like` repartage LES MEMES objets, donc deux tenseurs restent sur la meme grille.
+        for axe in self.axes:
+            axe.inferred = deduits
 
         # HOW our value is held (see `storage.py`): one object per way a value can be backed --
         # nothing, a real buffer (possibly with an explicit physical layout), a symbolic zero, a
@@ -670,6 +701,9 @@ class Tensor( Attribute ):
         axes = self._dim_axes()
         if len( axes ) != self.rank:
             return None
+        # des axes DEDUITS d'une forme ne disent rien : on aligne positionnellement ( voir `__init__` )
+        if any( getattr( a, "inferred", False ) for a in axes ):
+            return None
         for i, a in enumerate( axes ):
             if any( a.coordinate == b.coordinate for b in axes[ :i ] ):
                 return None
@@ -1132,3 +1166,18 @@ def _assemble( value, caps, dtype, device ):
         block = driver.zeros( caps[ 1: ], dtype = dtype )
         children = children + [ block ] * ( caps[ 0 ] - len( children ) )
     return driver.stack( children, axis = 0 )
+
+
+def _dense_shape_of( value ):
+    """La forme d'une valeur brute, pour en deduire des axes anonymes. Rend `()` pour un scalaire,
+    donc un rang 0 reste un rang 0.
+
+    `numpy.shape` couvre les listes imbriquees, les tableaux numpy, et tout ce qui porte `.shape`
+    ( un tableau du driver, un tracer `jit`/`vmap` )."""
+    if isinstance( value, Tensor ):
+        return tuple( value.shape )
+    forme = getattr( value, "shape", None )
+    if forme is not None:
+        return tuple( int( d ) for d in forme )
+    import numpy
+    return tuple( int( d ) for d in numpy.shape( value ) )

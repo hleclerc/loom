@@ -11,8 +11,8 @@ CE QUE L'EXEMPLE MONTRE : le corps du noyau ne compte JAMAIS de dimensions. Il d
 les parcourt, et se deplace le long de l'un d'eux. Le meme corps vaut donc en 2D, en 3D, batche ou
 non -- et un `vmap` lui ajoute un axe sans qu'il sache qu'il existe ( c'est teste ).
 """
-from loom import RealTensor, driver
-from loom.compilation.FfiCode import FfiCode
+# `loom.X` et non `from loom import X` : dans un tutoriel, on doit voir d'ou vient chaque nom.
+import loom
 
 
 # LE NOYAU, en clair : on lit le tutoriel sans naviguer dans les fichiers.
@@ -37,7 +37,7 @@ from loom.compilation.FfiCode import FfiCode
 #                               pas, y compris celles du batch
 #   coords.axes - batch_axes    mes axes propres, par soustraction d'ensembles a la compilation
 #
-_avant = FfiCode(
+_avant = loom.FfiCode(
     code = """
         namespace {
             struct UnPas {
@@ -79,7 +79,7 @@ _avant = FfiCode(
 # `u( a )` intervient dans la sortie de `a` ( le terme identite, et `-2 c D u( a )` si `a` est
 # interieure, `D` etant le nombre d'axes ) et dans celle de chaque voisine INTERIEURE `b`. D'ou une
 # lecture des voisines et une seule ecriture : un GATHER pur, sans accumulation atomique.
-_arriere = FfiCode(
+_arriere = loom.FfiCode(
     code = """
         namespace {
             struct UnPasAdjoint {
@@ -143,20 +143,21 @@ _arriere = FfiCode(
 def pas( u, coef ):
     """UN pas de temps explicite.
 
-    `u` est un tenseur du driver de forme `( ny, nx )` et `coef` vaut `dt k / h^2` -- la
-    diffusivite est CONSTANTE. Renvoie la temperature mise a jour, derivable par rapport a `u`."""
-    # AUCUN vocabulaire d'axe : `RealTensor[ *u.shape ]` fabrique des axes anonymes a partir de la
-    # forme ( ils recoivent des noms distincts a l'abaissement, `a0` / `a1` ), et `suivant` reprend
-    # LES MEMES -- c'est ce qui dit a loom que les deux tenseurs sont sur la meme grille.
-    temperature = RealTensor[ *u.shape ]( u )
-    suivant = RealTensor[ *temperature.axes ]()
+    `u` est un tableau `( ny, nx )` du framework ( ou un simple numpy ) et `coef` vaut `dt k / h^2`
+    -- la diffusivite est CONSTANTE. Renvoie la temperature mise a jour, derivable par rapport
+    a `u`."""
+    # AUCUN vocabulaire d'axe : les axes sont deduits de la forme de `u` ( anonymes ; ils recoivent
+    # des noms distincts a l'abaissement ), et `suivant` reprend LES MEMES -- c'est ce qui dit a
+    # loom que les deux tenseurs sont sur la meme grille.
+    temperature = loom.RealTensor( u )
+    suivant = loom.RealTensor.like( temperature )
 
-    driver.call(
+    loom.ffi_call(
         _avant,
         _arriere,
         name = "diffusion_pas",
         temperature = temperature,
-        coef = RealTensor( float( coef ) ),
+        coef = loom.RealTensor( float( coef ) ),
         suivant = suivant,
         output_attributes = [ "suivant" ],
     )
@@ -181,7 +182,7 @@ if __name__ == "__main__":
                          for i in range( n ) ] for j in range( n ) ] )
 
     chaud = float( numpy.asarray( u ).max() )
-    v = evolution( driver.array( u ), coef, nb_pas )
+    v = evolution( u, coef, nb_pas )
     print( f"{ nb_pas } pas de diffusion sur une grille { n }x{ n } ( c = { coef } )" )
     print( f"  pic  { chaud:.4f} -> { float( numpy.asarray( v ).max() ):.4f}" )
     # la somme DECROIT : le bord est impose a 0, donc la chaleur s'echappe par les cotes.

@@ -38,6 +38,7 @@ def __getattr__(name: str):
         "transpose":        (".tensor.functions",      "transpose"),
         "driver":          (".drivers.driver",        "driver"),
         "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
+        "ffi_call":        (".ffi_call",              "ffi_call"),
     }
 
     if name in _lazy:

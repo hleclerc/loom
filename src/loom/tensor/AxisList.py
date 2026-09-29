@@ -35,7 +35,7 @@ class AxisList( AbstractAxis ):
         # uses for the extents, and usually resolved because that axis is shared with other tensors.
         # An `AxisList` changes NOTHING about the tensor: it only DEFINES several ordinary axes, so
         # each unrolled dimension gets its own `_k`-suffixed name and is indexed positionally.
-        base = self.name or f"a{ index }"
+        base = self.name or f"axis_{ index }"
         return [ f"{ base }_{ k }" for k in range( self.loop_axis.max ) ]
 
     def array_dims( self, tensor ):

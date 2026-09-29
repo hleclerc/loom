@@ -15,25 +15,28 @@ from loom.testing import check_grad
 from diffusion import evolution, pas
 
 
-def _grille( n, f ):
-    """Un champ `n x n` donne cellule par cellule. La CLASSE porte le type ( des reels ), donc
-    il n'y a rien a declarer de plus -- et `driver` n'a pas a apparaitre."""
-    return loom.RealTensor( [ [ float( f( j, i ) ) for i in range( n ) ] for j in range( n ) ] ).raw
+# LES CHAMPS DE DEPART SONT BATIS SUR LE DEVICE. Une expression C++ des coordonnees, compilee
+# une fois : pas de boucle Python en `n * n`, pas de transfert hote -> device pour une donnee que
+# le device sait fabriquer. La convention tient en deux noms -- `i_<axe>` l'indice le long de cet
+# axe, `n_<axe>` son etendue -- et un axe anonyme s'appelle `axis_0`, `axis_1`, donc on ecrit tout
+# ca sans declarer le moindre axe.
+_BORD = "i_axis_0 == 0 || i_axis_1 == 0 || i_axis_0 + 1 == n_axis_0 || i_axis_1 + 1 == n_axis_1"
 
 
 def _mode_propre( n ):
     """`sin( pi x ) sin( pi y )` : un vecteur propre EXACT du stencil a cinq points, nul sur le
     bord. Son facteur de decroissance par pas se calcule a la main."""
-    return _grille( n, lambda j, i: math.sin( math.pi * i / ( n - 1 ) ) * math.sin( math.pi * j / ( n - 1 ) ) )
+    return loom.RealTensor[ n, n ].expr(
+        "sin( M_PI * i_axis_1 / ( n_axis_1 - 1 ) ) * sin( M_PI * i_axis_0 / ( n_axis_0 - 1 ) )" ).raw
 
 
 def _bosse( n, x0 = 0.35, y0 = 0.4, s = 0.15 ):
-    def f( j, i ):
-        x, y = i / ( n - 1 ), j / ( n - 1 )
-        if i in ( 0, n - 1 ) or j in ( 0, n - 1 ):
-            return 0.0
-        return math.exp( - ( ( x - x0 ) ** 2 + ( y - y0 ) ** 2 ) / ( 2 * s * s ) )
-    return _grille( n, f )
+    return loom.RealTensor[ n, n ].expr(
+        f"{ _BORD } ? TF( 0 ) : exp( - ( ( TF( i_axis_1 ) / ( n_axis_1 - 1 ) - x0 )"
+        " * ( TF( i_axis_1 ) / ( n_axis_1 - 1 ) - x0 )"
+        " + ( TF( i_axis_0 ) / ( n_axis_0 - 1 ) - y0 )"
+        " * ( TF( i_axis_0 ) / ( n_axis_0 - 1 ) - y0 ) ) / ( 2 * s * s ) )",
+        x0 = x0, y0 = y0, s = s ).raw
 
 
 if test( "le_mode_propre_decroit_du_facteur_exact" ):

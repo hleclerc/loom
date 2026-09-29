@@ -210,8 +210,13 @@ class AbstractAxis( Attribute ):
         `max_list` (which does the same for extents). One entry for a plain `Axis`; several for an
         unrolled `AxisList`. Keeping the unrolling HERE (and in the overrides) lets a caller merely
         concatenate over a tensor's axes -- it needs no notion of how many `AxisList`s there are or
-        how wide each unrolls. `index` is the axis' position, used only for the nameless fallback."""
-        return [ self.name or f"a{ index }" ]
+        how wide each unrolls. `index` is the axis' position, used only for the nameless fallback.
+
+        LE NOM PAR DEFAUT EST EXPLICITE ( `axis_0` et non `a0` ) : en C++ un nom d'axe nomme
+        L'AXE, et ce qui s'en derive le nomme aussi -- l'indice le long de l'axe `A` s'ecrit
+        `i_A`, son etendue `n_A` ( voir `Tensor.expr` ). `i_a0` ne disait rien ; `i_axis_0` dit
+        ce que c'est."""
+        return [ self.name or f"axis_{ index }" ]
 
     @staticmethod
     def cpp_shared_header( name ):

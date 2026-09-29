@@ -170,18 +170,23 @@ def evolution( temperature, coef, nb_pas ):
 
 if __name__ == "__main__":
     # de quoi voir l'exemple tourner sans rien installer : `python diffusion.py`
-    import numpy
-
+    #
+    # RIEN NE PASSE PAR L'HOTE. La bosse est batie par une EXPRESSION C++ des coordonnees,
+    # compilee et executee la ou le tenseur vit ; les lectures finales sont des reductions de
+    # loom. Aucun numpy, et rien qui suppose un device plutot qu'un autre.
     n, nb_pas, coef = 21, 40, 0.2
-    centre = ( n - 1 ) / 2
-    u = numpy.array( [ [ 0.0 if j in ( 0, n - 1 ) or i in ( 0, n - 1 ) else
-                         float( numpy.exp( - ( ( i - centre ) ** 2 + ( j - centre ) ** 2 ) / 8 ) )
-                         for i in range( n ) ] for j in range( n ) ] )
 
-    chaud = float( numpy.asarray( u ).max() )
+    u = loom.RealTensor[ n, n ].expr(
+        # le bord est impose a zero, et c'est la meme expression qui le dit
+        "i_axis_0 == 0 || i_axis_1 == 0 || i_axis_0 + 1 == n_axis_0 || i_axis_1 + 1 == n_axis_1"
+        " ? TF( 0 )"
+        " : exp( - ( ( i_axis_0 - c ) * ( i_axis_0 - c )"
+        "          + ( i_axis_1 - c ) * ( i_axis_1 - c ) ) / 8 )",
+        c = ( n - 1 ) / 2,
+    )
+
     v = evolution( u, coef, nb_pas )
     print( f"{ nb_pas } pas de diffusion sur une grille { n }x{ n } ( c = { coef } )" )
-    print( f"  pic  { chaud:.4f} -> { float( numpy.asarray( v ).max() ):.4f}" )
+    print( f"  pic  { float( u.max() ):.4f} -> { float( v.max() ):.4f}" )
     # la somme DECROIT : le bord est impose a 0, donc la chaleur s'echappe par les cotes.
-    print( f"  somme { float( numpy.asarray( u ).sum() ):.4f}"
-           f" -> { float( numpy.asarray( v ).sum() ):.4f}   ( elle fuit par le bord )" )
+    print( f"  somme { float( u.sum() ):.4f} -> { float( v.sum() ):.4f}   ( elle fuit par le bord )" )

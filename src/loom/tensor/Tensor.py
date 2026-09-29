@@ -316,6 +316,70 @@ class Tensor( Attribute ):
                                         pos, shape ) )
 
     @classmethod
+    def expr( cls, body, *, template_args = (), template_kwargs = {}, scope = None, **params ) -> "Tensor":
+        """Rempli par une EXPRESSION C++ DES COORDONNEES, compilee et executee SUR LE DEVICE.
+
+            u = RealTensor[ n, n ].expr( "exp( - ( sq( i_axis_0 - c ) + sq( i_axis_1 - c ) ) / 8 )",
+                                         c = ( n - 1 ) / 2 )
+
+        `zeros`, `ones`, `iota`, `linspace`, `random` sont les cas particuliers qu'on rencontre
+        assez souvent pour les nommer ; ceci est le cas GENERAL. Ce qu'il remplace est un
+        remplissage ecrit en boucles Python -- donc du temps Python, et un transfert vers le
+        device pour une donnee que le device pouvait fabriquer lui-meme.
+
+        CE QUE L'EXPRESSION A SOUS LA MAIN, et la convention tient en une ligne : en C++ un nom
+        d'axe nomme L'AXE, pas l'indice, donc ce qui s'en derive le nomme aussi.
+
+            i_<axe>    l'indice le long de cet axe        ( `i_y`, `i_axis_0` )
+            n_<axe>    son etendue                        ( `n_y`, `n_axis_0` )
+            <nom>      chaque parametre passe en kwarg    ( scalaire si rang 0, sinon la vue )
+            TF, SI     le reel et l'entier de l'appel
+
+        Un axe anonyme s'appelle `axis_0`, `axis_1`, ... ( voir `cpp_dim_names` ) : on remplit
+        donc une grille sans avoir a declarer, ni meme a nommer, le moindre axe.
+
+        Les coordonnees sont prises PAR NOM ( `coords[ axe ]` ) et non par position, donc un axe
+        de batch ajoute devant ne decale rien.
+        """
+        from ..compilation.FfiCode import FfiCode
+        from ..calls import ffi_call, out
+
+        res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
+
+        # les locales : un indice et une etendue par axe, puis un parametre par kwarg. Un rang 0
+        # descend en SCALAIRE ( c'est ce qu'on veut ecrire dans une expression ) ; au-dela, la vue
+        # elle-meme, que l'expression indexera comme elle l'entend.
+        locales = []
+        for index, axe in enumerate( res.axes ):
+            for nom in axe.cpp_dim_names( index ):
+                locales.append( f"const SI i_{ nom } = coords[ { nom } ];" )
+                locales.append( f"const SI n_{ nom } = args.outputs.res.size( { nom } );" )
+        for nom, valeur in params.items():
+            t = Tensor.as_tensor( valeur, bind = False )
+            if t is None:
+                raise TypeError( f"Tensor.expr: le parametre '{ nom }' n'est pas une donnee" )
+            if t.rank == 0:
+                scalaire = "TF" if t.dtype.floating_point else ( "bool" if t.dtype.boolean else "SI" )
+                locales.append( f"const { scalaire } { nom } = args.inputs.{ nom };" )
+            else:
+                locales.append( f"const auto &{ nom } = args.inputs.{ nom };" )
+
+        code = ( "namespace {\n"
+                 "    struct LoomExpr {\n"
+                 "        HD void operator()( auto coords, auto &&args, auto batch_axes ) const {\n"
+                 + "".join( f"            { l }\n" for l in locales ) +
+                 f"            args.outputs.res( coords ) = ( { body } );\n"
+                 "        }\n"
+                 "    };\n\n"
+                 "    void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {\n"
+                 "        queue.run_parallel( LoomExpr(), args.outputs.res.domain(), args, batch_axes );\n"
+                 "    }\n"
+                 "}\n" )
+
+        ffi_call( "tensor_expr", FfiCode( code = code ), res = out( res ), **params )
+        return res
+
+    @classmethod
     def random( cls, seed = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
         """Un tirage uniforme sur `[ 0, 1 [`. `seed = None` prend le suivant d'un compteur de
         process -- passer un seed est ce qui rend un test reproductible (voir `driver.random`)."""

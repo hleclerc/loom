@@ -1,5 +1,10 @@
 """loom — agnostic Jax/Torch → C++ kernels interface.
 
+NB `ffi_call` vit dans `calls.py`, et PAS dans un module du même nom. Un sous-module est lié comme
+attribut de son paquet à l'import : `loom/calls.py` importé depuis ailleurs remplaçait
+`loom.ffi_call` (la fonction, mise en cache par `__getattr__` ci-dessous) par le MODULE. L'erreur
+était `'module' object is not callable`, à un endroit sans rapport.
+
 Lazy imports: `import loom` is instant. Heavy modules (Tensor, driver, FfiCode)
 are loaded on first access, e.g. `from loom import Tensor`.
 """
@@ -38,12 +43,12 @@ def __getattr__(name: str):
         "transpose":        (".tensor.functions",      "transpose"),
         "driver":          (".drivers.driver",        "driver"),
         "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
-        "ffi_call":        (".ffi_call",              "ffi_call"),
+        "ffi_call":        (".calls",                 "ffi_call"),
         # le vocabulaire des arguments d'un appel : le rôle se dit SUR la valeur
-        "out":             (".ffi_call",              "out"),
-        "mutable":         (".ffi_call",              "mutable"),
-        "scratch":         (".ffi_call",              "scratch"),
-        "unbound":         (".ffi_call",              "unbound"),
+        "out":             (".calls",                 "out"),
+        "mutable":         (".calls",                 "mutable"),
+        "scratch":         (".calls",                 "scratch"),
+        "unbound":         (".calls",                 "unbound"),
     }
 
     if name in _lazy:

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# sorties de compilation ( loom écrit tout ce qu'il engendre sous `build/`, voir
+# `compilation/build.py` : un graphe commun et un répertoire par noyau )
+build/
+*.o
+*.a
+*.so
+*.so.p
+*.dylib
+compile_commands.json
+
+# le runner ( errand )
+.errand/
+runs/
+
+# divers
+tmp/
+.cache/

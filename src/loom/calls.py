@@ -132,29 +132,24 @@ def unbound( value, *members ):
     return Arg( _UNBOUND, value, members )
 
 
-def ffi_call( name, *kernels, batch_alignment = None, has_dynamic_capacity = True, **args ):
-    """Lance `kernels` sur les valeurs passees en kwargs.
+def lower_args( args ):
+    """LE VOCABULAIRE, traduit en ce que l'abaissement attend.
 
-        temperature = loom.ffi_call(
-            "diffusion_pas",                 # le nom de l'appel : obligatoire, donc en premier
-            avant, arriere,                  # le second est l'ADJOINT ( optionnel )
-            temperature = loom.mutable( temperature ),
-            coef = coef,
-        )
+    Rend `( donnees, sorties, scratchs, non_lies, capacites, groupes, mutables )` :
 
-    CE QUI EST RENDU : la valeur des arguments `mutable`, dans l'ordre ou ils ont ete donnes ( la
-    valeur seule s'il n'y en a qu'un, un tuple sinon ), et `None` s'il n'y en a aucun. Une sortie
-    declaree par `loom.out` n'est PAS rendue : l'objet est deja le notre, le resultat y est
-    reecrit. Le framework, lui, ne voit jamais nos objets -- seulement les tenseurs dedans.
+        donnees    { chemin: objet }         ce qui traverse
+        groupes    { groupe: { membre: chemin } }   le premier niveau de `args` cote C++
+        mutables   [ ( objet de sortie, ce qu'on nous a donne ) ]   pour ce qui est RENDU
+
+    Le CHEMIN et le NOM C++ se separent ici, et c'est ce qui rend `mutable` possible : deux
+    tampons portent le MEME nom C++ dans deux groupes, sous deux chemins distincts -- un chemin
+    etant ce que les capacites et les sorties designent.
+
+    Vit ici, avec les marqueurs, et non dans le driver : c'est le meme sujet.
     """
-    from .drivers.driver import driver
-
     donnees, sorties, scratchs, non_lies = {}, [], [], []
     capacites = {}
-    mutables = []           # ( objet de sortie, ce qu'on nous a donne ), dans l'ordre des kwargs
-    # LES GROUPES : membre C++ -> chemin. Le chemin est ce que les capacites et les sorties
-    # nomment cote python ; le membre est ce que le noyau ecrit. Les deux coincident partout sauf
-    # pour un `mutable`, qui donne DEUX tampons au MEME nom, dans deux groupes.
+    mutables = []
     groupes = { "inputs": {}, "outputs": {}, "scratch": {} }
 
     for cle, valeur in args.items():
@@ -201,26 +196,30 @@ def ffi_call( name, *kernels, batch_alignment = None, has_dynamic_capacity = Tru
             sorties += chemins
             groupes[ "outputs" ][ cle ] = cle
 
-    driver.call(
-        *kernels,
-        name = name,
-        output_attributes = sorties,
-        scratch_attributes = scratchs,
-        input_exceptions = non_lies,
-        output_capacities = capacites,
-        batch_alignment = batch_alignment,
-        has_dynamic_capacity = has_dynamic_capacity,
-        groups = { g: m for g, m in groupes.items() if m },
-        # PAS `**donnees` : à plat, les arguments retomberaient dans le namespace des options
-        # ci-dessus. Sous les groupes la collision est déjà impossible ( le premier niveau ne
-        # contient que les groupes ), mais le chemin plat existe encore le temps de la migration.
-        call_args = donnees,
-    )
+    return ( donnees, sorties, scratchs, non_lies, capacites,
+             { g: m for g, m in groupes.items() if m }, mutables )
 
+
+def returned( mutables ):
+    """Ce qu'un appel rend : la valeur des arguments `mutable`, dans l'ordre ou ils ont ete
+    donnes ( la valeur seule s'il n'y en a qu'un, un tuple sinon ), et `None` s'il n'y en a
+    aucun."""
     if not mutables:
         return None
     rendus = [ _same_kind( objet, donne ) for objet, donne in mutables ]
     return rendus[ 0 ] if len( rendus ) == 1 else tuple( rendus )
+
+
+def ffi_call( name, *kernels, **kwargs ):
+    """Lance `kernels` sur les valeurs passees en kwargs.
+
+    C'EST `driver.call`, sous le nom de ce qu'il fait : il n'y a qu'une forme d'appel, et `driver`
+    reste la couche basse que l'usager n'a pas a nommer. Ce qui est RENDU : la valeur des arguments
+    `mutable` ( voir `returned` ). Une sortie declaree par `loom.out` n'est pas rendue -- l'objet
+    est deja le notre, le resultat y est reecrit.
+    """
+    from .drivers.driver import driver
+    return driver.call( name, *kernels, **kwargs )
 
 
 def _empty_like( value, name ):

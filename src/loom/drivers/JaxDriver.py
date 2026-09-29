@@ -332,8 +332,19 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), call_args = None, groups = None, **kwargs ):
-        """Lance un ou deux `FfiCode` sur les objets passés en kwargs.
+    def call( self, name, *kernels, batch_alignment = None, has_dynamic_capacity = True, **args ):
+        """Lance un ou deux `FfiCode` sur les valeurs passées en kwargs.
+
+        C'EST `loom.ffi_call` : il n'y a pas d'autre forme d'appel. Le vocabulaire des arguments
+        -- `loom.out`, `loom.mutable`, `loom.scratch`, `loom.unbound` -- et la raison de chaque
+        choix sont dans `loom/calls.py`, qui les définit et les traduit (`lower_args`).
+
+            temperature = loom.ffi_call(
+                "diffusion_pas",             # le nom de l'appel : obligatoire, donc en premier
+                avant, arriere,              # le second est l'ADJOINT ( optionnel )
+                temperature = loom.mutable( temperature ),
+                coef = coef,
+            )
 
         Un appel prend l'ALLER, et -- si la chose doit être dérivable -- le RETOUR, tous deux
         positionnels et dans cet ordre. Ce sont deux noyaux à part entière : le retour tourne sur
@@ -341,57 +352,22 @@ class JaxDriver:
         `name` qui les identifie tous les deux -- il nomme les foncteurs (`<name>_kernel` et
         `<name>_bwd_kernel`), préfixe la cible compilée et groupe le journal des compilations.
 
-            driver.call( FfiCode( "..." ), FfiCode( "..." ), name = "mesure", cell = cell, ... )
+        Les entrées et les sorties sont DISJOINTES, comme dans XLA : ce qui ressemble à une mise à
+        jour en place est un rebinding côté Python, que `loom.mutable` écrit pour nous.
 
+        Deux noms restent réservés ici, et ce sont des réglages de l'appel, pas des données :
+        `batch_alignment` (l'alignement de la dimension de lot) et `has_dynamic_capacity`.
 
-        The objects are built by the caller; nothing is returned. Every list below names
-        attributes by dotted path (`"cell.vertex_positions"`, or `"cell"` for a whole subtree).
-
-        `output_attributes` are what the kernel PRODUCES: a fresh buffer, rebound onto the
-        attribute once the call returns. An attribute that already holds data is an input; an
-        empty, undeclared one is not bound at all (the kernel sees a null view -- it may simply
-        be an optional field this kernel does not use).
-
-        `output_attribute_exceptions` carve holes in that subtree: a path under a named output
-        the kernel does NOT produce this time (`output_attributes = [ "cell" ]` with
-        `output_attribute_exceptions = [ "cell.vertex_indices" ]` -- a run that leaves the vertex
-        indices alone). The carved-out attribute falls back to being observed, exactly as if it
-        had never been under an output.
-
-        `input_exceptions` is the symmetric carve-out on the OTHER default: a path forced to stay
-        UNBOUND even though the attribute holds data (`input_exceptions = [ "cell.cut_offsets" ]`
-        on a `cell` this kernel never reads) -- it is never transferred, and (being a `NoneTensor`
-        rather than a real buffer) never becomes a differentiable primal, so its backward never
-        needs a cotangent for it either. Use it for members an aggregate happens to carry but this
-        particular kernel has no business touching.
-
-        `capacities` says how big to allocate: `{ "cell.nb_vertices": 8 }`. It belongs to the
-        call and not to the object, because it is a decision about THIS allocation -- an object
-        only ever states what it IS. A capacity already materialized in a buffer need not be
-        restated (it is read back from it).
-
-        Inputs and outputs are disjoint, as in XLA: an update in place is a Python-side
-        rebinding, for the caller to make between two calls.
-
-        A capacity may of course turn out to be too small -- only the kernel knows how many items
-        it produces. It says so (it records the count that did not fit, see
-        `support/containers/ErrorBuffer.h`), and we simply RUN AGAIN with room for it: what a
-        failed run wrote is discarded, outputs being fresh buffers anyway. The new capacity is
-        `max( what was asked for, twice what we had )` -- a capacity exceeded once tends to be
-        exceeded again, so we make room rather than track a count.
+        Une capacité peut se révéler trop petite -- seul le kernel sait combien d'items il produit.
+        Il le dit (il enregistre le compte qui n'a pas tenu, voir
+        `support/containers/ErrorBuffer.h`), et on RELANCE avec la place qu'il demande : ce qu'une
+        passe ratée a écrit est jeté, les sorties étant de toute façon des tampons neufs. La
+        nouvelle capacité est `max( ce qui est demandé, deux fois ce qu'on avait )` -- une capacité
+        dépassée une fois tend à l'être encore, donc on fait de la place plutôt que de compter.
         """
-        # LES ARGUMENTS DU NOYAU, HORS DU NAMESPACE DES OPTIONS. Passés à plat (`cell = ...`),
-        # ils partagent ce namespace avec les neuf paramètres ci-dessus : un noyau ne peut alors
-        # pas avoir un argument nommé `name` ou `output_attributes`, et `output_attribute` au
-        # singulier devient silencieusement un argument. `call_args` est la porte qui n'a pas ce
-        # défaut -- c'est par là que passe `loom.ffi_call`, dont les options sont des marqueurs
-        # sur les valeurs et n'ont donc plus besoin de noms réservés. Les deux formes s'excluent.
-        if call_args is not None:
-            if kwargs:
-                raise TypeError( f"driver.call: `call_args` porte déjà les arguments de l'appel, "
-                                 f"mais { ', '.join( kwargs ) } { 'a' if len( kwargs ) == 1 else 'ont' } "
-                                 f"aussi été passé{ '' if len( kwargs ) == 1 else 's' } à plat" )
-            kwargs = dict( call_args )
+        from ..calls import lower_args, returned
+        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, mutables = lower_args( args )
+        output_exceptions = ()
 
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
@@ -421,10 +397,10 @@ class JaxDriver:
                 # caller knows whether a count is prescribed or produced.
                 if has_dynamic_capacity:
                     jax.debug.callback( _raise_on_error, ca.errors.raw )
-                return
+                return returned( mutables )
 
             if not overflows:
-                return
+                return returned( mutables )
 
             # `SDOT_DEBUG_CAPACITY=1` : ce que le kernel a VRAIMENT demandé, tour par tour. Une
             # capacité qui double sans fin est le symptôme d'un `wanted` qui n'arrive pas (buffer

@@ -27,38 +27,35 @@ reserve plus grand et relance. `reference_jax.py` mesure ce que la borne coute.
 """
 from pathlib import Path
 
-import loom.compilation as compilation
+# `loom.Truc` et jamais `Truc` tout court : dans un exemple, on doit voir d'ou vient chaque nom.
+import loom
+import loom.compilation
 
 # le C++ de CE paquet, enregistre aupres de loom comme n'importe quel usager
-compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
-
-import loom
-from loom import Aggregate, Axis, CtShapeVar, IntTensor, RealTensor, ShapeVar, driver, stop_gradient
-from loom.compilation.FfiCode import FfiCode
-from loom.tensor import new_batch_axis
+loom.compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
 
 COTE = 16          # une tuile de 16 x 16 pixels
 
 
-class Splats( Aggregate ):
+class Splats( loom.Aggregate ):
     """Les gaussiennes : centre, inverse de covariance ( a, b, c ), couleur, opacite."""
-    centres   : RealTensor[ "splat", "xy" ]
-    cov_inv   : RealTensor[ "splat", "abc" ]
-    couleurs  : RealTensor[ "splat", "rvb" ]
-    opacites  : RealTensor[ "splat" ]
+    centres   : loom.RealTensor[ "splat", "xy" ]
+    cov_inv   : loom.RealTensor[ "splat", "abc" ]
+    couleurs  : loom.RealTensor[ "splat", "rvb" ]
+    opacites  : loom.RealTensor[ "splat" ]
 
-    splat     : Axis[ "nb_splats" ]
-    xy        : Axis[ "nb_xy" ]
-    abc       : Axis[ "nb_abc" ]
-    rvb       : Axis[ "nb_rvb" ]
+    splat     : loom.Axis[ "nb_splats" ]
+    xy        : loom.Axis[ "nb_xy" ]
+    abc       : loom.Axis[ "nb_abc" ]
+    rvb       : loom.Axis[ "nb_rvb" ]
 
-    nb_splats : ShapeVar
-    nb_xy     : CtShapeVar
-    nb_abc    : CtShapeVar
-    nb_rvb    : CtShapeVar
+    nb_splats : loom.ShapeVar
+    nb_xy     : loom.CtShapeVar
+    nb_abc    : loom.CtShapeVar
+    nb_rvb    : loom.CtShapeVar
 
 
-class Index( Aggregate ):
+class Index( loom.Aggregate ):
     """L'INDEX RAGGED : pour chaque tuile, les splats qui la touchent.
 
     `nb_par_tuile : ShapeVar[ "tuile" ]` est UN COMPTE PAR TUILE -- un `ShapeVar` qui varie le long
@@ -68,38 +65,38 @@ class Index( Aggregate ):
     Le compte est ECRIT PAR LE NOYAU ( passe 1 ) ; `ids` est alloue a la capacite que l'appel
     demande, et un compte qui la depasse est signale au lieu d'etre tronque en silence.
     """
-    ids          : IntTensor[ "tuile", "fente" ]
+    ids          : loom.IntTensor[ "tuile", "fente" ]
 
-    tuile        : Axis[ "nb_tuiles" ]
-    fente        : Axis[ "nb_par_tuile" ]
+    tuile        : loom.Axis[ "nb_tuiles" ]
+    fente        : loom.Axis[ "nb_par_tuile" ]
 
-    nb_tuiles    : CtShapeVar
-    nb_par_tuile : ShapeVar[ "tuile" ]
+    nb_tuiles    : loom.CtShapeVar
+    nb_par_tuile : loom.ShapeVar[ "tuile" ]
 
 
-class Ecran( Aggregate ):
+class Ecran( loom.Aggregate ):
     """La geometrie de l'image, connue a la compilation : le stencil de tuiles y gagne, au prix
     d'une compilation par resolution ( comme la grille de `examples/diffusion` )."""
-    largeur : CtShapeVar
-    hauteur : CtShapeVar
-    cote    : CtShapeVar
+    largeur : loom.CtShapeVar
+    hauteur : loom.CtShapeVar
+    cote    : loom.CtShapeVar
 
 
-class Rangs( Aggregate ):
+class Rangs( loom.Aggregate ):
     """« Qui suis-je ? » : le rang plat de l'item.
 
     Le meme agregat-pretexte que dans `examples/diffusion`, et pour la meme raison -- l'echafaudage
     injecte `batch_index`, `thread_index` et `nb_threads`, mais pas le rang plat, et le batch d'un
     appel ne vient que des agregats. Deuxieme exemple, meme friction : elle merite que
     l'echafaudage l'injecte."""
-    rang : IntTensor
+    rang : loom.IntTensor
 
 
 def _nb_tuiles( largeur, hauteur, cote = COTE ):
     return ( ( largeur + cote - 1 ) // cote ) * ( ( hauteur + cote - 1 ) // cote )
 
 
-_INSCRIRE = FfiCode.per_item(
+_INSCRIRE = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI i = SI( inputs.rangs.rang( batch_index ) );
@@ -108,7 +105,7 @@ _INSCRIRE = FfiCode.per_item(
     """,
 )
 
-_RENDRE = FfiCode.per_item(
+_RENDRE = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( inputs.rangs.rang( batch_index ) );
@@ -121,7 +118,7 @@ _RENDRE = FfiCode.per_item(
     """,
 )
 
-_RENDRE_BWD = FfiCode.per_item(
+_RENDRE_BWD = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( inputs.rangs.rang( batch_index ) );
@@ -138,9 +135,9 @@ _RENDRE_BWD = FfiCode.per_item(
 
 def _rangs( nb, prefixe ):
     """Un agregat batche sur `nb` items, portant leur rang plat."""
-    axe = new_batch_axis( nb, prefix = prefixe )
+    axe = loom.new_batch_axis( nb, prefix = prefixe )
     rangs = Rangs( batch_axes = [ axe ] )
-    rangs.rang = IntTensor[ axe ].iota()
+    rangs.rang = loom.IntTensor[ axe ].iota()
     return rangs
 
 
@@ -153,8 +150,8 @@ def construire_index( splats, ecran, capacite ):
     grand et relance tout seul -- l'appelant n'a rien a faire. La capacite finalement retenue se lit
     dans `index.ids.capacity`, ce qui est la façon d'observer que la croissance a eu lieu.
     """
-    index = Index( nb_tuiles = _nb_tuiles( int( ecran.largeur.raw ), int( ecran.hauteur.raw ),
-                                           int( ecran.cote.raw ) ) )
+    index = Index( nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ),
+                                           int( ecran.cote.value ) ) )
     loom.ffi_call(
         "splats_inscrire",
         _INSCRIRE,
@@ -168,9 +165,9 @@ def construire_index( splats, ecran, capacite ):
 
 def rendre( splats, index, ecran ):
     """PASSE 2 : l'image. Differentiable par rapport a tout ce que porte `splats`."""
-    largeur, hauteur = int( ecran.largeur.raw ), int( ecran.hauteur.raw )
-    image = RealTensor[ Axis( ShapeVar( hauteur ), name = "y" ),
-                        Axis( ShapeVar( largeur ), name = "x" ), splats.rvb ]()
+    largeur, hauteur = int( ecran.largeur.value ), int( ecran.hauteur.value )
+    image = loom.RealTensor[ loom.Axis( loom.ShapeVar( hauteur ), name = "y" ),
+                        loom.Axis( loom.ShapeVar( largeur ), name = "x" ), splats.rvb ]()
     loom.ffi_call(
         "splats_rendre",
         _RENDRE, _RENDRE_BWD,
@@ -180,7 +177,7 @@ def rendre( splats, index, ecran ):
         image = loom.out( image ),
         rangs = _rangs( largeur * hauteur, "pixel" ),
     )
-    return image.raw
+    return image.tensor
 
 
 def rendu( splats, ecran, capacite ):
@@ -194,10 +191,10 @@ def rendu( splats, ecran, capacite ):
 def _sans_gradient( splats ):
     """Les memes splats, detaches : ce que la passe 1 lit."""
     autre = Splats( nb_xy = 2, nb_abc = 3, nb_rvb = 3 )
-    autre.centres  = stop_gradient( splats.centres )
-    autre.cov_inv  = stop_gradient( splats.cov_inv )
-    autre.couleurs = stop_gradient( splats.couleurs )
-    autre.opacites = stop_gradient( splats.opacites )
+    autre.centres  = loom.stop_gradient( splats.centres )
+    autre.cov_inv  = loom.stop_gradient( splats.cov_inv )
+    autre.couleurs = loom.stop_gradient( splats.couleurs )
+    autre.opacites = loom.stop_gradient( splats.opacites )
     return autre
 
 # ── L'AUTRE REPRESENTATION : CSR, en deux passes ─────────────────────────────────────────────────
@@ -216,7 +213,7 @@ def _sans_gradient( splats ):
 # fait pour ca ), et alloue donc EXACTEMENT. XLA ne peut pas : sous `jit` le compte est un tracer,
 # et il faut borner le total avant de tracer. Voir le tableau du README.
 
-_COMPTER = FfiCode.per_item(
+_COMPTER = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         splats::compter( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
@@ -224,7 +221,7 @@ _COMPTER = FfiCode.per_item(
     """,
 )
 
-_REMPLIR = FfiCode.per_item(
+_REMPLIR = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         splats::remplir( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
@@ -232,7 +229,7 @@ _REMPLIR = FfiCode.per_item(
     """,
 )
 
-_RENDRE_CSR = FfiCode.per_item(
+_RENDRE_CSR = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         const SI p = SI( inputs.rangs.rang( batch_index ) );
@@ -258,24 +255,24 @@ def construire_index_csr( splats, ecran ):
     """
     import numpy
 
-    nb_tuiles = _nb_tuiles( int( ecran.largeur.raw ), int( ecran.hauteur.raw ), int( ecran.cote.raw ) )
-    tuile = Axis( ShapeVar( nb_tuiles ), name = "tuile_csr" )
+    nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ), int( ecran.cote.value ) )
+    tuile = loom.Axis( loom.ShapeVar( nb_tuiles ), name = "tuile_csr" )
     rangs = _rangs( int( splats.nb_splats.value ), "splat" )
 
     # 1. compter
-    comptes = IntTensor[ tuile ]()
+    comptes = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_compter", _COMPTER,
                    splats = splats, ecran = ecran, comptes = loom.out( comptes ), rangs = rangs )
 
     # 2. la somme prefixe, sur l'hote, et le TOTAL -- qui dimensionne la liste
     c = numpy.asarray( comptes.tensor ).reshape( -1 )
     total = int( c.sum() )
-    offsets = IntTensor[ tuile ]( numpy.concatenate( [ [ 0 ], numpy.cumsum( c )[ :-1 ] ] ) )
+    offsets = loom.IntTensor[ tuile ]( numpy.concatenate( [ [ 0 ], numpy.cumsum( c )[ :-1 ] ] ) )
 
     # 3. remplir
-    fente = Axis( ShapeVar( max( total, 1 ) ), name = "fente_csr" )
-    ids_plat = IntTensor[ fente ]()
-    curseurs = IntTensor[ tuile ]()
+    fente = loom.Axis( loom.ShapeVar( max( total, 1 ) ), name = "fente_csr" )
+    ids_plat = loom.IntTensor[ fente ]()
+    curseurs = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_remplir", _REMPLIR,
                    splats = splats, ecran = ecran, offsets = offsets,
                    curseurs = loom.out( curseurs ), ids_plat = loom.out( ids_plat ), rangs = rangs )
@@ -284,9 +281,9 @@ def construire_index_csr( splats, ecran ):
 
 def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
     """Le meme rendu, sur l'index CSR. Doit donner la meme image, au bit pres."""
-    largeur, hauteur = int( ecran.largeur.raw ), int( ecran.hauteur.raw )
-    image = RealTensor[ Axis( ShapeVar( hauteur ), name = "y" ),
-                        Axis( ShapeVar( largeur ), name = "x" ), splats.rvb ]()
+    largeur, hauteur = int( ecran.largeur.value ), int( ecran.hauteur.value )
+    image = loom.RealTensor[ loom.Axis( loom.ShapeVar( hauteur ), name = "y" ),
+                        loom.Axis( loom.ShapeVar( largeur ), name = "x" ), splats.rvb ]()
     loom.ffi_call(
         "splats_rendre_csr",
         _RENDRE_CSR,
@@ -294,4 +291,4 @@ def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
         ids_plat = ids_plat, image = loom.out( image ),
         rangs = _rangs( largeur * hauteur, "pixel" ),
     )
-    return image.raw
+    return image.tensor

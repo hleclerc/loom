@@ -245,8 +245,13 @@ def _empty_like( value, name ):
 
 def _same_kind( objet, donne ):
     """Ce qu'un `mutable` rend : la meme espece que ce qu'on nous a donne. Un tableau brut est
-    entre, un tableau brut ressort ; un tenseur loom est entre, le tenseur ressort."""
+    entre, un tableau brut ressort ; un tenseur loom est entre, le tenseur ressort.
+
+    `.tensor` ET PAS `.raw`. `raw` est le TAMPON, dimensionne a la CAPACITE -- rembourrage compris,
+    parce que c'est ce dans quoi un noyau ecrit ( l'alignement de batch vaut 128 octets sur CUDA,
+    donc un lot de 3 occupe 16 fentes en fp64 ). Le rendre serait rendre le rembourrage avec, en
+    silence, et la valeur logique est ce qu'on veut. `tensor` recadre sur la forme."""
     from .tensor.Tensor import Tensor
     if isinstance( donne, Tensor ) or not isinstance( objet, Tensor ):
         return objet
-    return objet.raw
+    return objet.tensor

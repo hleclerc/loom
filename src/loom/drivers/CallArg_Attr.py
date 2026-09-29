@@ -31,6 +31,20 @@ class CallArg_Attr( CallArg ):
         # argument's -- two names, so the local does not read itself in its own initializer.
         return f"    auto { var_name } = SI( { self._jax_attr_name() } );"
 
+    # ÊTRE MEMBRE D'UN AGRÉGAT, ce qui n'était encore jamais arrivé : un `int` nu était toujours un
+    # argument RACINE, et une racine est déclarée par `cpp_root_decl`. Sous les GROUPES il n'y a
+    # plus de racine que les groupes eux-mêmes, donc tout argument devient un membre -- et un nœud
+    # qui ne sait pas l'être est simplement FILTRÉ (`CallArg_Aggregate._fields`), en silence : le
+    # corps compilait alors contre une struct où son argument n'existait pas.
+    def cpp_tpl_param( self ):
+        return f"class { self.cpp_tpl_name() }"
+
+    def cpp_member( self ):
+        return f"{ self.cpp_tpl_name() } { self.name };"
+
+    def jax_cpp_init( self ):
+        return f"SI( { self._jax_attr_name() } )"
+
     # `cpp_run_parallel_pair` (base) already gives `InpList(), <name>`: a read-only input.
 
     # -- Jax FFI ABI --

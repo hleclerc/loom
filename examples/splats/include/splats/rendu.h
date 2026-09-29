@@ -243,18 +243,18 @@ HD void rendre_pixel_bwd( const S &splats, const Ids &ids, SI nb_dans_la_tuile, 
         const TF gc = g0 * TF( splats.couleurs( i, 0 ) ) + g1 * TF( splats.couleurs( i, 1 ) )
                     + g2 * TF( splats.couleurs( i, 2 ) );
 
-        if constexpr ( DECAYED_TYPE_OF( grad.couleurs.is_valid() )::value ) {
+        if constexpr ( grad.couleurs.is_valid ) {
             atomic_add( grad.couleurs( i, 0 ).ref(), w * g0 );
             atomic_add( grad.couleurs( i, 1 ).ref(), w * g1 );
             atomic_add( grad.couleurs( i, 2 ).ref(), w * g2 );
         }
-        if constexpr ( DECAYED_TYPE_OF( grad.opacites.is_valid() )::value )
+        if constexpr ( grad.opacites.is_valid )
             atomic_add( grad.opacites( i ).ref(), ( e - seuil<TF>() ) * gc );
-        if constexpr ( DECAYED_TYPE_OF( grad.centres.is_valid() )::value ) {
+        if constexpr ( grad.centres.is_valid ) {
             atomic_add( grad.centres( i, 0 ).ref(), de * gc * ( a * dx + b * dy ) );
             atomic_add( grad.centres( i, 1 ).ref(), de * gc * ( b * dx + c * dy ) );
         }
-        if constexpr ( DECAYED_TYPE_OF( grad.cov_inv.is_valid() )::value ) {
+        if constexpr ( grad.cov_inv.is_valid ) {
             atomic_add( grad.cov_inv( i, 0 ).ref(), de * gc * ( -TF( 0.5 ) * dx * dx ) );
             atomic_add( grad.cov_inv( i, 1 ).ref(), de * gc * ( -dx * dy ) );
             atomic_add( grad.cov_inv( i, 2 ).ref(), de * gc * ( -TF( 0.5 ) * dy * dy ) );

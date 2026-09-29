@@ -143,8 +143,8 @@ if test( "partial_init" ):
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
         
-        static_assert( CT_VALUE( cell.vertex_positions.is_valid() ) );
-        static_assert( ! CT_VALUE( cell.vertex_indices  .is_valid() ) );
+        static_assert( cell.vertex_positions.is_valid );
+        static_assert( ! cell.vertex_indices  .is_valid );
         """ ),
         name = "test_partial_init",
         cell = cell,
@@ -193,7 +193,7 @@ if test( "input_exceptions" ):
 
     driver.call(
         FfiCode.per_item( code = """
-        static_assert( ! CT_VALUE( cell.vertex_positions.is_valid() ) );
+        static_assert( ! cell.vertex_positions.is_valid );
         """ ),
         name = "test_input_exceptions_use",
         cell = cell,
@@ -427,15 +427,15 @@ if test( "der" ):
     # (`grad_for_inp`). Jax reaches it through a `custom_vjp` rule.
     #
     # An INTEGER tensor is non-differentiable and non-perturbable: it never gets a `grad_for_`.
-    # A symbolically-zero output cotangent lowers to a `ZeroTensor` (`grad_for_out.surely_null()`
+    # A symbolically-zero output cotangent lowers to a `ZeroTensor` (`grad_for_out.surely_null`
     # is a compile-time true), and a non-perturbed input gradient to a `NoneTensor`
-    # (`grad_for_inp.is_valid()` a compile-time false) -- either lets the body drop a term at
+    # (`grad_for_inp.is_valid` a compile-time false) -- either lets the body drop a term at
     # compile time rather than move or multiply a buffer of zeros.
     avant = FfiCode.per_item( code = """
             out = 2 * inp + 100;
         """ )
     arriere = FfiCode.per_item( """
-            if ( ! grad_for_out.surely_null() && grad_for_inp.is_valid() )
+            if ( ! grad_for_out.surely_null && grad_for_inp.is_valid )
                 grad_for_inp = 2 * grad_for_out;
         """ )
     def fwd_of( x ):
@@ -481,7 +481,7 @@ if test( "der_symbolic_zero" ):
 if test( "der_non_perturbed" ):
     # two float inputs, but only one is a function of the differentiated variable: the other is a
     # constant, so Jax does not perturb it. Its gradient is never requested, so `grad_for_bias`
-    # reaches the backward kernel as a `NoneTensor` -- `is_valid()` is a compile-time false, and
+    # reaches the backward kernel as a `NoneTensor` -- `is_valid` is a compile-time false, and
     # the body simply does not compute it (nor is a buffer allocated for it).
     avant = FfiCode.per_item( code = """
             out = inp + bias;
@@ -489,14 +489,14 @@ if test( "der_non_perturbed" ):
     arriere = FfiCode.per_item( """
             // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
             // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
-            static_assert( CT_VALUE( grad_for_inp .is_valid() ) );
-            static_assert( ! CT_VALUE( grad_for_bias.is_valid() ) );
+            static_assert( grad_for_inp .is_valid );
+            static_assert( ! grad_for_bias.is_valid );
             
             // a `NoneTensor` has no `operator=`, so its write must be dropped at COMPILE
-            // time -- `if constexpr` on `is_valid()`, not a runtime `if`.
-            if constexpr ( CT_VALUE( grad_for_inp.is_valid() ) )
+            // time -- `if constexpr` on `is_valid`, not a runtime `if`.
+            if constexpr ( grad_for_inp.is_valid )
                 grad_for_inp = grad_for_out;
-            if constexpr ( CT_VALUE( grad_for_bias.is_valid() ) )
+            if constexpr ( grad_for_bias.is_valid )
                 grad_for_bias = grad_for_out;
         """ )
     def loss( x ):
@@ -527,7 +527,7 @@ if test( "der_shape_var" ):
             out( n = 1 ) = 3 * vec( n = 1 );
         """ )
     arriere = FfiCode.per_item( """
-            if ( grad_for_vec.is_valid() && ! grad_for_out.surely_null() ) {
+            if ( grad_for_vec.is_valid && ! grad_for_out.surely_null ) {
                 grad_for_vec( n = 0 ) = 2 * grad_for_out( n = 0 );
                 grad_for_vec( n = 1 ) = 3 * grad_for_out( n = 1 );
             }
@@ -561,7 +561,7 @@ if test( "der_aggregate" ):
             out = 2 * cell.data( n = 0 ) + 3 * cell.data( n = 1 );
         """ )
     arriere = FfiCode.per_item( """
-            if ( ! grad_for_out.surely_null() && grad_for_cell.data.is_valid() ) {
+            if ( ! grad_for_out.surely_null && grad_for_cell.data.is_valid ) {
                 grad_for_cell.data( n = 0 ) = 2 * grad_for_out;
                 grad_for_cell.data( n = 1 ) = 3 * grad_for_out;
             }

@@ -56,8 +56,8 @@ public:
     // compile time, so a kernel branches with `if constexpr` and never tests a pointer. The
     // storageless cases are distinct TYPES (see NoneTensor.h -- unbound, and ZeroTensor.h --
     // symbolically zero), not a TensorView in a degenerate state.
-    HD constexpr auto   is_valid            () const { return Ct<bool,true >(); }
-    HD constexpr auto   surely_null         () const { return Ct<bool,false>(); }
+    static constexpr bool is_valid = true;
+    static constexpr bool surely_null = false;
 
     HD MemorySpace   memory_space           () const { return _data.memory_space; }
     // (pas de membre display : le display() générique de display.h gère TensorView via shape()/value()/operator[])

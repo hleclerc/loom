@@ -11,7 +11,7 @@ namespace sdot {
 /// backs it.
 ///
 /// Like `NoneTensor`, it says so in its TYPE rather than through a runtime test, so an
-/// algorithm can drop a whole term at compile time (`surely_null()` is a `Ct<bool,true>`)
+/// algorithm can drop a whole term at compile time (`surely_null` is a compile-time `true`)
 /// instead of multiplying by a buffer of zeros. Unlike `NoneTensor`, it is a legitimate
 /// VALUE: reading it is well defined (it yields 0), only writing it is not.
 template<class _TF, class _Shape, class _AxisNames>
@@ -21,8 +21,8 @@ struct ZeroTensor {
     using            AxisNames              = _AxisNames;
     SCInt            ct_rank                = Shape::ct_size;
 
-    HD constexpr auto   is_valid            () const { return Ct<bool,true>(); } ///< a real value, merely a storageless one
-    HD constexpr auto   surely_null         () const { return Ct<bool,true>(); }
+    static constexpr bool is_valid = true; ///< a real value, merely a storageless one
+    static constexpr bool surely_null = true;
 
     // indexing a zero tensor yields a zero tensor (of rank 0 once fully indexed); reading it
     // yields 0. There is no `operator=`: a zero tensor is not somewhere one writes.

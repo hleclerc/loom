@@ -59,7 +59,7 @@ public:
     HD PI             arg_max                  () const;
     HD T              max                      () const;
 
-    HD auto           is_valid                 () const { return Ct<bool,true>(); }
+    static constexpr bool is_valid = true;
 
     friend HD Vector  normalized               ( const Vector &a ) { return a / norm_2( a ); }
     friend HD T       norm_2_p2                ( const Vector &a ) { return dot( a, a ); }

@@ -15,8 +15,8 @@ namespace sdot {
 /// `TF` / `Shape` / `AxisNames` though, so generic code can still read what the attribute
 /// would have been.
 ///
-/// A kernel discriminates at compile time -- `is_valid()` returns a `Ct<bool,false>`, so
-/// `if constexpr ( DECAYED_TYPE_OF( t.is_valid() )::value )` compiles the branch away, and a
+/// A kernel discriminates at compile time -- `is_valid` is a compile-time `false`, so
+/// `if constexpr ( t.is_valid )` compiles the branch away, and a
 /// `static_assert` can forbid touching it at all.
 template<class _TF, class _Shape, class _AxisNames>
 struct NoneTensor {
@@ -25,8 +25,8 @@ struct NoneTensor {
     using            AxisNames              = _AxisNames;
     SCInt            ct_rank                = Shape::ct_size;
 
-    HD constexpr auto   is_valid            () const { return Ct<bool,false>(); } ///< no data at all
-    HD constexpr auto   surely_null         () const { return Ct<bool,true >(); } ///< nothing to read: reads nothing but zero
+    static constexpr bool is_valid = false; ///< no data at all
+    static constexpr bool surely_null = true; ///< nothing to read: reads nothing but zero
 
     /// selecting axes on something that is not there gives... something that is not there. What
     /// this buys is that a batch index applies to a WHOLE aggregate (`cell( batch_index )`) even

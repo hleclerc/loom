@@ -12,17 +12,17 @@ namespace sdot {
 /// per dimension), the counterpart of `NoneTensor`/`ZeroTensor` for a value that is a plain
 /// index rather than absent or zero.
 ///
-/// Like the others it carries no data and says so in its TYPE: `is_valid()` is a `Ct<bool,true>`
+/// Like the others it carries no data and says so in its TYPE: `is_valid` is a compile-time `true`
 /// (a legitimate value, so `with_defaults`' recursion stops substituting once knots is this) and
-/// `surely_null()` is `Ct<bool,false>` (its entries are generally non-zero). It is READ-ONLY and
+/// `surely_null` is a compile-time `false` (its entries are generally non-zero). It is READ-ONLY and
 /// indexed POSITIONALLY -- enough for `Image::measure`, which reads `knots( axis, k )`; it is not
 /// a general tensor. `TF` is the scalar the indices are returned as.
 template<class _TF>
 struct IotaTensor {
     using            TF                     = _TF;
 
-    HD constexpr auto   is_valid            () const { return Ct<bool,true >(); }
-    HD constexpr auto   surely_null         () const { return Ct<bool,false>(); }
+    static constexpr bool is_valid = true;
+    static constexpr bool surely_null = false;
 
     /// value at a multi-index = its last coordinate (fully indexed). No index at all reads as 0.
     HD constexpr TF  operator()             ( auto &&...index ) const {

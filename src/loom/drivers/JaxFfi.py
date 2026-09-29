@@ -657,7 +657,7 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
         - a float forward OUTPUT   -> its cotangent, a backward INPUT (a `SymbolicZero` lowers to a
           `ZeroTensor`: read as 0, no buffer, dropped at compile time);
         - a float forward INPUT     -> a backward OUTPUT when perturbed, else a `NoneTensor` (the
-          body skips it at compile time, `grad_for_...is_valid()` being false);
+          body skips it at compile time, `grad_for_...is_valid` being false);
         - anything else             -> a `NoneTensor`.
 
     An aggregate `grad_for_cell` thus carries a MIX of backward-input and backward-output members;

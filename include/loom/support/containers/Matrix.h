@@ -37,7 +37,7 @@ public:
     HD Vector<T,ct_cols>  solve_det               ( const auto &b ) const;
     HD static Vector<T,ct_cols> solve_ge          ( const auto &mat, auto b ); ///< Gaussian elimination with partial pivoting on a copy of `mat` (Matrix or TensorView); zero pivot → x[p]=0 (handles degenerate cells)
 
-    HD auto               is_valid                () const { return Ct<bool,true>(); }
+    static constexpr bool is_valid = true;
 
     HD constexpr auto     nb_rows                 () const { return Ct<int,ct_rows>(); }
     HD constexpr auto     nb_cols                 () const { return Ct<int,ct_cols>(); }

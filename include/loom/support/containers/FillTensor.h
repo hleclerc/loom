@@ -28,7 +28,7 @@ struct FillTensor {
     const TF        *data;                  ///< points at the ONE scalar every element reads as
     Shape            _shape;                ///< logical extents (filled from a sibling real buffer)
 
-    HD constexpr auto   is_valid            () const { return Ct<bool,true>(); } ///< a real value, storageless
+    static constexpr bool is_valid = true; ///< a real value, storageless
 
     HD auto          shape                  ( auto d ) const { return _shape[ d ]; }
     HD Shape         shape                  () const { return _shape; }

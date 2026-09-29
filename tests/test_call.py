@@ -863,3 +863,92 @@ if test( "une_valeur_brute_entre_telle_quelle" ):
         assert False, "une sortie brute aurait du etre refusee"
     except ValueError as e:
         assert "brute" in str( e ), e
+
+
+if test( "le_role_se_dit_sur_la_valeur" ):
+    # LE VOCABULAIRE D'ARGUMENTS DE `ffi_call`. Le role est porte par la valeur, pas par une
+    # liste de chemins a cote -- donc il ne peut pas designer autre chose qu'elle, et les noms
+    # que `driver.call` reservait sont rendus au noyau.
+    import numpy
+    import loom
+
+    # `output_attributes` EST ICI UN ARGUMENT DU NOYAU. C'est le test : ce nom etait vole par
+    # `driver.call`, et l'ecrire y aurait declare une liste de sorties vide.
+    ajoute = FfiCode( code = """
+        namespace {
+            struct Ajoute {
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    const TF d = args.output_attributes;
+                    args.sortie( coords ) = args.entree( coords ) + d;
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( Ajoute(), args.sortie.domain(), args, batch_axes );
+            }
+        }
+    """ )
+
+    entree = numpy.arange( 6.0 ).reshape( 2, 3 )
+    attendu = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+
+    sortie = RealTensor.like( entree )
+    rendu = loom.ffi_call( "test_role_out", ajoute,
+                           entree = entree,
+                           output_attributes = 10.0,
+                           sortie = loom.out( sortie ) )
+
+    # `loom.out` ne rend rien : l'objet etait deja le notre, le resultat y est reecrit.
+    assert rendu is None
+    assert numpy.asarray( sortie.raw ).tolist() == attendu
+
+
+if test( "un_argument_mutable_rend_sa_nouvelle_valeur" ):
+    # UN NOM, DEUX TAMPONS. Les entrees et les sorties d'un appel sont disjointes, donc une mise
+    # a jour en place est deux tampons plus un rebinding : c'est ce que `loom.mutable` ecrit.
+    import numpy
+    import loom
+
+    ajoute = FfiCode( code = """
+        namespace {
+            struct Ajoute {
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    const TF d = args.decalage;
+                    args.v_output( coords ) = args.v_input( coords ) + d;
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( Ajoute(), args.v_output.domain(), args, batch_axes );
+            }
+        }
+    """ )
+
+    entree = numpy.arange( 6.0 ).reshape( 2, 3 )
+    attendu = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+
+    # CE QUI REVIENT EST DE LA MEME ESPECE QUE CE QU'ON A DONNE. Un tableau brut...
+    brut = loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( entree ), decalage = 10.0 )
+    assert not isinstance( brut, Tensor )
+    assert numpy.asarray( brut ).tolist() == attendu
+
+    # ... un tenseur loom.
+    tenseur = loom.ffi_call( "test_role_mut", ajoute,
+                             v = loom.mutable( RealTensor( entree ) ), decalage = 10.0 )
+    assert isinstance( tenseur, Tensor )
+    assert numpy.asarray( tenseur.raw ).tolist() == attendu
+
+    # une chaine : c'est ce que `mutable` achete, et le resultat doit etre celui des pas repetes
+    v = entree
+    for _ in range( 3 ):
+        v = loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( v ), decalage = 10.0 )
+    assert numpy.asarray( v ).tolist() == [ [ 30, 31, 32 ], [ 33, 34, 35 ] ]
+
+    # LES NOMS DERIVES ENTRENT DANS LE MEME NAMESPACE : une collision ferait lire au noyau le
+    # mauvais tampon, en silence. Elle est refusee.
+    try:
+        loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( entree ),
+                       v_input = entree, decalage = 10.0 )
+        assert False, "la collision sur 'v_input' aurait du etre refusee"
+    except ValueError as e:
+        assert "v_input" in str( e ), e

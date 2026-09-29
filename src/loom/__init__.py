@@ -39,6 +39,11 @@ def __getattr__(name: str):
         "driver":          (".drivers.driver",        "driver"),
         "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
         "ffi_call":        (".ffi_call",              "ffi_call"),
+        # le vocabulaire des arguments d'un appel : le rôle se dit SUR la valeur
+        "out":             (".ffi_call",              "out"),
+        "mutable":         (".ffi_call",              "mutable"),
+        "scratch":         (".ffi_call",              "scratch"),
+        "unbound":         (".ffi_call",              "unbound"),
     }
 
     if name in _lazy:

@@ -332,7 +332,7 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), **kwargs ):
+    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), call_args = None, **kwargs ):
         """Lance un ou deux `FfiCode` sur les objets passés en kwargs.
 
         Un appel prend l'ALLER, et -- si la chose doit être dérivable -- le RETOUR, tous deux
@@ -380,6 +380,19 @@ class JaxDriver:
         `max( what was asked for, twice what we had )` -- a capacity exceeded once tends to be
         exceeded again, so we make room rather than track a count.
         """
+        # LES ARGUMENTS DU NOYAU, HORS DU NAMESPACE DES OPTIONS. Passés à plat (`cell = ...`),
+        # ils partagent ce namespace avec les neuf paramètres ci-dessus : un noyau ne peut alors
+        # pas avoir un argument nommé `name` ou `output_attributes`, et `output_attribute` au
+        # singulier devient silencieusement un argument. `call_args` est la porte qui n'a pas ce
+        # défaut -- c'est par là que passe `loom.ffi_call`, dont les options sont des marqueurs
+        # sur les valeurs et n'ont donc plus besoin de noms réservés. Les deux formes s'excluent.
+        if call_args is not None:
+            if kwargs:
+                raise TypeError( f"driver.call: `call_args` porte déjà les arguments de l'appel, "
+                                 f"mais { ', '.join( kwargs ) } { 'a' if len( kwargs ) == 1 else 'ont' } "
+                                 f"aussi été passé{ '' if len( kwargs ) == 1 else 's' } à plat" )
+            kwargs = dict( call_args )
+
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
             raise ValueError( f"driver.call: expected one kernel (the forward) or two (forward, "

@@ -332,7 +332,7 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), call_args = None, **kwargs ):
+    def call( self, *kernels, name = "", output_attributes = (), output_exceptions = (), input_exceptions = (), output_capacities = {}, batch_alignment = None, has_dynamic_capacity = True, scratch_attributes = (), call_args = None, groups = None, **kwargs ):
         """Lance un ou deux `FfiCode` sur les objets passés en kwargs.
 
         Un appel prend l'ALLER, et -- si la chose doit être dérivable -- le RETOUR, tous deux
@@ -403,7 +403,7 @@ class JaxDriver:
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
-            ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes )
+            ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name )
             ffi_call( code, ca, self.device, prefix )
 
             overflows = ca.capacity_overflows()

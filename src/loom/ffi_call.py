@@ -16,13 +16,29 @@ CE QUI CHANGE PAR RAPPORT A `driver.call`, et pourquoi :
     voyait qu'au moment ou un attribut introuvable etait signale. Ici le role est PORTE par
     l'argument : `suivant = loom.out( suivant )` ne peut plus designer autre chose que lui-meme.
 
-  * CE FAISANT, le namespace du noyau lui est rendu. `driver.call` reserve HUIT noms ( `name`,
-    `output_attributes`, `output_exceptions`, `input_exceptions`, `output_capacities`,
-    `batch_alignment`, `has_dynamic_capacity`, `scratch_attributes` ) : un noyau qui voudrait un
-    argument appele `name` ne le pouvait pas, et `output_attribute` au singulier ne levait rien
-    -- il devenait un argument du noyau. Il en reste DEUX ici, `batch_alignment` et
-    `has_dynamic_capacity`, qui sont des reglages de l'appel et de rien d'autre ; ces deux
-    noms-la restent reserves, et c'est dit.
+  * CE FAISANT, le namespace du noyau lui est rendu -- ENTIEREMENT. `driver.call` reservait HUIT
+    noms ( `name`, `output_attributes`, `output_exceptions`, `input_exceptions`,
+    `output_capacities`, `batch_alignment`, `has_dynamic_capacity`, `scratch_attributes` ) : un
+    noyau qui voulait un argument appele `name` ne le pouvait pas, et `output_attribute` au
+    singulier ne levait rien -- il devenait un argument du noyau. Les arguments vivant desormais
+    DANS UN GROUPE, le premier niveau de `args` ne contient plus que les groupes : un argument
+    appele `name`, `output_attributes` ou meme `inputs` vit a `args.inputs.<son nom>` et ne peut
+    plus rien heurter.
+
+LES GROUPES, c'est-a-dire ce que le C++ voit :
+
+    args.inputs.<nom>         les entrees -- y compris un scalaire ou un entier nu
+    args.outputs.<nom>        ce que le noyau ecrit
+    args.scratch.<nom>        les tampons de travail
+    args.grad_of_inputs       ( adjoint ) la cotangente a ECRIRE
+    args.grad_of_outputs      ( adjoint ) la cotangente qui ENTRE
+    args.machine, args.errors l'appel, pas l'usager
+
+LE NOM D'UN GROUPE DESIGNE TOUJOURS LE ROLE A L'ALLER. C'est ce qui enleve le noeud de
+`grad_inputs` / `grad_outputs`, ou « inputs » pouvait aussi se lire comme le role du RETOUR --
+les deux lectures echangeant alors le sens. Le retour LIT `grad_of_outputs` et ECRIT
+`grad_of_inputs`, parce qu'une cotangente de sortie est ce qu'on recoit et une cotangente
+d'entree ce qu'on derive. Le miroir est le contenu ; il n'y a rien de plus a retenir.
 
 LE VOCABULAIRE :
 
@@ -87,10 +103,10 @@ def mutable( value, *, capacities = {} ):
     derives :
 
         temperature = loom.mutable( temperature )
-            -> args.temperature_input       ce qui entre
-            -> args.temperature_output      ce qui sort
-            ( et pour l'adjoint : `args.grad_for_temperature_output` en entre,
-              `args.grad_for_temperature_input` en sort )
+            -> args.inputs.temperature      ce qui entre
+            -> args.outputs.temperature     ce qui sort
+            ( et pour l'adjoint : `args.grad_of_outputs.temperature` en entre,
+              `args.grad_of_inputs.temperature` en sort )
 
     Le tampon de sortie est bati « comme » l'entree ( voir `_empty_like` ). Une CAPACITE ne
     decrit jamais qu'une ALLOCATION, et seule la sortie est allouee : `nb_vertices` y designe
@@ -136,25 +152,32 @@ def ffi_call( name, *kernels, batch_alignment = None, has_dynamic_capacity = Tru
     donnees, sorties, scratchs, non_lies = {}, [], [], []
     capacites = {}
     mutables = []           # ( objet de sortie, ce qu'on nous a donne ), dans l'ordre des kwargs
+    # LES GROUPES : membre C++ -> chemin. Le chemin est ce que les capacites et les sorties
+    # nomment cote python ; le membre est ce que le noyau ecrit. Les deux coincident partout sauf
+    # pour un `mutable`, qui donne DEUX tampons au MEME nom, dans deux groupes.
+    groupes = { "inputs": {}, "outputs": {}, "scratch": {} }
 
     for cle, valeur in args.items():
         if not isinstance( valeur, Arg ):
             donnees[ cle ] = valeur
+            groupes[ "inputs" ][ cle ] = cle
             continue
 
         if valeur.kind == _MUTABLE:
-            # UN NOM, DEUX TAMPONS. Les noms derives entrent dans le meme namespace que les autres
-            # arguments : une collision est donc possible, et elle serait SILENCIEUSE ( le noyau
-            # lirait le mauvais tampon ). On la refuse.
             entree, sortie = f"{ cle }_input", f"{ cle }_output"
+            # les deux tampons portent le nom C++ `cle`, mais chacun son CHEMIN -- et un chemin est
+            # ce que les capacites et les sorties designent. Deux chemins egaux les confondraient,
+            # en silence : on refuse.
             for derive in ( entree, sortie ):
                 if derive in args:
                     raise ValueError(
-                        f"'{ cle } = loom.mutable( ... )' engendre l'argument '{ derive }', qui "
-                        f"est deja un argument de cet appel. Renomme l'un des deux." )
+                        f"'{ cle } = loom.mutable( ... )' engendre le chemin '{ derive }', qui est "
+                        f"deja un argument de cet appel. Renomme l'un des deux." )
             objet = _empty_like( valeur.value, cle )
             donnees[ entree ] = valeur.value
             donnees[ sortie ] = objet
+            groupes[ "inputs" ][ cle ] = entree
+            groupes[ "outputs" ][ cle ] = sortie
             sorties.append( sortie )
             capacites.update( valeur.capacity_paths( sortie ) )
             mutables.append( ( objet, valeur.value ) )
@@ -164,13 +187,19 @@ def ffi_call( name, *kernels, batch_alignment = None, has_dynamic_capacity = Tru
         capacites.update( valeur.capacity_paths( cle ) )
         chemins = valeur.paths( cle )
         if valeur.kind == _UNBOUND:
+            # il ne traverse pas, mais il reste UN ARGUMENT : le noyau le voit ( non lie ), donc
+            # il vit du cote ou il serait lu.
             non_lies += chemins
-        else:
+            groupes[ "inputs" ][ cle ] = cle
+        elif valeur.kind == _SCRATCH:
             # un scratch est alloue et ecrit comme une sortie ; ce qui le distingue est ce que
-            # l'ADJOINT en recoit, c'est-a-dire rien.
+            # l'ADJOINT en recoit, c'est-a-dire rien -- pas l'endroit ou il vit.
             sorties += chemins
-            if valeur.kind == _SCRATCH:
-                scratchs += chemins
+            scratchs += chemins
+            groupes[ "scratch" ][ cle ] = cle
+        else:
+            sorties += chemins
+            groupes[ "outputs" ][ cle ] = cle
 
     driver.call(
         *kernels,
@@ -181,8 +210,10 @@ def ffi_call( name, *kernels, batch_alignment = None, has_dynamic_capacity = Tru
         output_capacities = capacites,
         batch_alignment = batch_alignment,
         has_dynamic_capacity = has_dynamic_capacity,
+        groups = { g: m for g, m in groupes.items() if m },
         # PAS `**donnees` : à plat, les arguments retomberaient dans le namespace des options
-        # ci-dessus, et la collision qu'on vient d'enlever serait simplement déplacée d'un cran.
+        # ci-dessus. Sous les groupes la collision est déjà impossible ( le premier niveau ne
+        # contient que les groupes ), mais le chemin plat existe encore le temps de la migration.
         call_args = donnees,
     )
 

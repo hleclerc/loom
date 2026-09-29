@@ -764,8 +764,34 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
                                       else member )
         return obj
 
+    # LES ARGUMENTS DU RETOUR, et leurs groupes. Un argument `X` de l'aller en donne deux : le
+    # RÉSIDU, sous le même chemin et au même endroit (`inputs.cell` reste `inputs.cell`), et son
+    # GRADIENT, sous `grad_for_<chemin>` et dans le groupe miroir -- `inputs` -> `grad_of_inputs`,
+    # `outputs` -> `grad_of_outputs`.
+    #
+    # LE NOM DU GROUPE DÉSIGNE TOUJOURS LE RÔLE À L'ALLER, et c'est ce qui enlève le nœud : le
+    # retour LIT `grad_of_outputs` et ÉCRIT `grad_of_inputs`, parce qu'une cotangente d'entrée est
+    # ce qu'on dérive et une cotangente de sortie est ce qu'on reçoit. Rien à retenir de plus.
+    #
+    # Les CHEMINS ne changent pas d'un pas à l'autre : c'est ce qui laisse `bwd_input_exceptions`
+    # plus bas se contenter de `e` et `grad_for_ + e`, exactement comme avant les groupes.
     kwargs = {}
-    for name, arg in ca.args.items():
+    bwd_groups = None if ca.groups is None else {}
+
+    def _place( groupe, membre, chemin, obj ):
+        kwargs[ chemin ] = obj
+        if bwd_groups is not None:
+            bwd_groups.setdefault( groupe, {} )[ membre ] = chemin
+
+    # ( groupe, membre, chemin, noeud ) -- une entrée par argument de l'aller, groupé ou non.
+    if ca.groups is None:
+        plats = [ ( None, name, name, arg ) for name, arg in ca.args.items() ]
+    else:
+        plats = [ ( g, m, chemin, ca.args[ g ].attributes[ m ] )
+                  for g, membres in ca.groups.items() if g in ca.args
+                  for m, chemin in membres.items() if m in ca.args[ g ].attributes ]
+
+    for groupe, membre, chemin, arg in plats:
         if not hasattr( arg, "inst" ):
             continue
         # SCRATCH: the backward gets a FRESH writable buffer under the same name (an output of the
@@ -773,13 +799,14 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
         # re-derives into it whatever it needs (a re-sort, a rebuilt cell). Capacity resolves on its
         # own -- the thread axis is a `CtShapeVar` (static), the item axis is shared with a residual
         # it mirrors, and an aggregate's counts are the primal's, already grown to what fits.
-        if name in ca.scratch_paths:
-            kwargs[ name ] = _fresh_scratch( arg.inst )
-            output_paths.append( name )
+        if chemin in ca.scratch_paths:
+            _place( groupe, membre, chemin, _fresh_scratch( arg.inst ) )
+            output_paths.append( chemin )
             continue
-        residual, grad = _build( arg.inst, "grad_for_" + name )
-        kwargs[ name ] = residual
-        kwargs[ "grad_for_" + name ] = grad
+        residual, grad = _build( arg.inst, "grad_for_" + chemin )
+        _place( groupe, membre, chemin, residual )
+        _place( None if groupe is None else f"grad_of_{ groupe }", membre,
+                "grad_for_" + chemin, grad )
 
     # the backward runs as an ordinary forward whose body is our backward one -- of the same kind,
     # so a `FfiCode` scaffolds it over the residual+gradient arguments just as it did the
@@ -805,7 +832,8 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
                                 if any( e == p or e.startswith( p + "." ) for p in ca.scratch_paths ) ]
     bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
                                output_attribute_exceptions = bwd_output_exceptions,
-                               input_exceptions = bwd_input_exceptions )
+                               input_exceptions = bwd_input_exceptions,
+                               groups = bwd_groups, call_name = prefix + "bwd" )
     bwd_outputs, bwd_results = _run( bwd_kernel, bwd_ca, device, prefix + "bwd_" )
 
     result_of = { id( o.inst ): r for o, r in zip( bwd_outputs, bwd_results ) if hasattr( o, "inst" ) }

@@ -872,19 +872,21 @@ if test( "le_role_se_dit_sur_la_valeur" ):
     import numpy
     import loom
 
-    # `output_attributes` EST ICI UN ARGUMENT DU NOYAU. C'est le test : ce nom etait vole par
-    # `driver.call`, et l'ecrire y aurait declare une liste de sorties vide.
+    # `output_attributes` EST ICI UN ARGUMENT DU NOYAU, et il vit a `args.inputs.output_attributes`.
+    # C'est le test : ce nom etait vole par `driver.call`, et l'ecrire y aurait declare une liste de
+    # sorties vide. Sous les groupes le premier niveau ne contient que les groupes, donc plus rien
+    # ne peut etre vole.
     ajoute = FfiCode( code = """
         namespace {
             struct Ajoute {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
-                    const TF d = args.output_attributes;
-                    args.sortie( coords ) = args.entree( coords ) + d;
+                    const TF d = args.inputs.output_attributes;
+                    args.outputs.sortie( coords ) = args.inputs.entree( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.sortie.domain(), args, batch_axes );
+                queue.run_parallel( Ajoute(), args.outputs.sortie.domain(), args, batch_axes );
             }
         }
     """ )
@@ -913,13 +915,13 @@ if test( "un_argument_mutable_rend_sa_nouvelle_valeur" ):
         namespace {
             struct Ajoute {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
-                    const TF d = args.decalage;
-                    args.v_output( coords ) = args.v_input( coords ) + d;
+                    const TF d = args.inputs.decalage;
+                    args.outputs.v( coords ) = args.inputs.v( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.v_output.domain(), args, batch_axes );
+                queue.run_parallel( Ajoute(), args.outputs.v.domain(), args, batch_axes );
             }
         }
     """ )

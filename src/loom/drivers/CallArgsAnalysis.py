@@ -1,6 +1,7 @@
 from ..util.Aggregate import get_attribute
 from ..util.annotations import annotations
 from .CallArg_Aggregate import CallArg_Aggregate
+from .CallArg_Group import CallArg_Group
 from .CallArg_Attr import CallArg_Attr
 from .CallArg_Errors import CallArg_Errors, ERRORS_VAR_NAME
 from .IoCategory import IoCategory
@@ -52,7 +53,7 @@ class CallArgsAnalysis:
     tensors: list   # the buffers to bind, in FFI order
     args: dict
 
-    def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = () ) -> None:
+    def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = (), groups = None, call_name = "" ) -> None:
         self.device = device
         # SCRATCH outputs: allocated + written like any output in the FORWARD, but the BACKWARD does
         # NOT receive them as residuals (their forward values are transient per-thread garbage). It
@@ -71,6 +72,10 @@ class CallArgsAnalysis:
         self.type_names = {}
         self.batch_axes = []
         self.args = {}
+        # LES GROUPES tels qu'on nous les a donnés ( groupe -> { membre C++: chemin } ), gardés
+        # parce que l'ADJOINT en a besoin : il rebâtit les mêmes groupes sur ses propres
+        # arguments ( résidus et gradients ), et il lui faut le chemin de chaque membre.
+        self.groups = groups
 
         # paths resolve against the objects, so a capacity keyed by path becomes one keyed by
         # the ShapeVar itself: two aggregates sharing a ShapeVar cannot disagree about it. The
@@ -115,14 +120,38 @@ class CallArgsAnalysis:
         self._canonical_axis = { real: f"batch_{ index }" for index, real in enumerate( self.batch_axes ) }
         self.batch_axes = list( self._canonical_axis.values() )
 
+        # LE NOM C++ ET LE CHEMIN SE SÉPARENT ICI. Sans groupes ils coïncident : un argument est
+        # nommé par son kwarg, et c'est ce même nom que les capacités et les sorties désignent.
+        # Avec groupes, `groups` dit l'un et l'autre -- `{ "inputs": { "temperature":
+        # "temperature_input" } }` : membre C++ à gauche, chemin à droite. C'est ce qui laisse
+        # `loom.mutable` donner DEUX tampons au MÊME nom C++, dans deux groupes différents.
+        noms_cpp = { chemin: membre for g in ( groups or {} ).values() for membre, chemin in g.items() }
+
         for name, inst in args.items():
             # an arg may lower to NOTHING: an `Axis` is a declaration, not data, so `make_CallArg`
             # answers None. Keep it out of the tree -- exactly as `CallArg_Aggregate` does for such
             # a field -- instead of parking a None every `nodes()` walk would then trip over. The
             # axis name still reaches the C++ through any tensor of the call that references it.
-            ca = self.make_CallArg( name, name, inst )
+            ca = self.make_CallArg( name, noms_cpp.get( name, name ), inst )
             if ca is not None:
                 self.args[ name ] = ca
+
+        # LE REGROUPEMENT, une fois les feuilles bâties et avant tout ce qui se dérive de l'arbre
+        # (les noms de tampons, les ids d'erreur) : ce sont les GROUPES qui occupent désormais le
+        # premier niveau de `args`, donc de la struct C++, et les arguments descendent d'un cran.
+        if groups is not None:
+            plats = self.args
+            self.args = {}
+            for groupe, membres in groups.items():
+                enfants = { membre: plats[ chemin ] for membre, chemin in membres.items()
+                            if chemin in plats }
+                if enfants:
+                    self.args[ groupe ] = CallArg_Group( self, groupe,
+                                                         f"{ call_name }_{ groupe }", enfants )
+            orphelins = set( plats ) - { c for m in groups.values() for c in m.values() }
+            if orphelins:
+                raise ValueError( f"CallArgsAnalysis: { ', '.join( sorted( orphelins ) ) } "
+                                  f"n'{ 'est' if len( orphelins ) == 1 else 'sont' } dans aucun groupe" )
 
         # what the kernel writes when something goes wrong -- built last, so it takes the FFI slot
         # after every argument's. It is a buffer of the call, not of an argument: no object of the

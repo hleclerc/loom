@@ -45,30 +45,30 @@ _avant = loom.FfiCode(
                 HD bool on_bord( auto coords, auto main_axes, const auto &args ) const {
                     return any_of( main_axes, [&]( auto axis ) {
                         return coords[ axis ] == 0
-                            || coords[ axis ] + 1 == args.temperature_input.size( axis );
+                            || coords[ axis ] + 1 == args.inputs.temperature.size( axis );
                     } );
                 }
 
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
                     const auto main_axes = coords.axes - batch_axes;
 
-                    const TF uc = args.temperature_input( coords );
+                    const TF uc = args.inputs.temperature( coords );
                     if ( on_bord( coords, main_axes, args ) ) {
-                        args.temperature_output( coords ) = uc;
+                        args.outputs.temperature( coords ) = uc;
                         return;
                     }
 
                     TF somme = 0;
                     for_each( main_axes, [&]( auto axis ) {
-                        somme += args.temperature_input( coords + axis )
-                               + args.temperature_input( coords - axis ) - 2 * uc;
+                        somme += args.inputs.temperature( coords + axis )
+                               + args.inputs.temperature( coords - axis ) - 2 * uc;
                     } );
-                    args.temperature_output( coords ) = uc + args.coef * somme;
+                    args.outputs.temperature( coords ) = uc + args.inputs.coef * somme;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPas(), args.temperature_output.domain(), args, batch_axes );
+                queue.run_parallel( UnPas(), args.outputs.temperature.domain(), args, batch_axes );
             }
         }
     """,
@@ -86,14 +86,14 @@ _arriere = loom.FfiCode(
                 HD bool on_bord( auto coords, auto main_axes, const auto &args ) const {
                     return any_of( main_axes, [&]( auto axis ) {
                         return coords[ axis ] == 0
-                            || coords[ axis ] + 1 == args.temperature_input.size( axis );
+                            || coords[ axis ] + 1 == args.inputs.temperature.size( axis );
                     } );
                 }
 
                 /// vrai si `coords` decale de `d` le long de `axis` est encore dans la grille
                 HD bool dedans( auto coords, auto axis, SI d, const auto &args ) const {
                     const SI c = coords[ axis ] + d;
-                    return c >= 0 && c < args.temperature_input.size( axis );
+                    return c >= 0 && c < args.inputs.temperature.size( axis );
                 }
 
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
@@ -101,18 +101,18 @@ _arriere = loom.FfiCode(
 
                     // `coef` est une constante du probleme, jamais perturbee : son gradient
                     // demanderait une reduction globale, et il n'est pas ecrit.
-                    static_assert( ! args.grad_for_coef.is_valid,
+                    static_assert( ! args.grad_of_inputs.coef.is_valid,
                         "diffusion : le gradient par rapport a dt k / h^2 n'est pas implemente" );
 
                     // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un
                     // zero symbolique il faut quand meme ecrire le gradient nul.
-                    constexpr bool nulle = args.grad_for_temperature_output.surely_null;
+                    constexpr bool nulle = args.grad_of_outputs.temperature.surely_null;
 
                     TF res = 0;
                     if constexpr ( ! nulle ) {
                         constexpr SI D = DECAYED_TYPE_OF( main_axes )::ct_size;
-                        const TF c = args.coef;
-                        const TF g = args.grad_for_temperature_output( coords );
+                        const TF c = args.inputs.coef;
+                        const TF g = args.grad_of_outputs.temperature( coords );
 
                         res = on_bord( coords, main_axes, args ) ? g : g * ( 1 - c * ( 2 * D ) );
 
@@ -122,18 +122,18 @@ _arriere = loom.FfiCode(
                                     continue;
                                 const auto voisin = s > 0 ? coords + axis : coords - axis;
                                 if ( ! on_bord( voisin, main_axes, args ) )
-                                    res += c * args.grad_for_temperature_output( voisin );
+                                    res += c * args.grad_of_outputs.temperature( voisin );
                             }
                         } );
                     }
 
-                    if constexpr ( args.grad_for_temperature_input.is_valid )
-                        args.grad_for_temperature_input( coords ) = res;
+                    if constexpr ( args.grad_of_inputs.temperature.is_valid )
+                        args.grad_of_inputs.temperature( coords ) = res;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPasAdjoint(), args.temperature_input.domain(), args, batch_axes );
+                queue.run_parallel( UnPasAdjoint(), args.inputs.temperature.domain(), args, batch_axes );
             }
         }
     """,
@@ -153,12 +153,9 @@ def pas( temperature, coef ):
 
     `loom.mutable` dit la seule chose qui reste a dire : cette grille est LUE ET RE-ECRITE. Les
     entrees et les sorties d'un appel etant disjointes, ca fait deux tampons -- que le noyau voit
-    sous `args.temperature_input` et `args.temperature_output`, et l'adjoint sous
-    `args.grad_for_temperature_output` et `args.grad_for_temperature_input`."""
-    return loom.ffi_call(
-        "diffusion_pas",
-        _avant,
-        _arriere,
+    sous `args.inputs.temperature` et `args.outputs.temperature`, et l'adjoint sous
+    `args.grad_of_outputs.temperature` et `args.grad_of_inputs.temperature`."""
+    return loom.ffi_call( "diffusion_pas", _avant, _arriere,
         temperature = loom.mutable( temperature ),
         coef = coef,
     )

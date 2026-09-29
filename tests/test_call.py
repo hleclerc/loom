@@ -1,3 +1,4 @@
+import loom
 from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, RealTensor, IntTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
@@ -69,17 +70,15 @@ if test( "basic" ):
     # NAMED coordinates (`vmap_0 = i`), so it selects an axis by name -- and a value that is not
     # mapped along that axis ignores it. Unbatched, it is the EMPTY multi-index, and indexing by
     # it is a no-op. Hence one body, batched or not.
-    driver.call(
+    loom.ffi_call(
+        "test_call_basic",
         FfiCode.per_item( code = """
-        cell.nb_vertices( batch_index ).set( 1 );
-        cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
-        cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
+        outputs.cell.nb_vertices( batch_index ).set( 1 );
+        outputs.cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
+        outputs.cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
         """ ),
-        name = "test_call_basic",
-        cell = cell,
-        output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-        output_capacities = { "cell.nb_vertices": 8 },   # => `vertex_positions` is allocated 8x2
-        # frame = driver.array( [ [ 0 ] ] )
+        # la capacite en sommets => `vertex_positions` est alloue en 8x2
+        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
     )
 
     # the kernel wrote the count, and the count is what makes the tensor read 1x2 -- while the
@@ -97,14 +96,13 @@ if test( "basic" ):
     # `res` is a bare tensor: no members, so no policy either -- a plain tag says it all.
     res = RealTensor[ cell.num_vertex ]()
 
-    driver.call(
+    loom.ffi_call(
+        "test_call_basic_res",
         FfiCode.per_item( code = """
-        res( batch_index, num_vertex = 0 ) = cell.nb_vertices( batch_index );
+        outputs.res( batch_index, num_vertex = 0 ) = inputs.cell.nb_vertices( batch_index );
         """ ),
-        name = "test_call_basic_res",
         cell = cell,
-        res = res,
-        output_attributes = [ "res" ],
+        res = loom.out( res ),
     )
 
     # the capacity was not restated, and `res` still got 8: it was read back from the buffer of
@@ -133,23 +131,21 @@ if test( "partial_init" ):
 
     cell = Cell2( nb_dims = 2 )
 
-    driver.call(
+    loom.ffi_call(
+        "test_partial_init",
         FfiCode.per_item( code = """
-        cell.nb_vertices( batch_index ).set( 1 );
+        outputs.cell.nb_vertices( batch_index ).set( 1 );
         // a fresh output buffer is NOT guaranteed zero-initialized (see
         // `ProjectedSumOfDiracs::zero_position_grad`'s docstring for the general fact) --
         // write every element the assertion below reads, rather than relying on a
         // leftover-memory default.
-        cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
-        cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
+        outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
+        outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
         
-        static_assert( cell.vertex_positions.is_valid );
-        static_assert( ! cell.vertex_indices  .is_valid );
+        static_assert( outputs.cell.vertex_positions.is_valid );
+        static_assert( ! outputs.cell.vertex_indices  .is_valid );
         """ ),
-        name = "test_partial_init",
-        cell = cell,
-        output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-        output_capacities = { "cell.nb_vertices": 8 },
+        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
     )
 
     assert cell.nb_vertices.value == 1
@@ -179,25 +175,22 @@ if test( "input_exceptions" ):
 
     cell = Cell3( nb_dims = 2 )
 
-    driver.call(
+    loom.ffi_call(
+        "test_input_exceptions_init",
         FfiCode.per_item( code = """
-        cell.nb_vertices( batch_index ).set( 1 );
-        cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
-        cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
+        outputs.cell.nb_vertices( batch_index ).set( 1 );
+        outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
+        outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
         """ ),
-        name = "test_input_exceptions_init",
-        cell = cell,
-        output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-        output_capacities = { "cell.nb_vertices": 8 },
+        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
     )
 
-    driver.call(
+    loom.ffi_call(
+        "test_input_exceptions_use",
         FfiCode.per_item( code = """
-        static_assert( ! cell.vertex_positions.is_valid );
+        static_assert( ! inputs.cell.vertex_positions.is_valid );
         """ ),
-        name = "test_input_exceptions_use",
-        cell = cell,
-        input_exceptions = [ "cell.vertex_positions" ],
+        cell = loom.unbound( cell, "vertex_positions" ),
     )
 
     # the exception only kept the second call from binding it -- the data itself is untouched.
@@ -221,30 +214,25 @@ if test( "two_instances" ):
     flat = Cell3( nb_dims = 2 )
     volu = Cell3( nb_dims = 3 )
 
-    driver.call(
+    loom.ffi_call(
+        "two_instances",
         FfiCode.per_item( code = """
         // an index applies to a whole aggregate just as well as to one of its members:
-        // `f( batch_index ).nb_vertices` and `flat.nb_vertices( batch_index )` are the
+        // `f( batch_index ).nb_vertices` and `outputs.flat.nb_vertices( batch_index )` are the
         // same thing. Handy when every member takes the same index.
-        auto f = flat( batch_index );
+        auto f = outputs.flat( batch_index );
         f.nb_vertices.set( 1 );
         f.vertex_positions( num_vertex = 0, dim = 0 ) = 1;
         f.vertex_positions( num_vertex = 0, dim = 1 ) = 2;
         
-        volu.nb_vertices( batch_index ).set( 1 );
+        outputs.volu.nb_vertices( batch_index ).set( 1 );
         // see `partial_init`'s comment above: write every dim, not just the nonzero one.
-        volu.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
-        volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
-        volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
+        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
+        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
+        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
         """ ),
-        name = "two_instances",
-        flat = flat,
-        volu = volu,
-        output_attributes = [
-            "flat.nb_vertices", "flat.vertex_positions",
-            "volu.nb_vertices", "volu.vertex_positions",
-        ],
-        output_capacities = { "flat.nb_vertices": 8, "volu.nb_vertices": 4 },
+        flat = loom.out( flat, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
+        volu = loom.out( volu, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
     )
 
     # one class, two instantiations: the compile-time `nb_dims` differ, and so do the capacities.
@@ -278,10 +266,11 @@ if test( "nested" ):
     # a mapping under a field's name scopes a prescription to that field alone.
     pair = Pair( left = { "nb_dims": 2 }, right = { "nb_dims": 3 } )
 
-    driver.call(
+    loom.ffi_call(
+        "test_call_nested",
         FfiCode.per_item( code = """
         // indexing an aggregate indexes its members -- a nested one included, recursively.
-        auto p = pair( batch_index );
+        auto p = outputs.pair( batch_index );
         
         // every coordinate of the one written row is set explicitly: a fresh output buffer
         // is NOT guaranteed zero-initialized on every device (XLA's GPU allocator does not
@@ -295,10 +284,8 @@ if test( "nested" ):
         p.right.vertex_positions( num_vertex = 0, dim = 1 ) = 0;
         p.right.vertex_positions( num_vertex = 0, dim = 2 ) = 2;
         """ ),
-        name = "test_call_nested",
-        pair = pair,
-        output_attributes = [ "pair" ],   # a whole subtree can be named at once
-        output_capacities = { "pair.left.nb_vertices": 8, "pair.right.nb_vertices": 4 },
+        # nommer l'agregat couvre tout ce qu'il y a dessous
+        pair = loom.out( pair, capacities = { "left.nb_vertices": 8, "right.nb_vertices": 4 } ),
     )
 
     assert pair.left.nb_vertices.value == 1 and pair.right.nb_vertices.value == 1
@@ -323,10 +310,10 @@ if test( "vmap" ):
 
 
     noyau = FfiCode.per_item( code = """
-    auto c = cell( batch_index );
+    auto c = outputs.cell( batch_index );
     c.nb_vertices.set( 1 );
-    c.vertex_positions( num_vertex = 0, dim = 0 ) = scale( batch_index, dim = 0 );
-    c.vertex_positions( num_vertex = 0, dim = 1 ) = scale( batch_index, dim = 1 );
+    c.vertex_positions( num_vertex = 0, dim = 0 ) = inputs.scale( batch_index, dim = 0 );
+    c.vertex_positions( num_vertex = 0, dim = 1 ) = inputs.scale( batch_index, dim = 1 );
     """ )
     def positions_of( raw_scale ):
         cell = Cell5( nb_dims = 2 )
@@ -335,13 +322,11 @@ if test( "vmap" ):
         scale = RealTensor[ cell.dim ]()
         scale.set( raw_scale )
 
-        driver.call(
+        loom.ffi_call(
+            "test_call_vmap",
             noyau,
-            name = "test_call_vmap",
-            cell = cell,
+            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
             scale = scale,
-            output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-            output_capacities = { "cell.nb_vertices": 4 },
         )
         return cell.vertex_positions.raw
 
@@ -377,7 +362,7 @@ if test( "capacity_overflow" ):
 
 
     noyau = FfiCode.per_item( code = """
-    auto c = cell( batch_index );
+    auto c = outputs.cell( batch_index );
     
     // the count may not fit -- and then what one READS BACK is the capacity, never more,
     // which is what makes the loop below safe whatever happens.
@@ -387,12 +372,10 @@ if test( "capacity_overflow" ):
     """ )
     def cell_of( nb_wanted, capacity ):
         cell = Cell6( nb_dims = 2, nb_wanted = nb_wanted )
-        driver.call(
+        loom.ffi_call(
+            "test_call_overflow",
             noyau,
-            name = "test_call_overflow",
-            cell = cell,
-            output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-            output_capacities = { "cell.nb_vertices": capacity },
+            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": capacity } ),
         )
         return cell
 
@@ -432,17 +415,23 @@ if test( "der" ):
     # (`grad_for_inp.is_valid` a compile-time false) -- either lets the body drop a term at
     # compile time rather than move or multiply a buffer of zeros.
     avant = FfiCode.per_item( code = """
-            out = 2 * inp + 100;
+            outputs.out = 2 * inputs.inp + 100;
         """ )
     arriere = FfiCode.per_item( """
-            if ( ! grad_for_out.surely_null && grad_for_inp.is_valid )
-                grad_for_inp = 2 * grad_for_out;
+            if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
+                grad_of_inputs.inp = 2 * grad_of_outputs.out;
         """ )
     def fwd_of( x ):
         inp = RealTensor()
         inp.set( x )
         out = RealTensor()
-        driver.call( avant, arriere, name = "test_call_der", output_attributes = [ "out" ], out = out, inp = inp )
+        loom.ffi_call(
+            "test_call_der",
+            avant,
+            arriere,
+            out = loom.out( out ),
+            inp = inp,
+        )
         return out.raw
 
     # forward: 2 * 17 + 100 = 134
@@ -458,19 +447,25 @@ if test( "der_symbolic_zero" ):
     # symbolic zero, so `grad_for_out_b` reaches the backward kernel as a `ZeroTensor` -- read as
     # 0, no buffer. The body multiplies by it and the term simply vanishes.
     avant = FfiCode.per_item( code = """
-            out_a = 2 * inp;
-            out_b = 3 * inp;
+            outputs.out_a = 2 * inputs.inp;
+            outputs.out_b = 3 * inputs.inp;
         """ )
     arriere = FfiCode.per_item( """
-            grad_for_inp = 2 * grad_for_out_a + 3 * grad_for_out_b;
+            grad_of_inputs.inp = 2 * grad_of_outputs.out_a + 3 * grad_of_outputs.out_b;
         """ )
     def only_a( x ):
         inp = RealTensor()
         inp.set( x )
         out_a = RealTensor()
         out_b = RealTensor()
-        driver.call( avant, arriere, name = "test_call_der_sz", output_attributes = [ "out_a", "out_b" ],
-                     out_a = out_a, out_b = out_b, inp = inp )
+        loom.ffi_call(
+            "test_call_der_sz",
+            avant,
+            arriere,
+            out_a = loom.out( out_a ),
+            out_b = loom.out( out_b ),
+            inp = inp,
+        )
         return out_a.raw   # `out_b` is never used: its cotangent is a symbolic zero
 
     # d( 2 * inp ) / d inp = 2 -- the `3 * grad_for_out_b` term drops (ZeroTensor)
@@ -484,20 +479,20 @@ if test( "der_non_perturbed" ):
     # reaches the backward kernel as a `NoneTensor` -- `is_valid` is a compile-time false, and
     # the body simply does not compute it (nor is a buffer allocated for it).
     avant = FfiCode.per_item( code = """
-            out = inp + bias;
+            outputs.out = inputs.inp + inputs.bias;
         """ )
     arriere = FfiCode.per_item( """
-            // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
-            // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
-            static_assert( grad_for_inp .is_valid );
-            static_assert( ! grad_for_bias.is_valid );
+            // the perturbation is a COMPILE-TIME fact here: `grad_of_inputs.inp` is a real
+            // gradient buffer, `grad_of_inputs.bias` a `NoneTensor` (inputs.bias is never perturbed).
+            static_assert( grad_of_inputs.inp .is_valid );
+            static_assert( ! grad_of_inputs.bias.is_valid );
             
             // a `NoneTensor` has no `operator=`, so its write must be dropped at COMPILE
             // time -- `if constexpr` on `is_valid`, not a runtime `if`.
-            if constexpr ( grad_for_inp.is_valid )
-                grad_for_inp = grad_for_out;
-            if constexpr ( grad_for_bias.is_valid )
-                grad_for_bias = grad_for_out;
+            if constexpr ( grad_of_inputs.inp.is_valid )
+                grad_of_inputs.inp = grad_of_outputs.out;
+            if constexpr ( grad_of_inputs.bias.is_valid )
+                grad_of_inputs.bias = grad_of_outputs.out;
         """ )
     def loss( x ):
         inp = RealTensor()
@@ -505,7 +500,14 @@ if test( "der_non_perturbed" ):
         bias = RealTensor()
         bias.set( driver.array( 100.0 ) )   # a constant: not a function of `x`, so non-perturbed
         out = RealTensor()
-        driver.call( avant, arriere, name = "test_call_der_np", output_attributes = [ "out" ], out = out, inp = inp, bias = bias )
+        loom.ffi_call(
+            "test_call_der_np",
+            avant,
+            arriere,
+            out = loom.out( out ),
+            inp = inp,
+            bias = bias,
+        )
         return out.raw
 
     assert float( loss( driver.array( 5.0 ) ) ) == 105
@@ -523,20 +525,26 @@ if test( "der_shape_var" ):
     ax.name = "n"   # a standalone axis: stamp the name the generated C++ uses (`DEFINE_AXIS( n )`)
 
     avant = FfiCode.per_item( code = """
-            out( n = 0 ) = 2 * vec( n = 0 );
-            out( n = 1 ) = 3 * vec( n = 1 );
+            outputs.out( n = 0 ) = 2 * inputs.vec( n = 0 );
+            outputs.out( n = 1 ) = 3 * inputs.vec( n = 1 );
         """ )
     arriere = FfiCode.per_item( """
-            if ( grad_for_vec.is_valid && ! grad_for_out.surely_null ) {
-                grad_for_vec( n = 0 ) = 2 * grad_for_out( n = 0 );
-                grad_for_vec( n = 1 ) = 3 * grad_for_out( n = 1 );
+            if ( grad_of_inputs.vec.is_valid && ! grad_of_outputs.out.surely_null ) {
+                grad_of_inputs.vec( n = 0 ) = 2 * grad_of_outputs.out( n = 0 );
+                grad_of_inputs.vec( n = 1 ) = 3 * grad_of_outputs.out( n = 1 );
             }
         """ )
     def loss( x ):
         vec = RealTensor[ ax ]()
         vec.set( x )            # length-2 vector -> `n` is solved to 2 from the data
         out = RealTensor[ ax ]()
-        driver.call( avant, arriere, name = "test_call_der_sv", output_attributes = [ "out" ], out = out, vec = vec )
+        loom.ffi_call(
+            "test_call_der_sv",
+            avant,
+            arriere,
+            out = loom.out( out ),
+            vec = vec,
+        )
         return out.raw.sum()    # loss = 2*vec[0] + 3*vec[1]
 
     assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
@@ -558,19 +566,25 @@ if test( "der_aggregate" ):
 
 
     avant = FfiCode.per_item( code = """
-            out = 2 * cell.data( n = 0 ) + 3 * cell.data( n = 1 );
+            outputs.out = 2 * inputs.cell.data( n = 0 ) + 3 * inputs.cell.data( n = 1 );
         """ )
     arriere = FfiCode.per_item( """
-            if ( ! grad_for_out.surely_null && grad_for_cell.data.is_valid ) {
-                grad_for_cell.data( n = 0 ) = 2 * grad_for_out;
-                grad_for_cell.data( n = 1 ) = 3 * grad_for_out;
+            if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.cell.data.is_valid ) {
+                grad_of_inputs.cell.data( n = 0 ) = 2 * grad_of_outputs.out;
+                grad_of_inputs.cell.data( n = 1 ) = 3 * grad_of_outputs.out;
             }
         """ )
     def loss( x ):
         cell = Vec( nn = 2 )
         cell.data = x           # a float INPUT member
         out = RealTensor()          # a bare scalar output
-        driver.call( avant, arriere, name = "test_call_der_agg", output_attributes = [ "out" ], out = out, cell = cell )
+        loom.ffi_call(
+            "test_call_der_agg",
+            avant,
+            arriere,
+            out = loom.out( out ),
+            cell = cell,
+        )
         return out.raw          # loss = 2*data[0] + 3*data[1]
 
     assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
@@ -603,7 +617,7 @@ if test( "batch_alignment_forced" ):
 
 
     noyau = FfiCode.per_item( code = """
-    auto c = cell( batch_index );
+    auto c = outputs.cell( batch_index );
     c.nb_vertices.set( 1 );
     c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
     c.vertex_positions( num_vertex = 0, dim = 1 ) = c.scale( dim = 1 );
@@ -611,12 +625,10 @@ if test( "batch_alignment_forced" ):
     def run( alignment ):
         cell = Cell7( nb_dims = 2, batch_axes = [ new_batch_axis( 3 ) ] )
         cell.scale = driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] )
-        driver.call(
+        loom.ffi_call(
+            "test_call_batch_align",
             noyau,
-            name = "test_call_batch_align",
-            cell = cell,
-            output_attributes = [ "cell.nb_vertices", "cell.vertex_positions" ],
-            output_capacities = { "cell.nb_vertices": 4 },
+            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
             batch_alignment = alignment,
         )
         return cell.vertex_positions
@@ -647,10 +659,10 @@ if test( "physical_axis_reorder" ):
     from loom import Axis, ShapeVar, Tensor
 
     noyau = FfiCode.per_item( code = """
-    out( batch_index, row = 0, col = 0 ) = m( batch_index, row = 0, col = 0 );
-    out( batch_index, row = 0, col = 1 ) = m( batch_index, row = 0, col = 1 );
-    out( batch_index, row = 1, col = 0 ) = m( batch_index, row = 1, col = 0 );
-    out( batch_index, row = 1, col = 1 ) = m( batch_index, row = 1, col = 1 );
+    outputs.out( batch_index, row = 0, col = 0 ) = inputs.m( batch_index, row = 0, col = 0 );
+    outputs.out( batch_index, row = 0, col = 1 ) = inputs.m( batch_index, row = 0, col = 1 );
+    outputs.out( batch_index, row = 1, col = 0 ) = inputs.m( batch_index, row = 1, col = 0 );
+    outputs.out( batch_index, row = 1, col = 1 ) = inputs.m( batch_index, row = 1, col = 1 );
     """ )
     row = Axis( ShapeVar( 2 ), name = "row" )
     col = Axis( ShapeVar( 2 ), name = "col" )
@@ -665,7 +677,12 @@ if test( "physical_axis_reorder" ):
     assert numpy.asarray( m.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
 
     out = RealTensor[ row, col ]()
-    driver.call( noyau, name = "test_call_phys_reorder", m = m, out = out, output_attributes = [ "out" ] )
+    loom.ffi_call(
+        "test_call_phys_reorder",
+        noyau,
+        m = m,
+        out = loom.out( out ),
+    )
 
     # the kernel read the permuted input by name and copied it: the logical value is preserved.
     assert numpy.asarray( out.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
@@ -690,20 +707,21 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
 
     out = RealTensor[ num ]()
 
-    driver.call(
+    loom.ffi_call(
+        "test_call_fill",
         FfiCode.per_item( code = """
         // the same scalar whatever the index -- indexing a fill ignores the index
-        out( batch_index, num = 0 ) = x( batch_index, num = 0 ) * f( batch_index, num = 0 );
-        out( batch_index, num = 1 ) = x( batch_index, num = 1 ) * f( batch_index, num = 3 );
+        outputs.out( batch_index, num = 0 ) = inputs.x( batch_index, num = 0 ) * inputs.f( batch_index, num = 0 );
+        outputs.out( batch_index, num = 1 ) = inputs.x( batch_index, num = 1 ) * inputs.f( batch_index, num = 3 );
         // its logical extent, filled in from the sibling buffer that carries `num`
-        out( batch_index, num = 2 ) = f.size();
+        outputs.out( batch_index, num = 2 ) = inputs.f.size();
         // and it is a distinct TYPE, not a TensorView the kernel has to test
-        static_assert( ! std::is_same_v< decltype( f ), decltype( x ) > );
-        out( batch_index, num = 3 ) = 0;
+        static_assert( ! std::is_same_v< decltype( inputs.f ), decltype( inputs.x ) > );
+        outputs.out( batch_index, num = 3 ) = 0;
         """ ),
-        name = "test_call_fill",
-        x = x, f = f, out = out,
-        output_attributes = [ "out" ],
+        x = x,
+        f = f,
+        out = loom.out( out ),
     )
 
     assert numpy.asarray( out.tensor ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
@@ -728,7 +746,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
         nb_wanted : ShapeVar     # prescribed, only read   -> crosses by value
 
     noyau = FfiCode.per_item( code = """
-    auto c = cnt( batch_index );
+    auto c = outputs.cnt( batch_index );
     
     static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
                    "a host-known, read-only count must cross by value" );
@@ -740,9 +758,11 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
         c.out( num = n ) = 10 * n;
     """ )
     cnt = Counter( nb_wanted = 3 )
-    driver.call( noyau, name = "test_call_scalar_count", cnt = cnt,
-                 output_attributes = [ "cnt.nb_out", "cnt.out" ],
-                 output_capacities = { "cnt.nb_out": 8 } )
+    loom.ffi_call(
+        "test_call_scalar_count",
+        noyau,
+        cnt = loom.out( cnt, "nb_out", "out", capacities = { "nb_out": 8 } ),
+    )
 
     assert cnt.nb_out.value == 3
     assert numpy.asarray( cnt.out.tensor ).tolist() == [ 0.0, 10.0, 20.0 ]
@@ -770,11 +790,10 @@ if test( "une_sortie_nue_est_semee" ):
         ax.name = "seed_n"
 
         out = RealTensor[ ax ]()
-        driver.call(
-            FfiCode.per_item( code = "out( seed_n = 0 ) = 1;" ),
-            name = "test_seed_bare",
-            out = out,
-            output_attributes = [ "out" ],
+        loom.ffi_call(
+            "test_seed_bare",
+            FfiCode.per_item( code = "outputs.out( seed_n = 0 ) = 1;" ),
+            out = loom.out( out ),
         )
 
         vals = numpy.asarray( out.raw ).reshape( -1 ).tolist()
@@ -806,11 +825,15 @@ if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
         val : RealTensor
 
 
-    noyau = FfiCode.per_item( code = "res.val( batch_index ) = 1;" )
+    noyau = FfiCode.per_item( code = "outputs.res.val( batch_index ) = 1;" )
     def un_appel():
         axe = new_batch_axis( 3, prefix = "essai" )
         res = Sortie( batch_axes = [ axe ] )
-        driver.call( noyau, name = "test_axe_canonique", res = res, output_attributes = [ "res" ] )
+        loom.ffi_call(
+            "test_axe_canonique",
+            noyau,
+            res = loom.out( res ),
+        )
         return axe, res
 
     vivants = [ un_appel() ]                       # l'axe reste vivant : c'est le point
@@ -836,13 +859,13 @@ if test( "une_valeur_brute_entre_telle_quelle" ):
         namespace {
             struct Ajoute {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
-                    const TF d = args.decalage;
-                    args.sortie( coords ) = args.entree( coords ) + d;
+                    const TF d = args.inputs.decalage;
+                    args.outputs.sortie( coords ) = args.inputs.entree( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.sortie.domain(), args, batch_axes );
+                queue.run_parallel( Ajoute(), args.outputs.sortie.domain(), args, batch_axes );
             }
         }
     """ )
@@ -850,16 +873,26 @@ if test( "une_valeur_brute_entre_telle_quelle" ):
     entree = numpy.arange( 6.0 ).reshape( 2, 3 )    # ni tenseur loom, ni tableau du framework
     sortie = RealTensor.like( entree )              # `like` lit la forme d'une valeur brute
 
-    driver.call( noyau, name = "test_valeur_brute", entree = entree, decalage = 10.0,
-                 sortie = sortie, output_attributes = [ "sortie" ] )
+    loom.ffi_call(
+        "test_valeur_brute",
+        noyau,
+        entree = entree,
+        decalage = 10.0,
+        sortie = loom.out( sortie ),
+    )
 
     assert numpy.asarray( sortie.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
 
     # ... SAUF en sortie : le tenseur serait bati par l'appel, donc le resultat n'aurait nulle
     # part ou revenir. C'est dit, au lieu d'etre ecrit dans le vide.
     try:
-        driver.call( noyau, name = "test_valeur_brute", entree = entree, decalage = 10.0,
-                     sortie = numpy.zeros( ( 2, 3 ) ), output_attributes = [ "sortie" ] )
+        loom.ffi_call(
+            "test_valeur_brute",
+            noyau,
+            entree = entree,
+            decalage = 10.0,
+            sortie = loom.out( numpy.zeros( ( 2, 3 ) ) ),
+        )
         assert False, "une sortie brute aurait du etre refusee"
     except ValueError as e:
         assert "brute" in str( e ), e

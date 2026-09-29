@@ -84,6 +84,44 @@ class Tensor( Attribute ):
             from . import BoolTensor, IntTensor, RealTensor   # registers them (see __init_subclass__)
         return Tensor._by_kind[ kind ]
 
+    @staticmethod
+    def as_tensor( value, *, bind = True ):
+        """LE TENSEUR QU'UNE VALEUR BRUTE DESIGNE -- ou `None` si ce n'est pas une donnee.
+
+        C'est la conversion que l'usager n'a plus a ecrire : un tableau du framework, un tableau
+        numpy, une liste, un scalaire python entrent tels quels dans `loom.ffi_call`, et
+        `loom.RealTensor.like( u )` prend `u` sous sa forme brute.
+
+        DEUX DECISIONS, et elles ne se prennent pas au meme endroit :
+
+          * le KIND ( reel / entier / booleen ) est un FAIT sur la valeur -- on le lit
+            (`_natural_dtype`), et il choisit la classe ;
+          * la TAILLE est une POLITIQUE ( `driver.ftype`, `driver.itype` ) -- on ne la lit PAS,
+            sinon un `numpy.float64` epinglerait la fp64 sur un driver regle en fp32. C'est
+            exactement ce que `RealTensor( u )` faisait deja : `cls( value )` ne declare aucune
+            taille, donc le driver tranche, et `set` convertit.
+
+        Les axes sont DEDUITS de la forme, donc anonymes et sans identite ( voir `__init__` ) :
+        on nous a donne un tableau, pas un sens. C'est sans consequence pour le noyau, ou un axe
+        anonyme est nomme par sa POSITION ( `a0`, `a1` -- voir `cpp_dim_names` ) : deux valeurs
+        brutes de meme rang tombent sur les memes axes C++, donc sur la meme grille.
+
+        `bind = False` n'en garde que la DECLARATION ( axes, dtype, device ) : c'est ce dont
+        `like` a besoin, et lire une forme ne doit pas couter un transfert de la valeur.
+        """
+        if isinstance( value, Tensor ):
+            return value
+        dtype = _natural_dtype( value )
+        if dtype is None:
+            return None
+        cls = Tensor.class_for( dtype )
+        if bind:
+            return cls( value )
+        res = cls( axes = _dense_shape_of( value ) )
+        for axe in res.axes:
+            axe.inferred = True    # meme provenance qu'un axe deduit : une forme lue, rien de plus
+        return res
+
     @classmethod
     def default_dtype( cls, size = None ) -> Dtype:
         """The dtype this class means when a declaration names none. The abstract base has no
@@ -153,7 +191,13 @@ class Tensor( Attribute ):
         """An empty tensor sharing `other`'s axes, dtype and device -- what the backward pass
         builds to carry a gradient (same logical shape as the value it is the gradient of). What
         goes INTO it then decides its kind: a real cotangent buffer (`set_raw`) makes it a
-        `TensorView`, a symbolic-zero cotangent a `ZeroTensor`, nothing at all a `NoneTensor`."""
+        `TensorView`, a symbolic-zero cotangent a `ZeroTensor`, nothing at all a `NoneTensor`.
+
+        `other` peut etre une valeur BRUTE ( `loom.RealTensor.like( u )`, `u` etant le tableau du
+        framework ) : on n'en lit que la forme et le kind, jamais la donnee."""
+        other = Tensor.as_tensor( other, bind = False )
+        if other is None:
+            raise TypeError( "Tensor.like: expected a tensor or a value with a shape" )
         return Tensor.class_for( other.dtype )( template_args = other.axes,
                                                  template_kwargs = { "dtype": other.dtype, "device": other.device } )
 

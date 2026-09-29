@@ -140,16 +140,19 @@ _arriere = loom.FfiCode(
 )
 
 
-def pas( u, coef ):
+def pas( temperature, coef ):
     """UN pas de temps explicite.
 
-    `u` est un tableau `( ny, nx )` du framework ( ou un simple numpy ) et `coef` vaut `dt k / h^2`
-    -- la diffusivite est CONSTANTE. Renvoie la temperature mise a jour, derivable par rapport
-    a `u`."""
-    # AUCUN vocabulaire d'axe : les axes sont deduits de la forme de `u` ( anonymes ; ils recoivent
-    # des noms distincts a l'abaissement ), et `suivant` reprend LES MEMES -- c'est ce qui dit a
-    # loom que les deux tenseurs sont sur la meme grille.
-    temperature = loom.RealTensor( u )
+    `temperature` est un tableau `( ny, nx )` du framework ( ou un simple numpy ) et `coef` vaut
+    `dt k / h^2` -- la diffusivite est CONSTANTE. Renvoie la temperature mise a jour, derivable
+    par rapport a `temperature`.
+
+    RIEN A EMBALLER : les tableaux entrent tels quels, loom lit leur forme et leur type. Les axes
+    en sont DEDUITS -- anonymes, nommes par leur position a l'abaissement -- donc deux valeurs de
+    meme rang sont sur la meme grille sans qu'on ait un mot d'axe a prononcer.
+
+    La SORTIE, elle, se declare : c'est nous qui devons tenir l'objet ou le resultat revient.
+    `like` dit la seule chose qui reste a dire -- meme forme, meme type que l'entree."""
     suivant = loom.RealTensor.like( temperature )
 
     loom.ffi_call(
@@ -157,18 +160,18 @@ def pas( u, coef ):
         _arriere,
         name = "diffusion_pas",
         temperature = temperature,
-        coef = loom.RealTensor( float( coef ) ),
+        coef = coef,
         suivant = suivant,
         output_attributes = [ "suivant" ],
     )
     return suivant.raw
 
 
-def evolution( u, coef, nb_pas ):
+def evolution( temperature, coef, nb_pas ):
     """`nb_pas` pas de suite -- la chaine que l'adjoint doit remonter."""
     for _ in range( nb_pas ):
-        u = pas( u, coef )
-    return u
+        temperature = pas( temperature, coef )
+    return temperature
 
 
 if __name__ == "__main__":

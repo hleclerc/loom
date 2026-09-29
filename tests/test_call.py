@@ -822,3 +822,44 @@ if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
         f"le deuxieme appel a fabrique un noyau de plus ({ avant[ 'kernels' ] } -> { apres[ 'kernels' ] })"
     assert apres[ "reuses" ] > avant[ "reuses" ], "le deuxieme appel n'a pas resservi la cible du premier"
     assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.raw ] == [ 1.0, 1.0, 1.0 ]
+
+
+if test( "une_valeur_brute_entre_telle_quelle" ):
+    # CE QU'ON N'ECRIT PLUS. Un tableau numpy, un tableau du framework, un flottant python
+    # traversent SANS emballage : `Tensor.as_tensor` lit leur kind ( un fait ) et laisse la
+    # taille au driver ( une politique ) -- exactement ce que `RealTensor( u )` faisait a la
+    # main. Les axes sont deduits de la forme, donc anonymes, donc nommes par leur POSITION
+    # dans le C++ : deux valeurs de meme rang tombent sur la meme grille.
+    import numpy
+
+    noyau = FfiCode( code = """
+        namespace {
+            struct Ajoute {
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    const TF d = args.decalage;
+                    args.sortie( coords ) = args.entree( coords ) + d;
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( Ajoute(), args.sortie.domain(), args, batch_axes );
+            }
+        }
+    """ )
+
+    entree = numpy.arange( 6.0 ).reshape( 2, 3 )    # ni tenseur loom, ni tableau du framework
+    sortie = RealTensor.like( entree )              # `like` lit la forme d'une valeur brute
+
+    driver.call( noyau, name = "test_valeur_brute", entree = entree, decalage = 10.0,
+                 sortie = sortie, output_attributes = [ "sortie" ] )
+
+    assert numpy.asarray( sortie.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+
+    # ... SAUF en sortie : le tenseur serait bati par l'appel, donc le resultat n'aurait nulle
+    # part ou revenir. C'est dit, au lieu d'etre ecrit dans le vide.
+    try:
+        driver.call( noyau, name = "test_valeur_brute", entree = entree, decalage = 10.0,
+                     sortie = numpy.zeros( ( 2, 3 ) ), output_attributes = [ "sortie" ] )
+        assert False, "une sortie brute aurait du etre refusee"
+    except ValueError as e:
+        assert "brute" in str( e ), e

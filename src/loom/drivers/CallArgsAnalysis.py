@@ -380,6 +380,24 @@ class CallArgsAnalysis:
         # a builtin cannot carry a `make_CallArg`: a bare `int` is a runtime attribute of the call.
         if isinstance( inst, int ):
             return CallArg_Attr( self, path, name, inst )
+        # UNE VALEUR BRUTE EST UNE DONNEE : un tableau du framework, un tableau numpy, une liste,
+        # un flottant. L'usager n'a pas a l'emballer -- `Tensor.as_tensor` lit son kind et sa
+        # forme, le driver tranche la taille, et la suite ne voit qu'un tenseur comme un autre.
+        # C'est ICI et nulle part ailleurs, parce que c'est ici qu'on decide comment chaque
+        # attribut ATTEINT le noyau.
+        from ..tensor.Tensor import Tensor   # local : `loom.tensor` tire `driver`, qui nous tire
+        tensor = Tensor.as_tensor( inst )
+        if tensor is not None:
+            # ... sauf en SORTIE. Le tenseur qu'on vient de batir est a nous : le resultat lui
+            # serait relie, et l'appelant ne le verrait jamais. Une sortie doit etre un objet de
+            # l'appelant, et le declarer est justement ce que `like` sert a ecrire.
+            for p in self.output_paths + self.scratch_paths:
+                if path == p or path.startswith( p + "." ):
+                    raise ValueError(
+                        f"'{ path }' est declare en sortie, mais la valeur passee est brute : le "
+                        f"resultat n'aurait nulle part ou revenir. Passe un tenseur loom, p.ex. "
+                        f"`{ name } = loom.RealTensor.like( <l'entree de meme forme> )`." )
+            return tensor.make_CallArg( self, path, name, tensor )
         # default lowering: a plain aggregate, walked field by field.
         return CallArg_Aggregate( self, path, name, inst )
 

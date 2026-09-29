@@ -128,7 +128,7 @@ _RENDRE_BWD = FfiCode.per_item(
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
 
-        if constexpr ( ! DECAYED_TYPE_OF( grad_for_image.surely_null() )::value )
+        if constexpr ( ! CT_VALUE( grad_for_image.surely_null() ) )
             splats::rendre_pixel_bwd( splats, index.ids, SI( index.nb_par_tuile( t ) ), t, px, py,
                                       grad_for_image( y = py, x = px ), grad_for_splats );
     """,

@@ -143,8 +143,8 @@ if test( "partial_init" ):
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
         cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
         
-        static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 1 );
-        static_assert( DECAYED_TYPE_OF( cell.vertex_indices  .is_valid() )::value == 0 );
+        static_assert( CT_VALUE( cell.vertex_positions.is_valid() ) );
+        static_assert( ! CT_VALUE( cell.vertex_indices  .is_valid() ) );
         """ ),
         name = "test_partial_init",
         cell = cell,
@@ -193,7 +193,7 @@ if test( "input_exceptions" ):
 
     driver.call(
         FfiCode.per_item( code = """
-        static_assert( DECAYED_TYPE_OF( cell.vertex_positions.is_valid() )::value == 0 );
+        static_assert( ! CT_VALUE( cell.vertex_positions.is_valid() ) );
         """ ),
         name = "test_input_exceptions_use",
         cell = cell,
@@ -489,14 +489,14 @@ if test( "der_non_perturbed" ):
     arriere = FfiCode.per_item( """
             // the perturbation is a COMPILE-TIME fact here: `grad_for_inp` is a real
             // gradient buffer, `grad_for_bias` a `NoneTensor` (bias is never perturbed).
-            static_assert( DECAYED_TYPE_OF( grad_for_inp .is_valid() )::value == 1 );
-            static_assert( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value == 0 );
+            static_assert( CT_VALUE( grad_for_inp .is_valid() ) );
+            static_assert( ! CT_VALUE( grad_for_bias.is_valid() ) );
             
             // a `NoneTensor` has no `operator=`, so its write must be dropped at COMPILE
             // time -- `if constexpr` on `is_valid()`, not a runtime `if`.
-            if constexpr ( DECAYED_TYPE_OF( grad_for_inp.is_valid() )::value )
+            if constexpr ( CT_VALUE( grad_for_inp.is_valid() ) )
                 grad_for_inp = grad_for_out;
-            if constexpr ( DECAYED_TYPE_OF( grad_for_bias.is_valid() )::value )
+            if constexpr ( CT_VALUE( grad_for_bias.is_valid() ) )
                 grad_for_bias = grad_for_out;
         """ )
     def loss( x ):

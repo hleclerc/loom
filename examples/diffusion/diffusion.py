@@ -101,12 +101,12 @@ _arriere = loom.FfiCode(
 
                     // `coef` est une constante du probleme, jamais perturbee : son gradient
                     // demanderait une reduction globale, et il n'est pas ecrit.
-                    static_assert( DECAYED_TYPE_OF( args.grad_for_coef.is_valid() )::value == 0,
+                    static_assert( ! CT_VALUE( args.grad_for_coef.is_valid() ),
                         "diffusion : le gradient par rapport a dt k / h^2 n'est pas implemente" );
 
                     // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un
                     // zero symbolique il faut quand meme ecrire le gradient nul.
-                    constexpr bool nulle = DECAYED_TYPE_OF( args.grad_for_suivant.surely_null() )::value;
+                    constexpr bool nulle = CT_VALUE( args.grad_for_suivant.surely_null() );
 
                     TF res = 0;
                     if constexpr ( ! nulle ) {
@@ -127,7 +127,7 @@ _arriere = loom.FfiCode(
                         } );
                     }
 
-                    if constexpr ( DECAYED_TYPE_OF( args.grad_for_temperature.is_valid() )::value )
+                    if constexpr ( CT_VALUE( args.grad_for_temperature.is_valid() ) )
                         args.grad_for_temperature( coords ) = res;
                 }
             };

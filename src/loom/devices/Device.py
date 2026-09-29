@@ -120,7 +120,7 @@ class Device:
         """La déclaration de `scratch` dans le handler. Un device qui ne sait pas allouer le dit
         ici, plutôt que de laisser passer un noyau qui s'en croit capable."""
         raise NotImplementedError(
-            f"{ self.name }: `FfiCode( scratch = True )` -- ce device ne sait pas allouer pendant "
+            f"{ self.name }: `FfiCode( allocator = True )` -- ce device ne sait pas allouer pendant "
             f"un appel ( voir `Device.cpp_scratch_decl` )" )
 
     # ── the catalogue (precompiled kernels in a wheel, see compilation/catalogue.py) ──────

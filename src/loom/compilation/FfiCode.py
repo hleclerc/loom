@@ -19,7 +19,7 @@ class AbstractFfiCode:
         return ""
 
     @property
-    def wants_scratch( self ) -> bool:
+    def wants_allocator( self ) -> bool:
         """Si le handler doit recevoir l'allocateur d'XLA (`Scratch`). Faux par défaut : c'est la
         SOURCE qui est hachée pour nommer un noyau, donc lier ce contexte sans qu'on le demande
         recompilerait tout le dépôt pour une capacité que personne n'utilise."""
@@ -85,7 +85,7 @@ class FfiCode( AbstractFfiCode ):
     où le corps était par item et ne pouvait pas exprimer une pré-passe ; un corps qui est le
     handler n'en a plus besoin.
 
-    `scratch = True` fait lier l'allocateur d'XLA, donc `scratch.view<T>( n )` dans le corps : de la
+    `allocator = True` fait lier l'allocateur d'XLA, donc `args.allocator.view<T>( n )` dans le corps : de la
     mémoire dimensionnée à l'exécution, à une taille que seul le noyau connaît, sous `jit` comme en
     eager. Voir `support/kernels/Scratch.h` et `tests/test_scratch_gpu.py`.
 
@@ -107,7 +107,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  scratch = False, _scaffold = False ) -> None:
+                  allocator = False, _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -145,7 +145,7 @@ class FfiCode( AbstractFfiCode ):
         self.sources = tuple( sources )
         self.includes = tuple( includes )
         self.include_roots = tuple( include_roots )
-        self.scratch = bool( scratch )
+        self.allocator = bool( allocator )
         self._scaffold = _scaffold
 
         # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
@@ -179,8 +179,8 @@ class FfiCode( AbstractFfiCode ):
         return "group_size" in self.hooks
 
     @property
-    def wants_scratch( self ):
-        return self.scratch
+    def wants_allocator( self ):
+        return self.allocator
 
     @property
     def is_handler( self ):
@@ -269,7 +269,7 @@ class FfiCode( AbstractFfiCode ):
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, self.include_roots or other.include_roots,
-                       scratch = self.scratch,
+                       allocator = self.allocator,
                        _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
@@ -305,8 +305,8 @@ class Kernels( AbstractFfiCode ):
         return self.forward.sources
 
     @property
-    def wants_scratch( self ):
-        return self.forward.wants_scratch
+    def wants_allocator( self ):
+        return self.forward.wants_allocator
 
     @property
     def is_handler( self ):

@@ -13,6 +13,7 @@ ici, à un endroit qui le nomme.
 """
 import numpy
 
+import loom
 from loom import driver
 from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
@@ -29,7 +30,8 @@ def _sum_over_lanes( group_size ):
     num_group = Axis( ShapeVar( 2 ), name = "num_group" )
     res = IntTensor[ num_group ]()
 
-    driver.call(
+    loom.ffi_call(
+        f"test_group_kernel_{ group_size }",
         FfiCode.per_item( code = """
                 local_scratch[ local_index ] = local_index;
                 group_barrier( group );
@@ -37,15 +39,13 @@ def _sum_over_lanes( group_size ):
                     int s = 0;
                     for ( int k = 0; k < local_size; ++k )
                         s += local_scratch[ k ];
-                    res( group_index ) = s;
+                    outputs.res( group_index ) = s;
                 }
             """,
-            max_nb_threads = "return res.shape( 0 );",
+            max_nb_threads = "return outputs.res.shape( 0 );",
             group_size = f"return { group_size };",
             local_mem_elems = f"return { group_size };" ),
-        name = f"test_group_kernel_{ group_size }",
-        output_attributes = [ "res" ],
-        res = res,
+        res = loom.out( res ),
     )
     return int( numpy.asarray( res.tensor ).reshape( -1 )[ 0 ] )
 
@@ -68,17 +68,16 @@ def _runtime_subgroup_width( group_size ):
     num_group = Axis( ShapeVar( 2 ), name = "num_group" )
     res = IntTensor[ num_group ]()
 
-    driver.call(
+    loom.ffi_call(
+        f"test_group_sgw_{ group_size }",
         FfiCode.per_item( code = """
                 if ( local_index == 0 )
-                    res( group_index ) = SI( sub_group.get_local_linear_range() );
+                    outputs.res( group_index ) = SI( sub_group.get_local_linear_range() );
             """,
-            max_nb_threads = "return res.shape( 0 );",
+            max_nb_threads = "return outputs.res.shape( 0 );",
             group_size = f"return { group_size };",
             local_mem_elems = f"return { group_size };" ),
-        name = f"test_group_sgw_{ group_size }",
-        output_attributes = [ "res" ],
-        res = res,
+        res = loom.out( res ),
     )
     return int( numpy.asarray( res.tensor ).reshape( -1 )[ 0 ] )
 
@@ -103,14 +102,13 @@ if test( "the_runtime_subgroup_width_matches_what_the_device_claims" ):
 def _probe( group_size, expr, tag ):
     num_lane = Axis( ShapeVar( group_size ), name = "num_lane" )
     res = IntTensor[ num_lane ]()
-    driver.call(
-        FfiCode.per_item( code = f"res( local_index ) = SI( { expr } );",
+    loom.ffi_call(
+        f"probe_sg_{ group_size }_{ tag }",
+        FfiCode.per_item( code = f"outputs.res( local_index ) = SI( { expr } );",
             max_nb_threads = "return 1;",
             group_size = f"return { group_size };",
             local_mem_elems = f"return { group_size };" ),
-        name = f"probe_sg_{ group_size }_{ tag }",
-        output_attributes = [ "res" ],
-        res = res,
+        res = loom.out( res ),
     )
     return numpy.asarray( res.tensor ).reshape( -1 ).tolist()
 

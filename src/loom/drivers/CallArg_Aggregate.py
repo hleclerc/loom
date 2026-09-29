@@ -228,9 +228,15 @@ class CallArg_Aggregate( CallArg ):
         -- all take the same index. The result is another instantiation of the same template
         (the members lost an axis), deduced, not spelled; the qualified name reaches the template
         rather than the current instantiation (see `_cpp_make_available`)."""
-        values = ", ".join( f"{ c.name }( index... )" for c in fields )
+        # LE PACK NE PEUT PAS S'APPELER `index`. Il vit dans la même portée que les MEMBRES, dont
+        # les noms viennent de l'usager : un agrégat ayant un membre `index` rendait
+        # `index( index... )`, que nvcc refuse (« parameter pack "index" was referenced but not
+        # expanded »). Ça n'avait jamais tiré parce qu'aucun agrégat écrit à la main ne s'appelait
+        # ainsi ; un GROUPE, lui, porte les noms d'arguments tels quels. D'où un nom que l'usager
+        # n'écrira pas.
+        values = ", ".join( f"{ c.name }( sdot_at... )" for c in fields )
         # `HD` : indexé depuis un noyau (`scratch( batch_index )`), donc device aussi
-        return ( "    HD auto operator()( const auto &...index ) const {\n"
+        return ( "    HD auto operator()( const auto &...sdot_at ) const {\n"
                  f"        return ::sdot::{ self.type_name }{{ { values } }};\n"
                  "    }" )
 

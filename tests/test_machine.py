@@ -9,6 +9,7 @@ Quatre champs, et chacun a un sens des deux côtés -- c'est ce qui permet d'éc
 Le test vérifie qu'ils traversent jusque dans un kernel et qu'ils sont plausibles, puis les
 contraintes propres à chaque device.
 """
+import loom
 from loom import Axis, ShapeVar, IntTensor, driver
 from loom.compilation.FfiCode import FfiCode
 from errand import test
@@ -21,7 +22,7 @@ _CODE = """
     struct PoserMachine {
         HD void operator()( auto coords, auto &&args ) const {
             const SI k = coords[ num_champ ];
-            args.champs( k ) = k == 0 ? args.machine.nb_workers
+            args.outputs.champs( k ) = k == 0 ? args.machine.nb_workers
                              : k == 1 ? args.machine.sub_group_width
                              : k == 2 ? args.machine.local_mem_bytes
                              :          args.machine.suggested_group;
@@ -29,7 +30,7 @@ _CODE = """
     };
 
     void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-        queue.run_parallel( PoserMachine(), batch_axes + args.champs.domain(), args );
+        queue.run_parallel( PoserMachine(), batch_axes + args.outputs.champs.domain(), args );
     }
 """
 
@@ -37,8 +38,7 @@ _CODE = """
 def _machine():
     """Les quatre champs, tels que le NOYAU les voit ( et non tels que Python les devinerait )."""
     champs = IntTensor[ Axis( ShapeVar( len( _CHAMPS ) ), name = "num_champ" ) ]()
-    driver.call( FfiCode( code = _CODE ), name = "test_machine",
-                 champs = champs, output_attributes = [ "champs" ] )
+    loom.ffi_call( "test_machine", FfiCode( code = _CODE ), champs = loom.out( champs ) )
     return dict( zip( _CHAMPS, ( int( v ) for v in champs.raw.tolist() ) ) )
 
 

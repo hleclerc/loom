@@ -22,6 +22,7 @@ CUDA engendrée par loom, à -O0 et après un préprocessing réussi, indépenda
 qu'un refus propre est un comportement correct, alors qu'un segfault, un silence ou un résultat
 faux n'en sont pas.
 """
+import loom
 from loom import Axis, ShapeVar, RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
 from errand import test
@@ -30,7 +31,7 @@ import numpy
 
 
 # Le corps EST le handler ( `FfiCode.handler` ) : c'est du code hôte, il a besoin de `scratch`, et
-# il n'y a pas d'item à échafauder autour. `scratch = True` est ce qui fait lier l'allocateur
+# il n'y a pas d'item à échafauder autour. `allocator = True` est ce qui fait lier l'allocateur
 # d'XLA -- un opt-in, parce que le nom d'un noyau est le hachage de sa source et qu'une clause
 # `Bind()` ajoutée sans condition recompilerait tout le dépôt.
 #
@@ -44,27 +45,27 @@ _CODE = """
         // ce que seul le noyau sait : combien d'entrees sont positives. Aucune borne n'a ete
         // donnee, ni par Python ni par XLA.
         SI n = 0;
-        for ( SI i = 0; i < args.valeurs.shape( 0 ); ++i )
-            if ( args.valeurs( i ) > 0 )
+        for ( SI i = 0; i < args.inputs.valeurs.shape( 0 ); ++i )
+            if ( args.inputs.valeurs( i ) > 0 )
                 ++n;
 
-        // ... et on alloue EXACTEMENT ca. `scratch` est dans `args` : allouer est une operation
+        // ... et on alloue EXACTEMENT ca. `allocator` est dans `args` : allouer est une operation
         // hote, donc il n'a rien a faire dans la forme kernel.
-        auto compact = args.scratch.template view<double>( n );
+        auto compact = args.allocator.template view<double>( n );
 
         // la boucle est bornee par LA VUE et pas par l'entree : c'est ce qui rend un refus
         // inoffensif ( voir Scratch.h ).
         SI k = 0;
-        for ( SI i = 0; i < args.valeurs.shape( 0 ) && k < compact.shape( 0 ); ++i )
-            if ( args.valeurs( i ) > 0 )
-                compact( k++ ) = args.valeurs( i );
+        for ( SI i = 0; i < args.inputs.valeurs.shape( 0 ) && k < compact.shape( 0 ); ++i )
+            if ( args.inputs.valeurs( i ) > 0 )
+                compact( k++ ) = args.inputs.valeurs( i );
 
         double s = 0;
         for ( SI i = 0; i < compact.shape( 0 ); ++i )
             s += compact( i );
 
-        args.somme( 0 ) = s;
-        args.somme( 1 ) = double( compact.shape( 0 ) );
+        args.outputs.somme( 0 ) = s;
+        args.outputs.somme( 1 ) = double( compact.shape( 0 ) );
     }
 """
 
@@ -75,12 +76,11 @@ def _appel( valeurs ):
     v = RealTensor[ Axis( ShapeVar( len( valeurs ) ), name = "num_point" ) ]( valeurs )
     somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
     try:
-        driver.call(
-            FfiCode( code = _CODE, scratch = True ),
-            name = "test_scratch_positifs",
+        loom.ffi_call(
+            "test_scratch_positifs",
+            FfiCode( code = _CODE, allocator = True ),
             valeurs = v,
-            somme = somme,
-            output_attributes = [ "somme" ],
+            somme = loom.out( somme ),
         )
     except Exception as e:
         # un refus, et il doit être LISIBLE : c'est la moitié du contrat.
@@ -128,12 +128,11 @@ if test( "sous_jit" ):
     def perte( x ):
         v = RealTensor[ Axis( ShapeVar( n ), name = "num_point" ) ]( x )
         somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
-        driver.call(
-            FfiCode( code = _CODE, scratch = True ),
-            name = "test_scratch_positifs",
+        loom.ffi_call(
+            "test_scratch_positifs",
+            FfiCode( code = _CODE, allocator = True ),
             valeurs = v,
-            somme = somme,
-            output_attributes = [ "somme" ],
+            somme = loom.out( somme ),
         )
         return somme.tensor[ 0 ]
 

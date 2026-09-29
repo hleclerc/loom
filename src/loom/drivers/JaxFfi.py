@@ -322,7 +322,7 @@ def _render_call( code, ca, device ):
     # body itself listed. Collected blind: the call never knows which node brought a header, nor
     # that any of it is hand-written or generated behind the scenes.
     includes = []
-    if code.wants_scratch:
+    if code.wants_allocator:
         includes.append( "loom/support/kernels/Scratch.h" )
     for inc in [ i for arg_ca in ca.args.values() for i in arg_ca.cpp_includes() ] + list( code.includes ):
         if inc not in includes:
@@ -346,11 +346,11 @@ def _render_call( code, ca, device ):
     stream_param = device.cpp_stream_param()
     params = [ stream_param ] if stream_param else []
 
-    # l'allocateur d'XLA, SUR DEMANDE ( `FfiCode( scratch = True )` ). Il est lié en `Ctx`, donc
+    # l'allocateur d'XLA, SUR DEMANDE ( `FfiCode( allocator = True )` ). Il est lié en `Ctx`, donc
     # sa place dans la signature est celle de sa clause `Bind()` -- juste après le flux, avant les
     # arguments. Et il ne s'ajoute QUE si le corps l'a demandé : le nom d'un noyau est le hachage
     # de sa source, donc une clause ajoutée sans condition recompilerait tout le dépôt.
-    scratch = code.wants_scratch
+    scratch = code.wants_allocator
     if scratch and device.cpp_scratch_param():
         params.append( device.cpp_scratch_param() )
 
@@ -402,10 +402,15 @@ def _render_call( code, ca, device ):
 
         champs_h = [ ( "queue", "queue", True ), ( "machine", "queue.machine()", False ),
                      ( "errors", ERRORS_VAR_NAME, False ) ]
-        # l'allocateur, SUR DEMANDE ( `FfiCode( scratch = True )` ) : allouer est une operation
+        # L'ALLOCATEUR, sur demande ( `FfiCode( allocator = True )` ) : allouer est une operation
         # HOTE, donc il vit dans `args` et pas dans la forme kernel.
+        #
+        # Il s'appelait `args.scratch`, ce que le groupe `args.scratch` -- les tampons de travail
+        # d'un appel -- heurtait de plein fouet. Deux choses differentes portaient le meme nom :
+        # celle-ci ALLOUE pendant l'appel, celles-la sont deja allouees. Le nom dit maintenant
+        # laquelle est laquelle.
         if scratch:
-            champs_h.append( ( "scratch", "scratch", True ) )
+            champs_h.append( ( "allocator", "scratch", True ) )
         for n in noms:
             champs_h.append( ( n, n, False ) )
             champs_h.append( ( f"{ n }_io", ca.args[ n ].cpp_io_expr(), False ) )

@@ -30,6 +30,7 @@ d'errand est tague cuda mais vide a ce jour ; en attendant, directement :
 """
 from pathlib import Path
 
+import loom
 from loom import Axis, ShapeVar, RealTensor, driver, compilation
 from loom.compilation.FfiCode import FfiCode
 from errand import test
@@ -41,14 +42,14 @@ compilation.register_include_root( Path( __file__ ).resolve().parent / "include"
 
 _CODE = """
     void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-        SI n = args.valeurs.shape( 0 );
+        SI n = args.inputs.valeurs.shape( 0 );
 
         // 1. un noyau compte, sur la carte. On passe par la forme LIBRE de `run_parallel` : `cpt`
         //    est un scratch, il ne vient pas de `args`, donc la forme courte ne s'applique pas.
-        auto cpt = args.scratch.template view<int>( 1 );
+        auto cpt = args.allocator.template view<int>( 1 );
         cpt.fill_with( queue, 0 );
         run_parallel( queue, indices_over( n ), loom_tests::Compter(),
-                      OutList(), cpt, InpList(), args.valeurs );
+                      OutList(), cpt, InpList(), args.inputs.valeurs );
 
         // 2. l'HOTE lit ce que le noyau vient d'ecrire. `Ptr::value()` ferait ca, mais il est
         //    marque `HD` alors que son chemin de transfert est HOTE seul -> le compilateur CUDA le
@@ -58,30 +59,29 @@ _CODE = """
         SI m = SI( m_hote );
 
         // 3. ... et on alloue EXACTEMENT ca
-        auto compact = args.scratch.template view<double>( m );
+        auto compact = args.allocator.template view<double>( m );
         cpt.fill_with( queue, 0 );
         run_parallel( queue, indices_over( n ), loom_tests::Compacter(),
-                      OutList(), compact, OutList(), cpt, InpList(), args.valeurs );
+                      OutList(), compact, OutList(), cpt, InpList(), args.inputs.valeurs );
 
         // 4. de quoi verifier : la somme des positifs, et la taille qui a ete allouee
         run_parallel( queue, indices_over( m ), loom_tests::Sommer(),
-                      OutList(), args.somme, InpList(), compact );
+                      OutList(), args.outputs.somme, InpList(), compact );
         run_parallel( queue, indices_over( SI( 1 ) ), loom_tests::Poser(),
-                      OutList(), args.somme, InpList(), double( m ) );
+                      OutList(), args.outputs.somme, InpList(), double( m ) );
     }
 """
 
 
 def _code():
-    return FfiCode( code = _CODE, scratch = True,
+    return FfiCode( code = _CODE, allocator = True,
                             includes = [ "loom_tests/scratch_gpu.h" ] )
 
 
 def _calcul( x ):
     v = RealTensor[ Axis( ShapeVar( len( x ) ), name = "num_point" ) ]( x )
     somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
-    driver.call( _code(), name = "test_scratch_gpu", valeurs = v, somme = somme,
-                 output_attributes = [ "somme" ] )
+    loom.ffi_call( "test_scratch_gpu", _code(), valeurs = v, somme = loom.out( somme ) )
     return somme
 
 

@@ -8,6 +8,7 @@ defines font bien des unités DISTINCTES, et que le graphe (ninja) les réutilis
 from pathlib import Path
 import numpy
 
+import loom
 from loom import driver
 from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
@@ -19,13 +20,12 @@ HERE = Path( __file__ ).resolve().parent / "cpp_sources"
 def _scaled( scale ):
     num = Axis( ShapeVar( 3 ), name = "num" )
     res = IntTensor[ num ]()
-    driver.call(
-        FfiCode.per_item( code = "for ( int i = 0; i < 3; ++i ) res( i ) = scaled( i + 1 );",
+    loom.ffi_call(
+        f"test_sources_scaled_{ scale }",
+        FfiCode.per_item( code = "for ( int i = 0; i < 3; ++i ) outputs.res( i ) = scaled( i + 1 );",
             includes = [ str( HERE / "scaled.h" ) ],
             sources = [ ( str( HERE / "scaled.cpp" ), { "SCALE": str( scale ) } ) ] ),
-        name = f"test_sources_scaled_{ scale }",
-        output_attributes = [ "res" ],
-        res = res,
+        res = loom.out( res ),
     )
     return numpy.asarray( res.tensor ).reshape( -1 ).tolist()
 

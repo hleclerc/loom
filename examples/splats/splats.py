@@ -32,6 +32,7 @@ import loom.compilation as compilation
 # le C++ de CE paquet, enregistre aupres de loom comme n'importe quel usager
 compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
 
+import loom
 from loom import Aggregate, Axis, CtShapeVar, IntTensor, RealTensor, ShapeVar, driver, stop_gradient
 from loom.compilation.FfiCode import FfiCode
 from loom.tensor import new_batch_axis
@@ -101,36 +102,36 @@ def _nb_tuiles( largeur, hauteur, cote = COTE ):
 _INSCRIRE = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI i = SI( rangs.rang( batch_index ) );
-        splats::inscrire( splats, i, SI( ecran.largeur ), SI( ecran.hauteur ), SI( ecran.cote ),
-                          index.nb_par_tuile, index.ids );
+        const SI i = SI( inputs.rangs.rang( batch_index ) );
+        splats::inscrire( inputs.splats, i, SI( inputs.ecran.largeur ), SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ),
+                          outputs.index.nb_par_tuile, outputs.index.ids );
     """,
 )
 
 _RENDRE = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( rangs.rang( batch_index ) );
-        const SI largeur = SI( ecran.largeur ), cote = SI( ecran.cote );
+        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
 
-        splats::rendre_pixel( splats, index.ids, SI( index.nb_par_tuile( t ) ), t, px, py,
-                              image( y = py, x = px ) );
+        splats::rendre_pixel( inputs.splats, inputs.index.ids, SI( inputs.index.nb_par_tuile( t ) ), t, px, py,
+                              outputs.image( y = py, x = px ) );
     """,
 )
 
 _RENDRE_BWD = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( rangs.rang( batch_index ) );
-        const SI largeur = SI( ecran.largeur ), cote = SI( ecran.cote );
+        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
 
-        if constexpr ( ! grad_for_image.surely_null )
-            splats::rendre_pixel_bwd( splats, index.ids, SI( index.nb_par_tuile( t ) ), t, px, py,
-                                      grad_for_image( y = py, x = px ), grad_for_splats );
+        if constexpr ( ! grad_of_outputs.image.surely_null )
+            splats::rendre_pixel_bwd( inputs.splats, inputs.index.ids, SI( inputs.index.nb_par_tuile( t ) ), t, px, py,
+                                      grad_of_outputs.image( y = py, x = px ), grad_of_inputs.splats );
     """,
 )
 
@@ -154,15 +155,13 @@ def construire_index( splats, ecran, capacite ):
     """
     index = Index( nb_tuiles = _nb_tuiles( int( ecran.largeur.raw ), int( ecran.hauteur.raw ),
                                            int( ecran.cote.raw ) ) )
-    driver.call(
+    loom.ffi_call(
+        "splats_inscrire",
         _INSCRIRE,
-        name = "splats_inscrire",
         splats = splats,
         ecran = ecran,
-        index = index,
+        index = loom.out( index, capacities = { "nb_par_tuile": capacite } ),
         rangs = _rangs( int( splats.nb_splats.value ), "splat" ),
-        output_attributes = [ "index" ],
-        output_capacities = { "index.nb_par_tuile": capacite },
     )
     return index
 
@@ -172,15 +171,14 @@ def rendre( splats, index, ecran ):
     largeur, hauteur = int( ecran.largeur.raw ), int( ecran.hauteur.raw )
     image = RealTensor[ Axis( ShapeVar( hauteur ), name = "y" ),
                         Axis( ShapeVar( largeur ), name = "x" ), splats.rvb ]()
-    driver.call(
+    loom.ffi_call(
+        "splats_rendre",
         _RENDRE, _RENDRE_BWD,
-        name = "splats_rendre",
         splats = splats,
         index = index,
         ecran = ecran,
-        image = image,
+        image = loom.out( image ),
         rangs = _rangs( largeur * hauteur, "pixel" ),
-        output_attributes = [ "image" ],
     )
     return image.raw
 
@@ -221,29 +219,29 @@ def _sans_gradient( splats ):
 _COMPTER = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        splats::compter( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
-                         SI( ecran.hauteur ), SI( ecran.cote ), comptes );
+        splats::compter( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
+                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), outputs.comptes );
     """,
 )
 
 _REMPLIR = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        splats::remplir( splats, SI( rangs.rang( batch_index ) ), SI( ecran.largeur ),
-                         SI( ecran.hauteur ), SI( ecran.cote ), offsets, curseurs, ids_plat );
+        splats::remplir( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
+                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), inputs.offsets, outputs.curseurs, outputs.ids_plat );
     """,
 )
 
 _RENDRE_CSR = FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( rangs.rang( batch_index ) );
-        const SI largeur = SI( ecran.largeur ), cote = SI( ecran.cote );
+        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
 
-        splats::rendre_pixel_csr( splats, ids_plat, SI( offsets( t ) ), SI( comptes( t ) ),
-                                  px, py, image( y = py, x = px ) );
+        splats::rendre_pixel_csr( inputs.splats, inputs.ids_plat, SI( inputs.offsets( t ) ), SI( inputs.comptes( t ) ),
+                                  px, py, outputs.image( y = py, x = px ) );
     """,
 )
 
@@ -266,9 +264,8 @@ def construire_index_csr( splats, ecran ):
 
     # 1. compter
     comptes = IntTensor[ tuile ]()
-    driver.call( _COMPTER, name = "splats_compter",
-                 splats = splats, ecran = ecran, comptes = comptes, rangs = rangs,
-                 output_attributes = [ "comptes" ] )
+    loom.ffi_call( "splats_compter", _COMPTER,
+                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), rangs = rangs )
 
     # 2. la somme prefixe, sur l'hote, et le TOTAL -- qui dimensionne la liste
     c = numpy.asarray( comptes.tensor ).reshape( -1 )
@@ -279,10 +276,9 @@ def construire_index_csr( splats, ecran ):
     fente = Axis( ShapeVar( max( total, 1 ) ), name = "fente_csr" )
     ids_plat = IntTensor[ fente ]()
     curseurs = IntTensor[ tuile ]()
-    driver.call( _REMPLIR, name = "splats_remplir",
-                 splats = splats, ecran = ecran, offsets = offsets, curseurs = curseurs,
-                 ids_plat = ids_plat, rangs = rangs,
-                 output_attributes = [ "ids_plat", "curseurs" ] )
+    loom.ffi_call( "splats_remplir", _REMPLIR,
+                   splats = splats, ecran = ecran, offsets = offsets,
+                   curseurs = loom.out( curseurs ), ids_plat = loom.out( ids_plat ), rangs = rangs )
     return offsets, comptes, ids_plat, total
 
 
@@ -291,12 +287,11 @@ def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
     largeur, hauteur = int( ecran.largeur.raw ), int( ecran.hauteur.raw )
     image = RealTensor[ Axis( ShapeVar( hauteur ), name = "y" ),
                         Axis( ShapeVar( largeur ), name = "x" ), splats.rvb ]()
-    driver.call(
+    loom.ffi_call(
+        "splats_rendre_csr",
         _RENDRE_CSR,
-        name = "splats_rendre_csr",
         splats = splats, ecran = ecran, offsets = offsets, comptes = comptes,
-        ids_plat = ids_plat, image = image,
+        ids_plat = ids_plat, image = loom.out( image ),
         rangs = _rangs( largeur * hauteur, "pixel" ),
-        output_attributes = [ "image" ],
     )
     return image.raw

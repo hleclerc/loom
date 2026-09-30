@@ -187,8 +187,10 @@ namespace detail::CudaQueueLaunch {
     }
 
     template<class Func,class Item,class... Args>
-    __device__ void call( Func &func, Item item, int thread_index, int nb_threads, Args &...args ) {
-        if constexpr ( requires { func( item, thread_index, nb_threads, args... ); } )
+    __device__ void call( Func &func, Item item, SI flat_index, int thread_index, int nb_threads, Args &...args ) {
+        if constexpr ( requires { func( item, flat_index, thread_index, nb_threads, args... ); } )
+            func( item, flat_index, thread_index, nb_threads, args... );
+        else if constexpr ( requires { func( item, thread_index, nb_threads, args... ); } )
             func( item, thread_index, nb_threads, args... );
         else
             func( item, args... );
@@ -203,10 +205,20 @@ namespace detail::CudaQueueLaunch {
             auto reducers = std::make_tuple( reducer_for( tgts )... );
             std::apply( [&]( auto &...reds ) {
                 for ( int index = t; index < nb_items; index += nb_threads )
-                    call( func, item_list[ index ], t, nb_threads, reds..., args... );
+                    call( func, item_list[ index ], SI( index ), t, nb_threads, reds..., args... );
                 ( reds.flush(), ... );
             }, reducers );
         }, targets );
+    }
+
+    /// le pendant coopératif de `call` : le rang plat s'y ajoute de la même façon, et un foncteur
+    /// qui ne le prend pas continue de marcher.
+    template<class Func,class Item,class... Rest>
+    __device__ void call_grouped( Func &func, Item item, SI flat_index, Rest &&...rest ) {
+        if constexpr ( requires { func( item, flat_index, rest... ); } )
+            func( item, flat_index, rest... );
+        else
+            func( item, rest... );
     }
 
     template<class Func,class ItemList,class... Args>
@@ -218,7 +230,7 @@ namespace detail::CudaQueueLaunch {
         CudaGroup    group{ local_size };
         CudaSubGroup sub_group{ lane % 32, min( 32, local_size - ( lane / 32 ) * 32 ), lane / 32 };
         for ( int index = g; index < nb_items; index += nb_groups )
-            func( item_list[ index ], g, lane, local_size, group, local_scratch, sub_group, args... );
+            call_grouped( func, item_list[ index ], SI( index ), g, lane, local_size, group, local_scratch, sub_group, args... );
     }
 }
 

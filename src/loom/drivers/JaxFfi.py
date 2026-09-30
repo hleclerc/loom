@@ -835,10 +835,16 @@ def _call_backward( code, ca, device, prefix, inputs, outputs,
     # from the forward's outputs is a residual or unbound, neither of which this call allocates.
     bwd_output_exceptions = [ e for e in ca.output_exceptions
                                 if any( e == p or e.startswith( p + "." ) for p in ca.scratch_paths ) ]
+    # LE DOMAINE DECLARE PAR L'ALLER VAUT POUR LE RETOUR. Quand le batch venait d'un agregat, il
+    # traversait de lui-meme : l'agregat est un RESIDU, donc le retour le recevait avec ses axes.
+    # Un domaine declare par l'appel ( `nb_items` ) n'est porte par aucun objet -- c'est tout son
+    # interet -- donc il ne traverse que si on le passe. Sans ca l'adjoint tournait sur UN item et
+    # rendait une derivee fausse, sans rien signaler.
     bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
                                output_attribute_exceptions = bwd_output_exceptions,
                                input_exceptions = bwd_input_exceptions,
-                               groups = bwd_groups, call_name = prefix + "bwd" )
+                               groups = bwd_groups, call_name = prefix + "bwd",
+                               nb_items = next( iter( ca.declared_batch_size.values() ), None ) )
     bwd_outputs, bwd_results = _run( bwd_kernel, bwd_ca, device, prefix + "bwd_" )
 
     result_of = { id( o.inst ): r for o, r in zip( bwd_outputs, bwd_results ) if hasattr( o, "inst" ) }

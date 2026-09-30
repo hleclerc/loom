@@ -53,7 +53,7 @@ class CallArgsAnalysis:
     tensors: list   # the buffers to bind, in FFI order
     args: dict
 
-    def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = (), groups = None, call_name = "" ) -> None:
+    def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = (), groups = None, call_name = "", nb_items = None ) -> None:
         self.device = device
         # SCRATCH outputs: allocated + written like any output in the FORWARD, but the BACKWARD does
         # NOT receive them as residuals (their forward values are transient per-thread garbage). It
@@ -119,6 +119,20 @@ class CallArgsAnalysis:
         # porterait ce nom se confondrait avec eux dans le C++ engendré.
         self._canonical_axis = { real: f"batch_{ index }" for index, real in enumerate( self.batch_axes ) }
         self.batch_axes = list( self._canonical_axis.values() )
+
+        # LE DOMAINE DECLARE PAR L'APPEL : `nb_items = n` dit « lance n items », sans qu'aucun
+        # OBJET n'ait a porter l'axe. C'est ce qui enleve l'agregat-pretexte que tout noyau
+        # parallele se fabriquait ( `examples/splats::Rangs` ) : il ne servait plus, depuis que
+        # `flat_index` traverse, qu'a faire exister le batch -- un tenseur alloue et ecrit pour
+        # dire un nombre.
+        #
+        # L'etendue est ici HOTE et connue, donc elle ne se lit sur aucun tampon : c'est
+        # `declared_batch_size` que `batch_axis_size` consulte d'abord.
+        self.declared_batch_size = {}
+        if nb_items is not None:
+            nom = f"batch_{ len( self.batch_axes ) }"
+            self.batch_axes.append( nom )
+            self.declared_batch_size[ nom ] = int( nb_items )
 
         # LE NOM C++ ET LE CHEMIN SE SÉPARENT ICI. Sans groupes ils coïncident : un argument est
         # nommé par son kwarg, et c'est ce même nom que les capacités et les sorties désignent.
@@ -241,7 +255,10 @@ class CallArgsAnalysis:
         """Every axis name spelled in the generated `.cpp`, deduped in first-seen order: each node
         contributes what its TYPE references (a tensor's dimensions, a count's batch axes), so
         every one gets a `DEFINE_AXIS`. Derived by folding the tree -- not accumulated during it."""
-        seen = []
+        # un axe DECLARE PAR L'APPEL ( `nb_items` ) n'est porte par aucun noeud -- c'est tout son
+        # interet -- donc il n'arriverait jamais par le pli ci-dessous. Il lui faut pourtant son
+        # `DEFINE_AXIS` : le type `_batch_0` est celui du multi-indice que le corps parcourt.
+        seen = list( self.declared_batch_size )
         for node in self.nodes():
             for name in node.cpp_axis_names():
                 if name not in seen:
@@ -304,6 +321,8 @@ class CallArgsAnalysis:
         -- 32 slots for 20 cells. A batch extent is a COUNT, and a padded capacity is precisely
         what a count is not. The logical shapes all agree on the count (they are what this call
         allocated from), so any carrier answers the same thing."""
+        if axis_name in self.declared_batch_size:
+            return self.declared_batch_size[ axis_name ]
         for node in self.tensors:
             names = getattr( node, "axis_names", None ) or []
             if axis_name in names and len( names ) == len( node.shape ):

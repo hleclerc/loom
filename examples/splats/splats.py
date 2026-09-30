@@ -82,16 +82,6 @@ class Ecran( loom.Aggregate ):
     cote    : loom.CtShapeVar
 
 
-class Rangs( loom.Aggregate ):
-    """« Qui suis-je ? » : le rang plat de l'item.
-
-    Le meme agregat-pretexte que dans `examples/diffusion`, et pour la meme raison -- l'echafaudage
-    injecte `batch_index`, `thread_index` et `nb_threads`, mais pas le rang plat, et le batch d'un
-    appel ne vient que des agregats. Deuxieme exemple, meme friction : elle merite que
-    l'echafaudage l'injecte."""
-    rang : loom.IntTensor
-
-
 def _nb_tuiles( largeur, hauteur, cote = COTE ):
     return ( ( largeur + cote - 1 ) // cote ) * ( ( hauteur + cote - 1 ) // cote )
 
@@ -99,7 +89,7 @@ def _nb_tuiles( largeur, hauteur, cote = COTE ):
 _INSCRIRE = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI i = SI( inputs.rangs.rang( batch_index ) );
+        const SI i = flat_index;
         splats::inscrire( inputs.splats, i, SI( inputs.ecran.largeur ), SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ),
                           outputs.index.nb_par_tuile, outputs.index.ids );
     """,
@@ -108,7 +98,7 @@ _INSCRIRE = loom.FfiCode.per_item(
 _RENDRE = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI p = flat_index;
         const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
@@ -121,7 +111,7 @@ _RENDRE = loom.FfiCode.per_item(
 _RENDRE_BWD = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI p = flat_index;
         const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
@@ -131,14 +121,6 @@ _RENDRE_BWD = loom.FfiCode.per_item(
                                       grad_of_outputs.image( y = py, x = px ), grad_of_inputs.splats );
     """,
 )
-
-
-def _rangs( nb, prefixe ):
-    """Un agregat batche sur `nb` items, portant leur rang plat."""
-    axe = loom.new_batch_axis( nb, prefix = prefixe )
-    rangs = Rangs( batch_axes = [ axe ] )
-    rangs.rang = loom.IntTensor[ axe ].iota()
-    return rangs
 
 
 def construire_index( splats, ecran, capacite ):
@@ -158,7 +140,7 @@ def construire_index( splats, ecran, capacite ):
         splats = splats,
         ecran = ecran,
         index = loom.out( index, capacities = { "nb_par_tuile": capacite } ),
-        rangs = _rangs( int( splats.nb_splats.value ), "splat" ),
+        nb_items = int( splats.nb_splats.value ),
     )
     return index
 
@@ -175,7 +157,7 @@ def rendre( splats, index, ecran ):
         index = index,
         ecran = ecran,
         image = loom.out( image ),
-        rangs = _rangs( largeur * hauteur, "pixel" ),
+        nb_items = largeur * hauteur,
     )
     return image.tensor
 
@@ -216,7 +198,7 @@ def _sans_gradient( splats ):
 _COMPTER = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        splats::compter( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
+        splats::compter( inputs.splats, flat_index, SI( inputs.ecran.largeur ),
                          SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), outputs.comptes );
     """,
 )
@@ -224,7 +206,7 @@ _COMPTER = loom.FfiCode.per_item(
 _REMPLIR = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        splats::remplir( inputs.splats, SI( inputs.rangs.rang( batch_index ) ), SI( inputs.ecran.largeur ),
+        splats::remplir( inputs.splats, flat_index, SI( inputs.ecran.largeur ),
                          SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), inputs.offsets, outputs.curseurs, outputs.ids_plat );
     """,
 )
@@ -232,7 +214,7 @@ _REMPLIR = loom.FfiCode.per_item(
 _RENDRE_CSR = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
-        const SI p = SI( inputs.rangs.rang( batch_index ) );
+        const SI p = flat_index;
         const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
@@ -256,12 +238,11 @@ def construire_index_csr( splats, ecran ):
     """
     nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ), int( ecran.cote.value ) )
     tuile = loom.Axis( loom.ShapeVar( nb_tuiles ), name = "tuile_csr" )
-    rangs = _rangs( int( splats.nb_splats.value ), "splat" )
 
     # 1. compter
     comptes = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_compter", _COMPTER,
-                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), rangs = rangs )
+                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), nb_items = int( splats.nb_splats.value ) )
 
     # 2. les offsets : la somme prefixe EXCLUSIVE, sur le device. Le resultat porte les MEMES
     #    objets d'axe que `comptes`, donc il est sur la meme grille sans qu'on l'ait dit.
@@ -275,7 +256,7 @@ def construire_index_csr( splats, ecran ):
     curseurs = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_remplir", _REMPLIR,
                    splats = splats, ecran = ecran, offsets = offsets,
-                   curseurs = loom.out( curseurs ), ids_plat = loom.out( ids_plat ), rangs = rangs )
+                   curseurs = loom.out( curseurs ), ids_plat = loom.out( ids_plat ), nb_items = int( splats.nb_splats.value ) )
     return offsets, comptes, ids_plat, total
 
 
@@ -289,6 +270,6 @@ def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
         _RENDRE_CSR,
         splats = splats, ecran = ecran, offsets = offsets, comptes = comptes,
         ids_plat = ids_plat, image = loom.out( image ),
-        rangs = _rangs( largeur * hauteur, "pixel" ),
+        nb_items = largeur * hauteur,
     )
     return image.tensor

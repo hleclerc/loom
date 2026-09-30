@@ -91,12 +91,29 @@ constexpr auto transfer_cost_per_byte( const CpuQueue &, CpuHostMemorySpace ) { 
 
 namespace detail::CpuQueueLaunch {
     /// appel du corps pour un item, avec ou sans les infos de fil selon ce que `func` accepte
-    /// (les corps générés par `FfiCodeParallel` les prennent ; `TensorView::fill_with` non).
-    void call( auto &&func, auto &&item, int thread_index, int nb_threads, auto &...reducers_and_args ) {
-        if constexpr ( requires { func( item, thread_index, nb_threads, reducers_and_args... ); } )
+    /// (les corps générés par `FfiCode.per_item` les prennent ; `TensorView::fill_with` non).
+    ///
+    /// `flat_index` EST LE RANG PLAT DE L'ITEM dans le domaine parcouru -- « qui suis-je ? ». Il
+    /// était déjà là, dans la variable de boucle ; il ne traversait simplement pas. Faute de
+    /// quoi chaque noyau qui en avait besoin se fabriquait un agrégat-prétexte portant un
+    /// `iota` ( `examples/splats::Rangs`, et le même dans `examples/diffusion` avant lui ) --
+    /// un tenseur entier de plus, écrit et lu, pour un nombre que la boucle connaissait.
+    void call( auto &&func, auto &&item, SI flat_index, int thread_index, int nb_threads, auto &...reducers_and_args ) {
+        if constexpr ( requires { func( item, flat_index, thread_index, nb_threads, reducers_and_args... ); } )
+            func( item, flat_index, thread_index, nb_threads, reducers_and_args... );
+        else if constexpr ( requires { func( item, thread_index, nb_threads, reducers_and_args... ); } )
             func( item, thread_index, nb_threads, reducers_and_args... );
         else
             func( item, reducers_and_args... );
+    }
+
+    /// le pendant coopératif de `call` : le rang plat s'y ajoute de la même façon, et un foncteur
+    /// qui ne le prend pas continue de marcher.
+    HD_INLINE void call_grouped( auto &&func, auto &&item, SI flat_index, auto &&...rest ) {
+        if constexpr ( requires { func( item, flat_index, rest... ); } )
+            func( item, flat_index, rest... );
+        else
+            func( item, rest... );
     }
 
     /// une ligne de réduction par fil virtuel, initialisée à l'identité
@@ -121,7 +138,7 @@ auto submit_kernel( const CpuQueue &queue, const auto &deps, auto &&func, auto &
                 const int b = int( ( long long ) t * nb_items / nb_threads );
                 const int e = int( ( long long ) ( t + 1 ) * nb_items / nb_threads );
                 for ( int index = b; index < e; ++index )
-                    detail::CpuQueueLaunch::call( func, item_list[ index ], t, nb_threads, vecs[ t ]..., args... );
+                    detail::CpuQueueLaunch::call( func, item_list[ index ], SI( index ), t, nb_threads, vecs[ t ]..., args... );
             } );
             // combinaison des lignes dans la cible hôte
             ( [&]( auto &target, auto &vec ) {
@@ -155,7 +172,7 @@ auto submit_kernel_grouped( const CpuQueue &queue, const auto &deps, auto &&func
             CpuSubGroup sub_group{ 0, 1 };
             std::int32_t *local_scratch = scratch.data() + std::size_t( g ) * scratch_stride;
             for ( int index = g; index < nb_items; index += nb_groups )
-                func( item_list[ index ], g, 0, 1, group, local_scratch, sub_group, args... );
+                detail::CpuQueueLaunch::call_grouped( func, item_list[ index ], SI( index ), g, 0, 1, group, local_scratch, sub_group, args... );
         } );
         return QueueEvent{};
     }
@@ -173,7 +190,7 @@ auto submit_kernel_grouped( const CpuQueue &queue, const auto &deps, auto &&func
                 CpuSubGroup sub_group{ lane, 1 };
                 std::int32_t *local_scratch = scratch.data() + std::size_t( g ) * scratch_stride;
                 for ( int index = g; index < nb_items; index += nb_groups )
-                    func( item_list[ index ], g, lane, group_size, group, local_scratch, sub_group, args... );
+                    detail::CpuQueueLaunch::call_grouped( func, item_list[ index ], SI( index ), g, lane, group_size, group, local_scratch, sub_group, args... );
             } );
         }
     }

@@ -338,7 +338,7 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, name, *kernels, batch_alignment = None, has_dynamic_capacity = True, **args ):
+    def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, **args ):
         """Lance un ou deux `FfiCode` sur les valeurs passées en kwargs.
 
         C'EST `loom.ffi_call` : il n'y a pas d'autre forme d'appel. Le vocabulaire des arguments
@@ -361,8 +361,13 @@ class JaxDriver:
         Les entrées et les sorties sont DISJOINTES, comme dans XLA : ce qui ressemble à une mise à
         jour en place est un rebinding côté Python, que `loom.mutable` écrit pour nous.
 
-        Deux noms restent réservés ici, et ce sont des réglages de l'appel, pas des données :
-        `batch_alignment` (l'alignement de la dimension de lot) et `has_dynamic_capacity`.
+        `nb_items = n` dit COMBIEN D'ITEMS lancer, sans qu'aucun objet n'ait à porter l'axe : le
+        corps reçoit son rang dans `flat_index` (voir `FfiCode.per_item`). Sans lui, un appel
+        lance un seul item -- ou autant que les axes de batch de ses arguments en font.
+
+        Trois noms restent réservés ici, et ce sont des réglages de l'appel, pas des données :
+        `nb_items`, `batch_alignment` (l'alignement de la dimension de lot) et
+        `has_dynamic_capacity`.
 
         Une capacité peut se révéler trop petite -- seul le kernel sait combien d'items il produit.
         Il le dit (il enregistre le compte qui n'a pas tenu, voir
@@ -385,7 +390,7 @@ class JaxDriver:
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
-            ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name )
+            ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
             ffi_call( code, ca, self.device, prefix )
 
             overflows = ca.capacity_overflows()

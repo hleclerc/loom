@@ -94,7 +94,8 @@ class FfiCode( AbstractFfiCode ):
     Quand le parallélisme du noyau EST celui de l'appel -- un item par multi-indice de batch, ce
     qu'un `vmap` fabrique -- loom peut écrire le foncteur ET son lancement, et le corps n'est plus
     que ce qui se passe pour un item. Trois noms sont alors réservés : `batch_index`,
-    `thread_index`, `nb_threads` (ou, en coopératif, `group_index`, `local_index`, `local_size`,
+    `flat_index`, `thread_index`, `nb_threads` (ou, en coopératif, `flat_index`, `group_index`,
+    `local_index`, `local_size`,
     `group`, `local_scratch`, `sub_group`). La géométrie se déclare en corps de méthode du foncteur
     engendré : `max_nb_threads`, `group_size`, `local_mem_elems` -- `group_size` exige
     `local_mem_elems`, sans quoi le chemin coopératif serait silencieusement ignoré.
@@ -191,14 +192,20 @@ class FfiCode( AbstractFfiCode ):
         """Les paramètres de l'`operator()` : les réservés, puis un par argument de l'appel --
         chacun avec son propre paramètre de template, puisque leur type côté kernel est décidé en
         C++."""
+        # `flat_index` : LE RANG PLAT DE L'ITEM dans le domaine parcouru -- « qui suis-je ? ». Il
+        # vient de la variable de boucle du lancement ( voir `CpuQueue::call` ), donc il ne coûte
+        # rien ; avant, un noyau qui en avait besoin se fabriquait un agrégat-prétexte portant un
+        # `iota` ( `examples/splats::Rangs` ), soit un tenseur entier écrit puis lu pour un nombre
+        # que la boucle connaissait déjà.
         if self.cooperative:
-            reserved = [ ( "BatchIndex", "batch_index" ), ( "int", "group_index" ), ( "int", "local_index" ),
-                         ( "int", "local_size" ), ( "Group", "group" ), ( "LocalScratch", "local_scratch" ),
-                         ( "SubGroup", "sub_group" ) ]
+            reserved = [ ( "BatchIndex", "batch_index" ), ( "SI", "flat_index" ), ( "int", "group_index" ),
+                         ( "int", "local_index" ), ( "int", "local_size" ), ( "Group", "group" ),
+                         ( "LocalScratch", "local_scratch" ), ( "SubGroup", "sub_group" ) ]
         else:
-            reserved = [ ( "BatchIndex", "batch_index" ), ( "int", "thread_index" ), ( "int", "nb_threads" ) ]
+            reserved = [ ( "BatchIndex", "batch_index" ), ( "SI", "flat_index" ),
+                         ( "int", "thread_index" ), ( "int", "nb_threads" ) ]
         params = reserved + [ ( f"T_{ n }", n ) for n in names ]
-        tparams = [ t for t, _ in params if t != "int" ]
+        tparams = [ t for t, _ in params if t not in ( "int", "SI" ) ]
         return tparams, params
 
     def _hook_methods( self, names ):

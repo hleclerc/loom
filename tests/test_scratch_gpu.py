@@ -124,7 +124,7 @@ if test( "sous_jit" ):
         n = 4096
 
         def calcul( x ):
-            return _calcul( x ).tensor
+            return _calcul( x ).value
 
         compile = driver.jit( calcul )
 

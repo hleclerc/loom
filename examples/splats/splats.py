@@ -159,7 +159,7 @@ def rendre( splats, index, ecran ):
         image = loom.out( image ),
         nb_items = largeur * hauteur,
     )
-    return image.tensor
+    return image.value
 
 
 def rendu( splats, ecran, capacite ):
@@ -272,4 +272,4 @@ def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
         ids_plat = ids_plat, image = loom.out( image ),
         nb_items = largeur * hauteur,
     )
-    return image.tensor
+    return image.value

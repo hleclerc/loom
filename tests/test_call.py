@@ -602,7 +602,7 @@ if test( "batch_alignment_forced" ):
     # prescribed batch size, not the capacity), and the result reads back LOGICALLY identical.
     #
     # This exercises the non-identity path completely: a padded `jax_out_spec`, the 4-arg
-    # `tensor_view` (logical extents + physical BYTE strides), and `Tensor.tensor`'s gather.
+    # `tensor_view` (logical extents + physical BYTE strides), and `Tensor.value`'s gather.
     from loom.tensor import new_batch_axis
 
     class Cell7( Aggregate ):
@@ -643,8 +643,8 @@ if test( "batch_alignment_forced" ):
     # ... yet the LOGICAL value read back is byte-for-byte the one the unpadded run produced:
     # each batch item wrote its own `scale` row into vertex 0.
     want = [ [ [ 1, 2 ] ], [ [ 3, 4 ] ], [ [ 5, 6 ] ] ]
-    assert plain.tensor.tolist()  == want
-    assert padded.tensor.tolist() == want
+    assert plain.value.tolist()  == want
+    assert padded.value.tolist() == want
 
 
 if test( "physical_axis_reorder" ):
@@ -674,7 +674,7 @@ if test( "physical_axis_reorder" ):
     m = RealTensor[ row, col ]()
     m.storage = Storage.of( driver.array( [ [ 1, 3 ], [ 2, 4 ] ] ),   # the physical (col-major) buffer
                             ReferenceShape.from_dense_shape( [ 2, 2 ] ), L )
-    assert numpy.asarray( m.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
+    assert numpy.asarray( m.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
 
     out = RealTensor[ row, col ]()
     loom.ffi_call(
@@ -685,7 +685,7 @@ if test( "physical_axis_reorder" ):
     )
 
     # the kernel read the permuted input by name and copied it: the logical value is preserved.
-    assert numpy.asarray( out.tensor ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
+    assert numpy.asarray( out.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
 
 
 if test( "fill_crosses_as_a_storageless_FillTensor" ):
@@ -724,7 +724,7 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
         out = loom.out( out ),
     )
 
-    assert numpy.asarray( out.tensor ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
+    assert numpy.asarray( out.value ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
 
 
 if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
@@ -765,7 +765,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     )
 
     assert cnt.nb_out.value == 3
-    assert numpy.asarray( cnt.out.tensor ).tolist() == [ 0.0, 10.0, 20.0 ]
+    assert numpy.asarray( cnt.out.value ).tolist() == [ 0.0, 10.0, 20.0 ]
 
 
 if test( "une_sortie_nue_est_semee" ):
@@ -844,11 +844,11 @@ if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
     assert apres[ "kernels" ] == avant[ "kernels" ], \
         f"le deuxieme appel a fabrique un noyau de plus ({ avant[ 'kernels' ] } -> { apres[ 'kernels' ] })"
     assert apres[ "reuses" ] > avant[ "reuses" ], "le deuxieme appel n'a pas resservi la cible du premier"
-    # `.tensor` ET PAS `.raw` : `raw` est le tampon, dimensionne a la CAPACITE. L'alignement de
+    # `.value` ET PAS `.raw` : `raw` est le tampon, dimensionne a la CAPACITE. L'alignement de
     # batch vaut 128 octets sur CUDA, donc un lot de 3 occupe SEIZE fentes en fp64 -- et cette
     # assertion comparait les 16 a une liste de 3. C'etait le dernier echec de l'arbre, et
     # c'etait ce piege-la.
-    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.tensor ] == [ 1.0, 1.0, 1.0 ]
+    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.value ] == [ 1.0, 1.0, 1.0 ]
 
 
 if test( "une_valeur_brute_entre_telle_quelle" ):

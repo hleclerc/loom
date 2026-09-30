@@ -332,8 +332,8 @@ if test( "tensor_dot" ):
 
 if test( "tensor_physical_layout_view" ):
     # a Tensor whose buffer is laid out NON-contiguously (batch axis flattened + padded) still reads
-    # back its LOGICAL values: `.tensor` gathers them through the layout (the physical<->logical
-    # boundary). Everything else reads `.tensor`, so ops/results stay logical whatever the storage.
+    # back its LOGICAL values: `.value` gathers them through the layout (the physical<->logical
+    # boundary). Everything else reads `.value`, so ops/results stay logical whatever the storage.
     from loom.tensor import PhysicalLayout
     from loom.tensor import ReferenceShape, Storage
     from loom import driver
@@ -352,9 +352,9 @@ if test( "tensor_physical_layout_view" ):
 
     assert list( t.shape ) == [ 2, 3 ]
     assert t.capacity == ( 2, 3 )                     # per LOGICAL dim: the padding lives in the flat phys dim
-    assert numpy.asarray( t.tensor ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]   # padding + flatten peeled off
+    assert numpy.asarray( t.value ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]   # padding + flatten peeled off
 
-    # an elementwise op reads `.tensor`, so it works transparently on the laid-out tensor
+    # an elementwise op reads `.value`, so it works transparently on the laid-out tensor
     assert numpy.asarray( t + t ).tolist() == [ [ 2, 4, 6 ], [ 8, 10, 12 ] ]
 
 
@@ -389,7 +389,7 @@ if test( "tensor_symbolic_zero" ):
     t.set_raw( z )
     assert t.is_symbolic_zero
     assert t.raw is None                          # nothing to bind -> a ZeroTensor, unbound
-    assert t.tensor is None
+    assert t.value is None
     assert t.shape == [ 2, 3 ]                    # shape still readable, from the zero object
     assert "symbolic_zero" in repr( t )
 
@@ -651,13 +651,13 @@ if test( "storage_is_a_kind_not_a_flag" ):
     n = ShapeVar()
     t = RealTensor[ Axis( n ) ]()
     assert isinstance( t.storage, Unbound )          # declared, holds nothing -> a NoneTensor
-    assert not t.is_defined and t.raw is None and t.tensor is None
+    assert not t.is_defined and t.raw is None and t.value is None
     assert t.allocated_sizes is None
 
     t.set( [ 1.0, 2.0, 3.0 ] )
     assert isinstance( t.storage, Buffer )
     assert t.is_defined and t.capacity == ( 3, )
-    assert numpy.asarray( t.tensor ).tolist() == [ 1.0, 2.0, 3.0 ]
+    assert numpy.asarray( t.value ).tolist() == [ 1.0, 2.0, 3.0 ]
 
     # a symbolic zero HOLDS a value (it reads as 0) yet backs no buffer -- which is exactly why it
     # binds nothing across the FFI. One variant, no flag, no special case at the call sites.
@@ -673,7 +673,7 @@ if test( "storage_is_a_kind_not_a_flag" ):
     assert isinstance( f.storage, Fill ) and f.is_fill
     assert f.capacity == ( 4, )                       # its logical extents ARE its capacity
     assert f.allocated_sizes is None                  # ... and back no capacity a ShapeVar inverts
-    assert numpy.asarray( f.tensor ).tolist() == [ 2.5 ] * 4
+    assert numpy.asarray( f.value ).tolist() == [ 2.5 ] * 4
 
     # binding a value to another tensor carries its KIND along, and retypes what backs it
     holder = RealTensor[ Axis( ShapeVar( 4 ) ) ]()
@@ -1037,33 +1037,33 @@ if test( "fabriques" ):
 
     # la CLASSE est la declaration de type : un iota d'entiers est entier, point.
     rangs = IntTensor[ x ].iota()
-    assert numpy.asarray( rangs.tensor ).tolist() == [ 0, 1, 2, 3 ]
+    assert numpy.asarray( rangs.value ).tolist() == [ 0, 1, 2, 3 ]
     assert not rangs.dtype.floating_point
 
     # sans axe et en rang > 1 : le rang PLAT, en ordre C -- « qui suis-je ? » d'un work-item
     plat = IntTensor[ y, x ].iota()
-    assert numpy.asarray( plat.tensor ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
+    assert numpy.asarray( plat.value ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
 
     # avec un axe : la COORDONNEE le long de cet axe, diffusee sur les autres
     colonnes = IntTensor[ y, x ].iota( x )
-    assert numpy.asarray( colonnes.tensor ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
+    assert numpy.asarray( colonnes.value ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
     lignes = IntTensor[ y, x ].iota( y )
-    assert numpy.asarray( lignes.tensor ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
+    assert numpy.asarray( lignes.value ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
 
     # zeros / ones / full, a la forme que les axes donnent
-    assert numpy.asarray( RealTensor[ y, x ].zeros().tensor ).tolist() == [ [ 0.0 ] * 4 ] * 3
-    assert numpy.asarray( RealTensor[ y, x ].ones().tensor ).tolist() == [ [ 1.0 ] * 4 ] * 3
-    assert numpy.asarray( RealTensor[ x ].full( 2.5 ).tensor ).tolist() == [ 2.5 ] * 4
+    assert numpy.asarray( RealTensor[ y, x ].zeros().value ).tolist() == [ [ 0.0 ] * 4 ] * 3
+    assert numpy.asarray( RealTensor[ y, x ].ones().value ).tolist() == [ [ 1.0 ] * 4 ] * 3
+    assert numpy.asarray( RealTensor[ x ].full( 2.5 ).value ).tolist() == [ 2.5 ] * 4
 
     # linspace : bornes INCLUSES, le long de l'axe nomme
-    assert numpy.asarray( RealTensor[ x ].linspace( 0, 1 ).tensor ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
-    grille = numpy.asarray( RealTensor[ y, x ].linspace( 0, 1, x ).tensor ).tolist()
+    assert numpy.asarray( RealTensor[ x ].linspace( 0, 1 ).value ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
+    grille = numpy.asarray( RealTensor[ y, x ].linspace( 0, 1, x ).value ).tolist()
     assert grille == [ [ 0.0, 1 / 3, 2 / 3, 1.0 ] ] * 3
 
     # un tirage reproductible, et qui reste dans [ 0, 1 [
     a = RealTensor[ y, x ].random( seed = 7 )
     b = RealTensor[ y, x ].random( seed = 7 )
-    va, vb = numpy.asarray( a.tensor ), numpy.asarray( b.tensor )
+    va, vb = numpy.asarray( a.value ), numpy.asarray( b.value )
     assert va.shape == ( 3, 4 ) and ( va == vb ).all()
     assert ( 0 <= va ).all() and ( va < 1 ).all()
 

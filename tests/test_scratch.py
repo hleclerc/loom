@@ -134,7 +134,7 @@ if test( "sous_jit" ):
             valeurs = v,
             somme = loom.out( somme ),
         )
-        return somme.tensor[ 0 ]
+        return somme.value[ 0 ]
 
     compile = driver.jit( perte )
     rng = numpy.random.default_rng( 0 )

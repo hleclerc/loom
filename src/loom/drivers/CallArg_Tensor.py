@@ -308,7 +308,7 @@ class CallArg_Tensor( CallArg ):
         # Ce qui reste garanti sans rien semer : un compte est toujours à zéro (`CallArg_ShapeVar`,
         # inconditionnel) et il est clampé à la capacité, donc une lecture qui respecte le compte ne
         # touche que des emplacements écrits. Le rembourrage au-delà -- la queue d'une dimension de
-        # batch alignée, les fentes après le compte -- n'est lu par personne : `Tensor.tensor` le
+        # batch alignée, les fentes après le compte -- n'est lu par personne : `Tensor.value` le
         # découpe, et un appel chaîné relie le tampon à sa taille LOGIQUE.
         #
         #   ( défaut )  ce qui en a besoin : les comptes et les accumulations

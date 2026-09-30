@@ -44,7 +44,7 @@ class Tensor( Attribute ):
     * axes    : list[ AbstractAxis ] -- the LOGICAL contract
     * dtype   : Dtype -- the ELEMENT contract (its kind is the class, its size a driver policy)
     * storage : how the value is actually BACKED (`storage.py`) -- nothing, a real buffer, a
-        symbolic zero, a fill. It answers every physical question (`raw`, `tensor`, `capacity`,
+        symbolic zero, a fill. It answers every physical question (`raw`, `value`, `capacity`,
         `buffer_layout`, `allocated_sizes`), so this class holds no kind flags and no separate
         `_raw` / `_layout` fields to keep in agreement.
     * device  : Device
@@ -207,7 +207,7 @@ class Tensor( Attribute ):
         (`Tensor[ axis ].full( v )`) -- no shape to pass: `shape` already reads it off
         the axes, the same way it would for any other tensor built on them."""
         res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
-        fill = value.tensor if isinstance( value, Tensor ) else value
+        fill = value.value if isinstance( value, Tensor ) else value
         shape = res.shape
         # NB: the SYMBOLIC-fill path (a storageless C++ `FillTensor`, i.e. a `Fill` storage over a
         # scalar) exists (see FillTensor.h and `storage.Fill`) but is NOT yet wired in: it needs the
@@ -629,36 +629,44 @@ class Tensor( Attribute ):
         return self.storage.buffer
 
     @property
-    def tensor( self ):
-        """The dense VIEW of `raw`: its logical region, with the capacity padding cropped off.
+    def value( self ):
+        """LA VALEUR : la région LOGIQUE, rembourrage de capacité retiré -- un tableau du backend.
 
-        `raw` is a homogeneous buffer sized at CAPACITY -- padding included -- because that is what
-        a kernel writes into; `tensor` slices it back to the logical `shape`, which is what one
-        usually wants to read (`c.vertex_positions.tensor` instead of `c.vertex_positions.raw[ :n ]`).
+        `raw` est le TAMPON, dimensionné à la CAPACITÉ ( rembourrage compris ), parce que c'est ce
+        dans quoi un noyau écrit : l'alignement de batch vaut 128 octets sur CUDA, donc un lot de 3
+        occupe seize fentes en fp64. `value` le recadre sur la `shape` logique, et c'est ce qu'on
+        veut lire ( `c.vertex_positions.value`, et non `c.vertex_positions.raw[ :n ]` ).
 
-        Meaningful for a DENSE (non-ragged) tensor: a ragged one has no single box to extract, so
-        this returns its bounding box (inner padding kept). Needs a statically known `shape`, so it
-        holds eagerly -- a kernel-written count is a device value under a trace, where Python cannot
-        slice by it (`shape` raises there). A symbolic zero has no buffer to view -> `None`.
+        `value` ET PAS `tensor` : « le tenseur d'un tenseur » ne disait rien, et ne distinguait pas
+        les deux. Ce que la paire oppose est le TAMPON et la VALEUR -- et `value` est déjà le mot de
+        la maison, `c.nb_dims.value` pour un `ShapeVar`, `ecran.largeur.value` dans sdot. ( Pas
+        `driver_tensor` : `raw` est un tableau du driver tout autant, donc ce nom-là ne porterait
+        pas la distinction qui compte. )
 
-        How the crop is actually done depends on how the value is BACKED (a plain slice, a gather
-        through a non-contiguous layout, ...), so it is the storage that answers -- this property is
-        just the name everything else reads."""
+        Sensé pour un tenseur DENSE : un ragged n'a pas de boîte unique à extraire, donc ceci rend
+        sa boîte englobante ( rembourrage intérieur gardé ). Demande une `shape` statiquement
+        connue, donc vaut à l'exécution seulement -- un compte écrit par un noyau est une valeur
+        device sous une trace, où Python ne peut pas trancher dessus ( `shape` y lève ). Un zéro
+        symbolique n'a pas de tampon à regarder -> `None`.
+
+        La façon dont le recadrage se fait dépend de COMMENT la valeur est portée ( une tranche,
+        une collecte à travers une disposition non contiguë, ... ), donc c'est le stockage qui
+        répond -- cette propriété n'est que le nom que tout le reste lit.
+
+        ELLE MASQUE `Attribute.value`, et c'est voulu : là-haut, `value` rend `self.get()`, ce qui
+        pour un tenseur était LUI-MÊME -- une identité sans usage. Ici elle rend ce qu'un `ShapeVar`
+        rend déjà : le contenu logique. L'ÉCRITURE, elle, reste celle d'`Attribute` ( `set` ), et il
+        faut la redéclarer : redéfinir le getter seul aurait supprimé le setter hérité, en
+        silence."""
         return self.storage.view( self )
 
-    # @property
-    # def value( self ):
-    #     """The LOGICAL data, backend array: `tensor` (padding cropped), which is what one wants
-    #     when reading a tensor as a value -- the same role `c.nb_dims.value` plays for a `ShapeVar`.
-    #     `raw` stays the padded buffer the FFI needs."""
-    #     return self.tensor
-
-    # @value.setter
-    # def value( self, value ):
-    #     self.set( value )
+    @value.setter
+    def value( self, v ):
+        """`t.value = x` EST `t.set( x )` -- ce que faisait déjà `Attribute.value`."""
+        self.set( v )
 
     # ------------------------------------------------------------------ derived tensors
-    # Every op below (operators, reductions, slicing) reads the LOGICAL values (`self.tensor`,
+    # Every op below (operators, reductions, slicing) reads the LOGICAL values (`self.value`,
     # padding cropped) and returns a fresh DERIVED tensor built by `_wrap`. A derived tensor is no
     # special case: it carries a real list of `AbstractAxis` like any other. Each surviving dimension
     # gets a fresh DEFAULT axis -- a plain `Axis` over a new `ShapeVar`, observed straight from the
@@ -747,17 +755,17 @@ class Tensor( Attribute ):
 
     # ---- array protocol: makes `numpy.asarray(t)`, `int(t)`, `list(t)`, `assert t == x` work ----
     def __array__( self, dtype = None ):
-        arr = numpy.asarray( self.tensor )
+        arr = numpy.asarray( self.value )
         return arr.astype( dtype ) if dtype is not None else arr
 
     def __int__( self ):
-        return int( numpy.asarray( self.tensor ) )
+        return int( numpy.asarray( self.value ) )
 
     def __float__( self ):
-        return float( numpy.asarray( self.tensor ) )
+        return float( numpy.asarray( self.value ) )
 
     def __bool__( self ):
-        return bool( numpy.asarray( self.tensor ) )
+        return bool( numpy.asarray( self.value ) )
 
     def __len__( self ):
         if self.rank == 0:
@@ -796,12 +804,12 @@ class Tensor( Attribute ):
                 if lb is not None:
                     return self._ref_binary( other, la, lb, op )
             else:
-                raw = op( self.tensor, other )
-                if getattr( raw, "shape", () ) == getattr( self.tensor, "shape", () ):
+                raw = op( self.value, other )
+                if getattr( raw, "shape", () ) == getattr( self.value, "shape", () ):
                     return self._wrap_axes( raw, la )   # scalar/array broadcast: our axes survive
-        b = other.tensor if isinstance( other, Tensor ) else other
+        b = other.value if isinstance( other, Tensor ) else other
         names = self._dim_names()
-        return self._wrap( op( self.tensor, b ), names if len( names ) == self.rank else None )
+        return self._wrap( op( self.value, b ), names if len( names ) == self.rank else None )
 
     def _ref_layout( self ):
         """One axis OBJECT per array dimension when each dim means a DISTINCT axis (so a map by
@@ -847,7 +855,7 @@ class Tensor( Attribute ):
                         continue
                     _refuse_mismatched_window( ax, order )
                     order.append( ax )
-        raw = op( *[ _aligned_to( t.tensor, l, order ) for t, l in zip( operands, layouts ) ] )
+        raw = op( *[ _aligned_to( t.value, l, order ) for t, l in zip( operands, layouts ) ] )
         return self._wrap_axes( raw, order )
 
     def where( self, a, b ):
@@ -859,8 +867,8 @@ class Tensor( Attribute ):
         res = self._ref_apply( [ a, b ], driver.where )
         if res is not None:
             return res
-        unwrap = lambda v: v.tensor if isinstance( v, Tensor ) else v
-        return self._wrap( driver.where( self.tensor, unwrap( a ), unwrap( b ) ), self._dim_names() )
+        unwrap = lambda v: v.value if isinstance( v, Tensor ) else v
+        return self._wrap( driver.where( self.value, unwrap( a ), unwrap( b ) ), self._dim_names() )
 
     def _wrap_axes( self, raw, dim_axes ):
         """A detached tensor around `raw` whose dimensions ARE `dim_axes` -- the very axis OBJECTS, so
@@ -903,8 +911,8 @@ class Tensor( Attribute ):
         # matmul CONTRACTS dimensions -- it is not a per-axis map, so it must not go through the
         # ref-aligned path. Positional, and the contracted layout has no meaningful surviving axis
         # identity, so none is carried. Prefer `dot` (contraction BY REFERENCE) over `@`.
-        b = o.tensor if isinstance( o, Tensor ) else o
-        return self._wrap( self.tensor @ b, None )
+        b = o.value if isinstance( o, Tensor ) else o
+        return self._wrap( self.value @ b, None )
 
     def dot( self, other, over ):
         """Contract with `other` over the SHARED axis `over` -- the reference-based analogue of a
@@ -915,12 +923,12 @@ class Tensor( Attribute ):
         points over the shared coordinate axis, giving `[ angles, points ]` free."""
         return ( self * other ).sum( over )
 
-    def __neg__( self ): return self._wrap_axes( -self.tensor, self._dim_axes() )
-    def __abs__( self ): return self._wrap_axes( abs( self.tensor ), self._dim_axes() )
+    def __neg__( self ): return self._wrap_axes( -self.value, self._dim_axes() )
+    def __abs__( self ): return self._wrap_axes( abs( self.value ), self._dim_axes() )
 
     # ---- elementwise maps: shape (hence every axis OBJECT) is preserved, like `__neg__` ----
     def _map( self, op ):
-        return self._wrap_axes( op( self.tensor ), self._dim_axes() )
+        return self._wrap_axes( op( self.value ), self._dim_axes() )
 
     def sqrt  ( self ): return self._map( driver.sqrt )
     def arcsin( self ): return self._map( driver.arcsin )
@@ -949,7 +957,7 @@ class Tensor( Attribute ):
     # ---- axis permutation (numpy-like: positions or axis names; the names follow the move) ----
     def transpose( self, *axes ):
         """A view with the dimensions PERMUTED. No argument reverses the order (`t.T`); otherwise
-        each entry is a dimension position or an axis NAME. Reads the LOGICAL values (`self.tensor`)
+        each entry is a dimension position or an axis NAME. Reads the LOGICAL values (`self.value`)
         and returns a fresh derived tensor, so the surviving names ride along with the permutation."""
         if not axes:
             perm = tuple( reversed( range( self.rank ) ) )
@@ -958,7 +966,7 @@ class Tensor( Attribute ):
                 axes = tuple( axes[ 0 ] )
             perm = tuple( self._axis_pos( a ) for a in axes )
         dims = self._dim_axes()
-        return self._wrap_axes( driver.transpose( self.tensor, perm ),
+        return self._wrap_axes( driver.transpose( self.value, perm ),
                                 [ dims[ p ] for p in perm if p < len( dims ) ] )
 
     @property
@@ -967,11 +975,11 @@ class Tensor( Attribute ):
 
     # ---- reductions (`axis` = None / int / axis name / a tuple of those) ----
     def _reduce( self, op, axis, identity ):
-        """Reduce over the LOGICAL values. A ragged tensor's bounding box (`tensor`) has HOLES
+        """Reduce over the LOGICAL values. A ragged tensor's bounding box (`value`) has HOLES
         (padding) that would corrupt the result -- a 0 surviving a `max`, a 1 lost in a `prod` -- so
         they are first filled with the operation's IDENTITY. A dense (or unrolled) tensor has no
         holes: `_hole_mask` returns `None` and the fast path is untouched."""
-        data  = self.tensor
+        data  = self.value
         holes = self._hole_mask()
         if holes is not None:
             data = driver.where( holes, identity, data )
@@ -1004,7 +1012,7 @@ class Tensor( Attribute ):
         rembourrage entrerait dans les sommes partielles qui le SUIVENT.
         """
         pos = self._axis_position( axis )
-        data = self.tensor
+        data = self.value
         holes = self._hole_mask()
         if holes is not None:
             data = driver.where( holes, 0, data )
@@ -1063,7 +1071,7 @@ class Tensor( Attribute ):
         # pad the trailing dimensions with full slices, then keep the axis OBJECTS of the surviving
         # dimensions (an int index drops its dimension; a slice / array keeps it).
         key = key + ( slice( None ), ) * ( self.rank - len( key ) )
-        result = self.tensor[ key ]
+        result = self.value[ key ]
 
         # An axis OBJECT survives only where the slice left its dimension INTACT. An axis is SHARED,
         # and its extent is solved from the tensors that use it (see `_wrap_axes`, which registers

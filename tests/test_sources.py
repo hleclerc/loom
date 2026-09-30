@@ -27,7 +27,7 @@ def _scaled( scale ):
             sources = [ ( str( HERE / "scaled.cpp" ), { "SCALE": str( scale ) } ) ] ),
         res = loom.out( res ),
     )
-    return numpy.asarray( res.tensor ).reshape( -1 ).tolist()
+    return numpy.asarray( res.value ).reshape( -1 ).tolist()
 
 
 if test( "a_source_compiled_with_a_define_is_linked_in" ):

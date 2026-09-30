@@ -47,7 +47,7 @@ def _sum_over_lanes( group_size ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return int( numpy.asarray( res.tensor ).reshape( -1 )[ 0 ] )
+    return int( numpy.asarray( res.value ).reshape( -1 )[ 0 ] )
 
 
 if test( "a_group_of_one_degenerates_to_the_plain_kernel" ):
@@ -79,7 +79,7 @@ def _runtime_subgroup_width( group_size ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return int( numpy.asarray( res.tensor ).reshape( -1 )[ 0 ] )
+    return int( numpy.asarray( res.value ).reshape( -1 )[ 0 ] )
 
 
 if test( "the_runtime_subgroup_width_matches_what_the_device_claims" ):
@@ -110,7 +110,7 @@ def _probe( group_size, expr, tag ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return numpy.asarray( res.tensor ).reshape( -1 ).tolist()
+    return numpy.asarray( res.value ).reshape( -1 ).tolist()
 
 
 if test( "the_lane_to_subgroup_mapping_is_linear" ):

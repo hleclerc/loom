@@ -14,7 +14,7 @@ dérivée fausse (un adjoint nul le fait ressortir immédiatement).
 
 `f` et ses arguments s'expriment en `Tensor` : un `Tensor` en entrée est dérivé
 par rapport à son buffer, un `Tensor` en sortie est comparé sur sa vue dense
-(`.tensor`) -- le padding de capacité est retiré pour nous, sans écrire de
+(`.value`) -- le padding de capacité est retiré pour nous, sans écrire de
 `.raw[ :n ]`.
 """
 from loom.tensor import Tensor

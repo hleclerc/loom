@@ -201,10 +201,10 @@ if test( "csr_contre_rembourre_les_deux_couts" ):
         ecran = _ecran( largeur, hauteur )
 
         rembourre = construire_index( splats, ecran, capacite = 512 )
-        offsets, comptes, ids_plat, total = construire_index_csr( splats, ecran )
+        index = construire_index_csr( splats, ecran )
 
         a = rendre( splats, rembourre, ecran )
-        b = rendre_csr( splats, offsets, comptes, ids_plat, ecran )
+        b = rendre_csr( splats, index, ecran )
         ecart = float( numpy.abs( numpy.asarray( a ) - numpy.asarray( b ) ).max() )
         # PAS bit a bit, et c'est normal : l'ordre de sommation dans une tuile depend de l'ordre des
         # reservations atomiques, qui differe d'une representation a l'autre, et l'addition flottante
@@ -215,7 +215,7 @@ if test( "csr_contre_rembourre_les_deux_couts" ):
         par_tuile = numpy.asarray( rembourre.nb_par_tuile.value ).reshape( -1 )
         au_mieux = nb_tuiles * int( par_tuile.max() )      # la MEILLEURE capacite possible
         demandee = nb_tuiles * rembourre.ids.capacity[ 1 ]
-        csr = total + nb_tuiles                            # la liste, plus les offsets
+        csr = index.total + nb_tuiles + 1                   # la liste, plus les bornes
 
         print( f"\n{nb} splats, {largeur}x{hauteur} : ecart entre les deux images {ecart:.1e}" )
         print( f"  rembourre, capacite au mieux ( {par_tuile.max()} ) : {au_mieux:8d} entiers,"
@@ -260,10 +260,10 @@ if p := bench( "csr_contre_rembourre_en_temps",
 
     # un tour de chauffe par variante : le premier appel de chacune compile encore
     fini( construire_index( splats, ecran, capacite = ideale ) )
-    o, c, ids, total = construire_index_csr( splats, ecran )
-    fini( ids )
+    index = construire_index_csr( splats, ecran )
+    fini( index.values )
     fini( rendre( splats, repere, ecran ) )
-    fini( rendre_csr( splats, o, c, ids, ecran ) )
+    fini( rendre_csr( splats, index, ecran ) )
 
     def chrono( action ):
         meilleur = float( "inf" )
@@ -284,11 +284,11 @@ if p := bench( "csr_contre_rembourre_en_temps",
 
     t_idx_devine = chrono( lambda: construire_index( splats, ecran, capacite = 512 ) )
     t_idx_ideale = temps_par_capacite[ 0 ][ 1 ]
-    t_idx_csr    = chrono( lambda: construire_index_csr( splats, ecran )[ 2 ] )
+    t_idx_csr    = chrono( lambda: construire_index_csr( splats, ecran ).values )
     t_rnd_remb   = chrono( lambda: rendre( splats, repere, ecran ) )
-    t_rnd_csr    = chrono( lambda: rendre_csr( splats, o, c, ids, ecran ) )
+    t_rnd_csr    = chrono( lambda: rendre_csr( splats, index, ecran ) )
 
-    print( f"\n{p.nb} splats, {largeur}x{hauteur}, capacite ideale {ideale}, total CSR {total}" )
+    print( f"\n{p.nb} splats, {largeur}x{hauteur}, capacite ideale {ideale}, total CSR {index.total}" )
     for cap, t in temps_par_capacite:
         print( f"  index rembourre, capacite {cap:5d} ( {1024 * cap // 1024} entiers/tuile ) :"
                f" {t * 1e3:8.2f} ms" )
@@ -304,4 +304,4 @@ if p := bench( "csr_contre_rembourre_en_temps",
 
     p.results.update( idx_rembourre_ms = t_idx_ideale * 1e3, idx_csr_ms = t_idx_csr * 1e3,
                       rendu_rembourre_ms = t_rnd_remb * 1e3, rendu_csr_ms = t_rnd_csr * 1e3,
-                      capacite_ideale = ideale, total_csr = total )
+                      capacite_ideale = ideale, total_csr = index.total )

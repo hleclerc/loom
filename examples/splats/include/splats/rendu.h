@@ -158,13 +158,15 @@ HD void rendre_pixel( const S &splats, const Ids &ids, SI nb_dans_la_tuile, SI t
 /// Le meme rendu, sur un index CSR : `ids_plat` est une liste unique, la tuile `t` occupant
 /// `[ base, base + nb [`. La seule difference avec ci-dessus est la lecture de `i`.
 template<class S, class Ids>
-HD void rendre_pixel_csr( const S &splats, const Ids &ids_plat, SI base, SI nb,
+HD void rendre_pixel_csr( const S &splats, const Ids &index, SI t,
                           SI x, SI y, auto &&sortie ) {
     using TF = Scalaire<decltype( splats.centres )>;
 
+    // `index( t, k )` : le `t` va chercher dans les offsets, le `k` indexe dans la ligne. Ni
+    // borne ni compte a passer a cote -- le tenseur les porte ( `loom.CsrTensor` ).
     TF r = 0, g = 0, b = 0;
-    for ( SI k = 0; k < nb; ++k )
-        contribution( splats, SI( ids_plat( base + k ) ), x, y, r, g, b );
+    for ( SI k = 0; k < index.row_size( t ); ++k )
+        contribution( splats, SI( index( t, k ) ), x, y, r, g, b );
     sortie( 0 ) = r;
     sortie( 1 ) = g;
     sortie( 2 ) = b;
@@ -187,9 +189,9 @@ HD void compter( const S &splats, SI i, SI largeur, SI hauteur, SI cote, const C
 
 /// PASSE 1 du CSR, seconde moitie : REMPLIR, les offsets etant connus. Le curseur par tuile donne
 /// la place dans la liste unique.
-template<class S, class Offsets, class Curseurs, class Ids>
+template<class S, class Curseurs, class Ids>
 HD void remplir( const S &splats, SI i, SI largeur, SI hauteur, SI cote,
-                 const Offsets &offsets, const Curseurs &curseurs, const Ids &ids_plat ) {
+                 const Curseurs &curseurs, const Ids &index ) {
     SI tx0, tx1, ty0, ty1;
     if ( ! tuiles_touchees( splats, i, largeur, hauteur, cote, tx0, tx1, ty0, ty1 ) )
         return;
@@ -200,7 +202,7 @@ HD void remplir( const S &splats, SI i, SI largeur, SI hauteur, SI cote,
             auto &curseur = curseurs( t ).ref();
             using TC = std::remove_reference_t<decltype( curseur )>;
             const SI k = SI( atomic_fetch_add( curseur, TC( 1 ) ) );
-            ids_plat( SI( offsets( t ) ) + k ) = i;
+            index( t, k ) = i;
         }
 }
 

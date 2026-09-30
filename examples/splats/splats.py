@@ -207,7 +207,7 @@ _REMPLIR = loom.FfiCode.per_item(
     includes = [ "splats/rendu.h" ],
     code = """
         splats::remplir( inputs.splats, flat_index, SI( inputs.ecran.largeur ),
-                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), inputs.offsets, outputs.curseurs, outputs.ids_plat );
+                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), outputs.curseurs, outputs.index );
     """,
 )
 
@@ -219,57 +219,52 @@ _RENDRE_CSR = loom.FfiCode.per_item(
         const SI px = p % largeur, py = p / largeur;
         const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
 
-        splats::rendre_pixel_csr( inputs.splats, inputs.ids_plat, SI( inputs.offsets( t ) ), SI( inputs.comptes( t ) ),
-                                  px, py, outputs.image( y = py, x = px ) );
+        splats::rendre_pixel_csr( inputs.splats, inputs.index, t, px, py, outputs.image( y = py, x = px ) );
     """,
 )
 
 
 def construire_index_csr( splats, ecran ):
-    """L'index en CSR : `( offsets, comptes, ids_plat )`, de taille EXACTE.
+    """L'index en CSR : un `loom.CsrTensor`, de taille EXACTE.
 
-    Trois etapes, dont UNE SEULE chose passe par l'hote, et ce n'est pas la somme prefixe :
-    `loom.cumsum( ..., exclusive = True )` la fait sur le device, par la primitive de scan du
-    backend.
+    DEUX PASSES : compter, puis remplir une fois les offsets connus -- c'est ce qu'un CSR echange
+    contre la memoire que le rembourre gaspille. `CsrTensor.from_counts` fait tout l'entre-deux :
+    la somme prefixe SUR LE DEVICE, et `values` alloue au total exactement.
 
-    Ce qui passe par l'hote, c'est `total` -- une lecture d'un compte ECRIT PAR UN NOYAU, pour
-    dimensionner la liste plate. C'est le prix de l'exactitude, c'est ce qu'un JIT ne peut pas
-    payer, et c'est pour ca que cette variante n'est pas utilisable sous `jit`.
+    NON utilisable sous `jit` : dimensionner `values` demande de LIRE le total, donc un compte
+    qu'un noyau vient d'ecrire. C'est le prix de l'exactitude, et c'est ce qu'un JIT ne peut pas
+    payer.
     """
     nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ), int( ecran.cote.value ) )
     tuile = loom.Axis( loom.ShapeVar( nb_tuiles ), name = "tuile_csr" )
+    nb_splats = int( splats.nb_splats.value )
 
     # 1. compter
     comptes = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_compter", _COMPTER,
-                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), nb_items = int( splats.nb_splats.value ) )
+                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), nb_items = nb_splats )
 
-    # 2. les offsets : la somme prefixe EXCLUSIVE, sur le device. Le resultat porte les MEMES
-    #    objets d'axe que `comptes`, donc il est sur la meme grille sans qu'on l'ait dit.
-    offsets = loom.cumsum( comptes, exclusive = True )
-    #    le TOTAL, lui, doit revenir sur l'hote : c'est lui qui dimensionne la liste plate
-    total = int( comptes.sum() )
+    # 2. l'index : offsets + liste plate, aux tailles exactes
+    index = loom.CsrTensor.from_counts( comptes )
 
-    # 3. remplir
-    fente = loom.Axis( loom.ShapeVar( max( total, 1 ) ), name = "fente_csr" )
-    ids_plat = loom.IntTensor[ fente ]()
+    # 3. remplir -- le curseur par tuile donne la place dans la ligne
     curseurs = loom.IntTensor[ tuile ]()
     loom.ffi_call( "splats_remplir", _REMPLIR,
-                   splats = splats, ecran = ecran, offsets = offsets,
-                   curseurs = loom.out( curseurs ), ids_plat = loom.out( ids_plat ), nb_items = int( splats.nb_splats.value ) )
-    return offsets, comptes, ids_plat, total
+                   splats = splats, ecran = ecran, curseurs = loom.out( curseurs ),
+                   index = loom.out( index, "values" ), nb_items = nb_splats )
+    return index
 
 
-def rendre_csr( splats, offsets, comptes, ids_plat, ecran ):
-    """Le meme rendu, sur l'index CSR. Doit donner la meme image, au bit pres."""
+def rendre_csr( splats, index, ecran ):
+    """Le meme rendu, sur l'index CSR. Doit donner la meme image, au bit pres -- et c'est le MEME
+    corps de contribution, seule la facon de parcourir une tuile change."""
     largeur, hauteur = int( ecran.largeur.value ), int( ecran.hauteur.value )
     image = loom.RealTensor[ loom.Axis( loom.ShapeVar( hauteur ), name = "y" ),
                         loom.Axis( loom.ShapeVar( largeur ), name = "x" ), splats.rvb ]()
     loom.ffi_call(
         "splats_rendre_csr",
         _RENDRE_CSR,
-        splats = splats, ecran = ecran, offsets = offsets, comptes = comptes,
-        ids_plat = ids_plat, image = loom.out( image ),
+        splats = splats, ecran = ecran, index = index, image = loom.out( image ),
         nb_items = largeur * hauteur,
     )
     return image.value

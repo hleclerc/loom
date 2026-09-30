@@ -265,6 +265,10 @@ class TorchDriver:
     def cumsum( self, a, axis ):
         return torch.cumsum( a, dim = axis )
 
+    # bout a bout le long d'un axe.
+    def concatenate( self, arrays, axis = 0 ):
+        return torch.cat( list( arrays ), dim = axis )
+
     def max( self, a, axis = None ):
         return torch.max( a ) if axis is None else torch.amax( a, dim = axis )
 

@@ -13,6 +13,7 @@ from .storage import Storage, Unbound, Buffer, SymbolicZero, Fill
 from .RealTensor import RealTensor
 from .IntTensor import IntTensor
 from .BoolTensor import BoolTensor
+from .CsrTensor import CsrTensor
 from .Dtype import Dtype
 from .AbstractAxis import AbstractAxis, AxisId
 from .PhysicalLayout import PhysicalLayout, items_per_alignment

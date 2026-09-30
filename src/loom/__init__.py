@@ -26,6 +26,7 @@ def __getattr__(name: str):
         "RealTensor":      (".tensor.RealTensor",     "RealTensor"),
         "IntTensor":       (".tensor.IntTensor",      "IntTensor"),
         "BoolTensor":      (".tensor.BoolTensor",     "BoolTensor"),
+        "CsrTensor":       (".tensor.CsrTensor",      "CsrTensor"),
         "dot":              (".tensor.functions",      "dot"),
         "where":            (".tensor.functions",      "where"),
         "sum":              (".tensor.functions",      "sum"),

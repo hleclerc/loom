@@ -309,6 +309,11 @@ class JaxDriver:
     def cumsum( self, a, axis ):
         return jnp.cumsum( a, axis = axis )
 
+    # bout a bout le long d'un axe. Ni une reduction ni un scan : ce qui en sort est plus GRAND
+    # que ce qui y entre, donc c'est le seul verbe dont la forme n'est pas celle de l'entree.
+    def concatenate( self, arrays, axis = 0 ):
+        return jnp.concatenate( list( arrays ), axis = axis )
+
     def max( self, a, axis = None ):
         return jnp.max( a, axis = axis )
 

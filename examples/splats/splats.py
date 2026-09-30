@@ -246,15 +246,14 @@ _RENDRE_CSR = loom.FfiCode.per_item(
 def construire_index_csr( splats, ecran ):
     """L'index en CSR : `( offsets, comptes, ids_plat )`, de taille EXACTE.
 
-    Trois etapes, dont une sur l'hote. La somme prefixe se fait en numpy parce qu'elle porte sur un
-    vecteur de la taille du nombre de tuiles ( 256 ici ) : ce n'est pas la ou est le travail, et la
-    faire sur le device demanderait un noyau de scan pour rien.
+    Trois etapes, dont UNE SEULE chose passe par l'hote, et ce n'est pas la somme prefixe :
+    `loom.cumsum( ..., exclusive = True )` la fait sur le device, par la primitive de scan du
+    backend.
 
-    NON utilisable sous `jit` : lire `total` est une lecture hote d'un compte ecrit par un noyau.
-    C'est le prix de l'exactitude, et c'est exactement ce qu'un JIT ne peut pas payer.
+    Ce qui passe par l'hote, c'est `total` -- une lecture d'un compte ECRIT PAR UN NOYAU, pour
+    dimensionner la liste plate. C'est le prix de l'exactitude, c'est ce qu'un JIT ne peut pas
+    payer, et c'est pour ca que cette variante n'est pas utilisable sous `jit`.
     """
-    import numpy
-
     nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ), int( ecran.cote.value ) )
     tuile = loom.Axis( loom.ShapeVar( nb_tuiles ), name = "tuile_csr" )
     rangs = _rangs( int( splats.nb_splats.value ), "splat" )
@@ -264,10 +263,11 @@ def construire_index_csr( splats, ecran ):
     loom.ffi_call( "splats_compter", _COMPTER,
                    splats = splats, ecran = ecran, comptes = loom.out( comptes ), rangs = rangs )
 
-    # 2. la somme prefixe, sur l'hote, et le TOTAL -- qui dimensionne la liste
-    c = numpy.asarray( comptes.tensor ).reshape( -1 )
-    total = int( c.sum() )
-    offsets = loom.IntTensor[ tuile ]( numpy.concatenate( [ [ 0 ], numpy.cumsum( c )[ :-1 ] ] ) )
+    # 2. les offsets : la somme prefixe EXCLUSIVE, sur le device. Le resultat porte les MEMES
+    #    objets d'axe que `comptes`, donc il est sur la meme grille sans qu'on l'ait dit.
+    offsets = loom.cumsum( comptes, exclusive = True )
+    #    le TOTAL, lui, doit revenir sur l'hote : c'est lui qui dimensionne la liste plate
+    total = int( comptes.sum() )
 
     # 3. remplir
     fente = loom.Axis( loom.ShapeVar( max( total, 1 ) ), name = "fente_csr" )

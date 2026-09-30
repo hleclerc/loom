@@ -303,6 +303,12 @@ class JaxDriver:
     def prod( self, a, axis = None ):
         return jnp.prod( a, axis = axis )
 
+    # un SCAN, et non une reduction : la forme est conservee, `axis` en designe un seul et n'est
+    # jamais `None` ( voir `Tensor.cumsum` ). C'est le backend qui le fait, donc c'est sa
+    # primitive de scan -- optimisee, derivable, et qui traverse `jit` / `vmap` comme le reste.
+    def cumsum( self, a, axis ):
+        return jnp.cumsum( a, axis = axis )
+
     def max( self, a, axis = None ):
         return jnp.max( a, axis = axis )
 

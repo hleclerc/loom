@@ -844,7 +844,11 @@ if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
     assert apres[ "kernels" ] == avant[ "kernels" ], \
         f"le deuxieme appel a fabrique un noyau de plus ({ avant[ 'kernels' ] } -> { apres[ 'kernels' ] })"
     assert apres[ "reuses" ] > avant[ "reuses" ], "le deuxieme appel n'a pas resservi la cible du premier"
-    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.raw ] == [ 1.0, 1.0, 1.0 ]
+    # `.tensor` ET PAS `.raw` : `raw` est le tampon, dimensionne a la CAPACITE. L'alignement de
+    # batch vaut 128 octets sur CUDA, donc un lot de 3 occupe SEIZE fentes en fp64 -- et cette
+    # assertion comparait les 16 a une liste de 3. C'etait le dernier echec de l'arbre, et
+    # c'etait ce piege-la.
+    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.tensor ] == [ 1.0, 1.0, 1.0 ]
 
 
 if test( "une_valeur_brute_entre_telle_quelle" ):

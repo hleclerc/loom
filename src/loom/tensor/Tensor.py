@@ -984,6 +984,34 @@ class Tensor( Attribute ):
         survivors = [ a for d, a in enumerate( self._dim_axes() ) if d not in pos ]
         return self._wrap_axes( op( data, axis = pos ), survivors )
 
+    def cumsum( self, axis = None, *, exclusive = False ):
+        """La somme PREFIXE le long de `axis` -- un SCAN, donc la forme est conservee : ce n'est pas
+        une reduction, et `axis` ne peut pas etre `None` ( un scan a une direction ).
+
+            comptes.cumsum()                      1, 3, 6, 10   ( inclusive, comme numpy )
+            comptes.cumsum( exclusive = True )    0, 1, 3, 6    ( ce qu'un CSR appelle `offsets` )
+
+        LA FORME EXCLUSIVE EST `inclusive - soi`, et c'est pourquoi elle ne coute rien et ne
+        suppose aucun axe : decaler d'un cran demanderait de savoir LEQUEL decaler et de fabriquer
+        le zero de tete a la bonne forme, l'identite le donne gratuitement.
+
+        Sur le device, par la primitive de scan du backend : derivable, et elle traverse `jit`,
+        `grad` et `vmap` comme les autres verbes. Un `numpy.cumsum` cote hote, lui, rapatrie la
+        donnee pour la renvoyer -- ce qu'on s'interdit sur GPU.
+
+        Un tenseur RAGGED a des trous dans sa boite englobante ; ils sont remplis de 0 avant le
+        scan ( l'identite de la somme ), comme `_reduce` le fait pour une reduction. Sans ca le
+        rembourrage entrerait dans les sommes partielles qui le SUIVENT.
+        """
+        pos = self._axis_position( axis )
+        data = self.tensor
+        holes = self._hole_mask()
+        if holes is not None:
+            data = driver.where( holes, 0, data )
+        res = self._wrap_axes( driver.cumsum( data, axis = pos ), self._dim_axes() )
+        # les axes sont les MEMES objets, donc la soustraction s'aligne par identite, pas par forme
+        return res - self if exclusive else res
+
     def sum ( self, axis = None ): return self._reduce( driver.sum,  axis, 0 )
     def prod( self, axis = None ): return self._reduce( driver.prod, axis, 1 )
     def max ( self, axis = None ): return self._reduce( driver.max,  axis, -numpy.inf )

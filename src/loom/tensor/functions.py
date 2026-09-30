@@ -32,6 +32,11 @@ def prod( t, axis = None ):
     return t.prod( axis )
 
 
+def cumsum( t, axis = None, *, exclusive = False ):
+    """La somme prefixe le long de `axis` -- un SCAN, pas une reduction : voir `Tensor.cumsum`."""
+    return t.cumsum( axis, exclusive = exclusive )
+
+
 def min( t, axis = None ):
     return t.min( axis )
 

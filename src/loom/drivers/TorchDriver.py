@@ -261,6 +261,10 @@ class TorchDriver:
     def prod( self, a, axis = None ):
         return torch.prod( a ) if axis is None else torch.prod( a, dim = axis )
 
+    # un SCAN, et non une reduction : la forme est conservee, `axis` en designe un seul.
+    def cumsum( self, a, axis ):
+        return torch.cumsum( a, dim = axis )
+
     def max( self, a, axis = None ):
         return torch.max( a ) if axis is None else torch.amax( a, dim = axis )
 

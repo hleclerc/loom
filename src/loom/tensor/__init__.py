@@ -6,7 +6,7 @@ from .AxisList import AxisList
 from .Affine import Affine, Coord
 from .Tensor import Tensor
 from .functions import (
-    dot, where, sum, prod, min, max, mean, all, any,
+    dot, where, sum, prod, cumsum, min, max, mean, all, any,
     sqrt, arcsin, abs, clip, stop_gradient, transpose,
 )
 from .storage import Storage, Unbound, Buffer, SymbolicZero, Fill

@@ -1,9 +1,27 @@
 #pragma once
 
 #include "common_macros.h" // HD_INLINE
+#include <type_traits>
 #include <atomic>
 
 namespace sdot {
+
+namespace detail {
+
+/// CUDA N'A PAS D'ATOMIQUE POUR UN ENTIER SIGNE DE 64 BITS : ses surcharges couvrent `int`,
+/// `unsigned int`, `unsigned long long`, `float` et `double`, et rien entre les deux. Or `SI` est
+/// un `int64_t`, donc tout compteur d'items en 64 bits tombait dessus -- `no instance of
+/// overloaded function "atomicAdd" matches the argument list`, sur la carte seulement.
+///
+/// En COMPLEMENT A DEUX, l'addition et le OU bit a bit sont les MEMES operations signees ou non :
+/// on passe par la surcharge non signee, et le resultat est exact ( ce n'est pas une troncature
+/// ni une approximation, c'est la meme suite de bits ). C'est l'idiome usuel du code CUDA.
+template<class T>
+constexpr bool est_signe_64 = std::is_integral_v<T> && std::is_signed_v<T> && sizeof( T ) == 8;
+
+using U64 = unsigned long long;
+
+}
 
 /// Atomic `target += value`, for scattering a value that MANY work-items contribute to the same slot
 /// of (e.g. a ProjectedSumOfDiracs backward: every angle adds d cost / d position onto the SAME
@@ -16,7 +34,10 @@ namespace sdot {
 template<class T>
 HD_INLINE void atomic_add( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    atomicAdd( &target, value );
+    if constexpr ( detail::est_signe_64<T> )
+        atomicAdd( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) );
+    else
+        atomicAdd( &target, value );
 #else
     std::atomic_ref<T>( target ).fetch_add( value, std::memory_order_relaxed );
 #endif
@@ -29,7 +50,10 @@ HD_INLINE void atomic_add( T &target, T value ) {
 template<class T>
 HD_INLINE void atomic_or( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    atomicOr( &target, value );
+    if constexpr ( detail::est_signe_64<T> )
+        atomicOr( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) );
+    else
+        atomicOr( &target, value );
 #else
     std::atomic_ref<T>( target ).fetch_or( value, std::memory_order_relaxed );
 #endif
@@ -39,7 +63,10 @@ HD_INLINE void atomic_or( T &target, T value ) {
 template<class T>
 HD_INLINE T atomic_fetch_add( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    return atomicAdd( &target, value );
+    if constexpr ( detail::est_signe_64<T> )
+        return T( atomicAdd( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) ) );
+    else
+        return atomicAdd( &target, value );
 #else
     return std::atomic_ref<T>( target ).fetch_add( value, std::memory_order_relaxed );
 #endif

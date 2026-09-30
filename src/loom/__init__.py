@@ -30,6 +30,7 @@ def __getattr__(name: str):
         "where":            (".tensor.functions",      "where"),
         "sum":              (".tensor.functions",      "sum"),
         "prod":             (".tensor.functions",      "prod"),
+        "cumsum":           (".tensor.functions",      "cumsum"),
         "min":              (".tensor.functions",      "min"),
         "max":              (".tensor.functions",      "max"),
         "mean":             (".tensor.functions",      "mean"),

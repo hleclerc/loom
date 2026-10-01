@@ -132,12 +132,18 @@ class FfiCode( AbstractFfiCode ):
             # exception -- `#include "mon_noyau.h"` marche pour un fichier posé à côté, ce qui est
             # tout ce qu'un tutoriel doit expliquer. Une disposition différente se dit
             # explicitement.
+            # `currentframe` et pas `inspect.stack()` : ce dernier reconstruit TOUT le contexte
+            # source de chaque cadre ( il lit les fichiers ), ce qui se paie en dizaines de
+            # millisecondes -- invisible tant qu'un noyau était un constant de module, mesurable dès
+            # qu'il est construit là où il sert, c'est-à-dire à chaque appel.
             import inspect
-            for cadre in inspect.stack()[ 1: ]:
-                chemin = Path( cadre.filename )
+            cadre = inspect.currentframe()
+            while cadre is not None:
+                chemin = Path( cadre.f_code.co_filename )
                 if chemin.is_file() and "loom/compilation" not in chemin.as_posix():
                     include_roots = [ chemin.resolve().parent ]
                     break
+                cadre = cadre.f_back
         for root in include_roots:
             register_include_root( root )
 
@@ -161,6 +167,37 @@ class FfiCode( AbstractFfiCode ):
         """Redondant : c'est ce que fait `FfiCode` tout court depuis qu'un corps qui lance lui-même
         est la forme NORMALE. Gardé parce que des appels existants le nomment."""
         return cls( code, **kwargs )
+
+    @classmethod
+    def inline( cls, code = "", **kwargs ):
+        """LE CORPS DU HANDLER, SANS L'ENROBAGE -- la forme à écrire quand le C++ vit dans un
+        en-tête à soi.
+
+        Un noyau qui lance lui-même doit fournir `void kernel( queue, batch_axes, args )` dans un
+        namespace anonyme. C'est toujours la même enveloppe, elle n'apprend rien à personne, et
+        c'est elle qui obligeait à poser le noyau dans une constante de module -- loin de l'appel
+        qui s'en sert. `inline` ne prend que ce qu'il y a dedans, donc le noyau tient sur la ligne
+        où il est lancé :
+
+            loom.ffi_call(
+                "splats_render",
+                loom.FfiCode.inline( "splats::render< 16 >( queue, batch_axes, args );",
+                                     includes = [ "splats.h" ] ),
+                ... )
+
+        Le namespace anonyme n'est pas décoratif : `compilation/catalogue.py` compile chaque noyau
+        dans son propre objet puis les lie dans UNE bibliothèque, donc deux `kernel` à nom fixe sans
+        liaison interne seraient une violation d'ODR.
+
+        CE N'EST PAS `per_item` : le corps reste celui du HANDLER, donc c'est encore lui qui choisit
+        son domaine (`queue.run_parallel( ..., args.outputs.image.domain( ... ), ... )`). `inline`
+        n'enlève que les accolades. Ce qui doit vivre au niveau du namespace -- un `#include`, un
+        foncteur -- passe par `includes` ou par `FfiCode` tout court."""
+        return cls( "namespace {\n"
+                    "void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {\n"
+                    f"    { code }\n"
+                    "}\n"
+                    "}\n", **kwargs )
 
     @classmethod
     def per_item( cls, code = "", **kwargs ):

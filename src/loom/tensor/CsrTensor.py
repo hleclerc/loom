@@ -45,7 +45,7 @@ class CsrTensor( Aggregate ):
 
     @classmethod
     def from_counts( cls, counts, **template_kwargs ):
-        """Le CSR qu'un vecteur de COMPTES decrit : `offsets` est leur somme prefixe exclusive,
+        """Le CSR qu'un tenseur de COMPTES decrit : `offsets` est leur somme prefixe exclusive,
         plus le total en derniere borne, et `values` est alloue a ce total EXACTEMENT.
 
             comptes  [ 2, 0, 3 ]   ->   offsets [ 0, 2, 2, 5 ]   et  values de 5 fentes
@@ -55,20 +55,28 @@ class CsrTensor( Aggregate ):
         device. C'est la seule chose ici qu'un `jit` ne peut pas traverser, et c'est ce qu'on
         achete en echange de l'exactitude.
 
+        LES COMPTES PEUVENT AVOIR N'IMPORTE QUEL RANG, et sont lus dans l'ordre du tenseur : une
+        GRILLE de comptes ( une grille de tuiles ) donne autant de lignes, prises ligne par ligne.
+        C'est le seul endroit ou une structure a plusieurs axes s'aplatit, et c'est ce qu'est un
+        CSR -- des bornes cumulees le long d'UN ordre, donc une suite de lignes et pas une grille.
+
         `template_kwargs` va a `values` ( `dtype`, `size`, `device` ) : ce que les lignes PORTENT
         n'est pas decide par les comptes.
         """
+        from ..drivers.driver import driver
         from .functions import cumsum
 
-        total = int( counts.sum() )
-        nb = int( counts.shape[ 0 ] )
+        brut = counts.value if isinstance( counts, Tensor ) else counts
+        plat = Tensor.wrap( brut.reshape( -1 ) )
+
+        total = int( plat.sum() )
+        nb = int( plat.shape[ 0 ] )
 
         res = cls( nb_rows = nb, nb_slots = max( total, 1 ),
                    values = dict( template_kwargs ) if template_kwargs else {} )
         # les bornes : la somme prefixe exclusive, PUIS le total -- `nb + 1` entrees. Le
         # `concatenate` passe par le driver, donc il reste la ou la donnee vit.
-        from ..drivers.driver import driver
-        debuts = cumsum( counts, exclusive = True )
+        debuts = cumsum( plat, exclusive = True )
         res.offsets = driver.concatenate( [ debuts.value, driver.array( [ total ], dtype = debuts.dtype ) ] )
         return res
 

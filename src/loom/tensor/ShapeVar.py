@@ -38,6 +38,11 @@ class ShapeVar( Attribute ):
     `static_count` (a count Python actually holds). See `CallArgsAnalysis`.
     """
 
+    # au niveau de la CLASSE, comme `Attribute.name` : tout `ShapeVar` n'est pas bâti par notre
+    # `__init__` ( une sous-classe peut avoir le sien, un clone peut reconstruire l'objet ), et un
+    # compte sans formule est le cas NORMAL -- il ne doit pas dépendre d'un champ posé par un ctor.
+    _formula = None
+
     if TYPE_CHECKING:
         def __set__( self, obj, value: int ) -> None: ...
         def __iter__( self ) -> Iterator: ...
@@ -66,6 +71,9 @@ class ShapeVar( Attribute ):
 
         self.prescribed_value = None
         self._count = None     # count produced by a kernel: a driver tensor, possibly traced
+        # UNE FORMULE QUELCONQUE ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` ) : `( texte,
+        # { nom: ShapeVar } )`, evaluee a la demande. Voir `set_formula`.
+        self._formula = None
 
         if value is not None:
             self.set( value )
@@ -112,6 +120,49 @@ class ShapeVar( Attribute ):
             value = value.value
         self.prescribed_value = numpy.array( value, dtype = int )
 
+    def set_formula( self, expr, symbols ):
+        """Notre compte est une FORMULE d'autres comptes : `"nb_dim * ( nb_dim + 1 ) / 2"`, avec
+        `symbols` qui dit quel `ShapeVar` chaque nom désigne.
+
+        POURQUOI CE N'EST PAS UNE AFFINE. Une étendue d'axe est normalement affine ( `nb_dims + 1` )
+        parce que c'est elle qu'on INVERSE : voir une taille de 4 sur un tampon, et en déduire que
+        `nb_dims` vaut 3. Une formule quelconque ne s'inverse pas -- et n'a pas à l'être, parce
+        qu'elle ne décrit pas un compte inconnu : elle le CALCULE à partir de comptes déjà connus.
+        Les deux coexistent donc sans se gêner, et le partage est net :
+
+            affine    ce qu'on RÉSOUT  ( `Axis[ "nb_rows + 1" ]` )
+            formule   ce qu'on CALCULE ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` )
+
+        Évaluée À LA DEMANDE, et c'est nécessaire : dans un agrégat les champs sont construits dans
+        l'ordre des annotations, donc l'axe est bâti AVANT que `Splats( nb_dim = 2 )` ait prescrit
+        quoi que ce soit. Tant qu'un symbole n'a pas de compte HÔTE ( `static_count` ), on rend
+        `None` -- exactement comme une affine non résolue."""
+        self._formula = ( str( expr ), dict( symbols ) )
+
+    def _formula_value( self ):
+        """La formule évaluée, `None` tant qu'un de ses symboles n'a pas de compte hôte.
+
+        Le résultat doit être un ENTIER : `2 * 3 / 2` vaut `3.0`, ce qui est bien le compte 3 ;
+        `5 / 2` ne vaut aucun compte, et c'est une erreur de déclaration, pas un arrondi à faire
+        en silence."""
+        if self._formula is None:
+            return None
+        expr, symbols = self._formula
+
+        env = {}
+        for nom, shape_var in symbols.items():
+            compte = shape_var.static_count()
+            if compte is None:
+                return None
+            env[ nom ] = compte
+
+        res = eval( compile( expr, f"<taille d'axe { self.name }>", "eval" ), { "__builtins__": {} }, env )
+        if res != int( res ):
+            raise ValueError(
+                f"la taille d'axe '{ expr }' vaut { res }, qui n'est pas un entier -- un compte en "
+                f"est un ( avec { ', '.join( f'{ n } = { v }' for n, v in env.items() ) } )" )
+        return int( res )
+
     def _pull( self, kind ):
         """Solve our count from the tensors that use us: the FIRST usage able to invert one of its
         sizes, `None` if none can. `kind` picks which sizes -- the `"logical"` ones (`t.reference_shape`,
@@ -142,6 +193,12 @@ class ShapeVar( Attribute ):
 
         if self.prescribed_value is not None:
             return self.prescribed_value
+
+        # une FORMULE d'autres comptes ( voir `set_formula` ) : elle CALCULE, donc elle passe avant
+        # le pull, qui lui cherche à DÉDUIRE le compte d'une taille observée.
+        calcule = self._formula_value()
+        if calcule is not None:
+            return numpy.array( calcule, dtype = int )
 
         return self._pull( "logical" )
 
@@ -180,6 +237,24 @@ class ShapeVar( Attribute ):
         from .Tensor import Tensor
         return Tensor.wrap( raw, names = self._axis_names_for( raw ) )
 
+    # UN COMPTE EST UN NOMBRE, et l'hôte doit pouvoir s'en servir comme tel. Sans ça, tout site qui
+    # dimensionne quelque chose écrivait `int( splats.nb_splats.value )` -- un détour par la lecture
+    # hôte, puis une conversion, pour un entier que l'objet connaît. `__index__` est ce qui le rend
+    # utilisable partout où une taille est attendue : `range( n )`, une borne de tranche, `[ 0 ] * n`.
+    #
+    # C'est `value` qui travaille, donc le refus est le sien : un compte qui vit sur le DEVICE
+    # ( écrit par un noyau, lu sous `jit` ) dit pourquoi il ne peut pas être lu ici, au lieu de
+    # rendre un tracer qui échouera quarante cadres plus loin.
+    def __int__( self ) -> int:
+        valeur = self.value
+        if valeur is None:
+            raise ValueError( f"le compte '{ self.name }' n'est pas résolu : rien ne le prescrit et "
+                              f"aucun tenseur déclaré dessus n'a encore de forme" )
+        return int( valeur )
+
+    def __index__( self ) -> int:
+        return self.__int__()
+
     @property
     def max( self ) -> int:
         return driver.max( self.raw )
@@ -196,5 +271,8 @@ class ShapeVar( Attribute ):
         we were given). `None` when it only lives on the device -- where it cannot size anything."""
         if self.prescribed_value is not None:
             return int( numpy.max( self.prescribed_value ) )
+        calcule = self._formula_value()
+        if calcule is not None:
+            return calcule
         solved = self._pull( "logical" )
         return int( numpy.max( solved ) ) if solved is not None else None

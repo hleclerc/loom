@@ -1,8 +1,22 @@
 from ..util.Attribute import Attribute, resolve_attribute
 import numpy
 import weakref
+import re
 
 from .Affine import Affine, parse_terms
+
+
+# CE QU'UNE AFFINE SAIT LIRE, exactement : des termes `nb_truc`, `3 * nb_truc` ou `7`, séparés par
+# `+` / `-`. Tout le reste -- une parenthèse, une division, un produit de DEUX comptes -- est une
+# FORMULE, et prend l'autre chemin ( voir `_parse_expr` ).
+#
+# Un test POSITIF de ce que `parse_terms` accepte, et pas une liste des caractères qui le fâchent :
+# c'est lui qui décide, donc c'est lui qu'on décrit. Une expression qu'il lirait de travers ( `x /
+# 2`, qu'il prendrait pour un nom ) part ainsi du bon côté au lieu d'échouer sur une résolution de
+# nom qui ne veut rien dire.
+_TERME_AFFINE = r"(?:\d+\s*\*\s*)?[A-Za-z_]\w*|\d+"
+_EST_AFFINE = re.compile( rf"^\s*[+-]?\s*(?:{ _TERME_AFFINE })"
+                          rf"(?:\s*[+-]\s*(?:{ _TERME_AFFINE }))*\s*$" )
 
 
 def count_name_for( axis_name ):
@@ -274,10 +288,36 @@ class AbstractAxis( Attribute ):
             self._add_symbol( ShapeVar( expr ), 1, scope )
             return
 
+        if not _EST_AFFINE.match( str( expr ) ):
+            # UNE FORMULE, pas une affine : `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]`. Elle se CALCULE
+            # au lieu de se résoudre, et c'est tout ce qui la distingue -- voir `ShapeVar.set_formula`.
+            self._add_symbol( self._formula_shape_var( expr, scope ), 1, scope )
+            return
+
         names, offset = parse_terms( expr )
         self.hi = self.hi + offset
         for var_name, coeff in names.items():
             self._add_symbol( var_name, coeff, scope )
+
+    def _formula_shape_var( self, expr, scope ):
+        """Le `ShapeVar` qu'une FORMULE se donne : un compte à part entière, dont la valeur est
+        calculée depuis d'autres comptes plutôt que prescrite ou déduite.
+
+        Un compte minté, et pas un simple décalage dans l'affine : c'est un compte qui se partage,
+        se lit et s'affiche comme les autres -- et une étendue qui ne dépend que de `CtShapeVar`s
+        doit en rester une, sans quoi elle sortirait du type C++ ( `Ct<SI, 3>` ) pour redevenir une
+        dimension d'exécution. D'où la classe choisie sur celle des symboles."""
+        from .CtShapeVar import CtShapeVar
+        from .ShapeVar import ShapeVar
+
+        noms = sorted( set( re.findall( r"[A-Za-z_]\w*", str( expr ) ) ) )
+        symboles = { nom: resolve_attribute( nom, scope, ShapeVar ) for nom in noms }
+
+        cls = CtShapeVar if symboles and all( isinstance( s, CtShapeVar ) for s in symboles.values() ) else ShapeVar
+        res = cls()
+        res.name = str( expr ).replace( " ", "" )
+        res.set_formula( expr, symboles )
+        return res
 
     def _add_symbol( self, var, coeff, scope ):
         """Add `coeff * var` to our extent, `var` being a `ShapeVar` or a NAME to resolve."""

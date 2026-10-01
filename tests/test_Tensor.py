@@ -1080,3 +1080,71 @@ if test( "fabriques" ):
         assert False, "un tirage uniforme entier n'a pas de sens ici"
     except TypeError:
         pass
+
+
+if test( "une_taille_d_axe_peut_etre_une_formule" ):
+    # UNE FORMULE, et pas une affine : `D ( D + 1 ) / 2` est le nombre de coefficients
+    # independants d'une matrice symetrique D x D. Ce n'est pas lineaire en D, donc ca ne
+    # s'inverse pas -- et ca n'a pas a l'etre : la formule CALCULE un compte a partir d'autres,
+    # au lieu d'en DEDUIRE un d'une taille observee.
+    from loom import CtShapeVar
+
+    class Sym( Aggregate ):
+        coeffs  : RealTensor[ "num_item", "num_coeff" ]
+
+        num_item  : Axis[ "nb_items" ]
+        num_coeff : Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]
+
+        nb_items  : ShapeVar
+        nb_dim    : CtShapeVar
+
+    assert Sym( nb_dim = 2 ).num_coeff.max == 3
+    assert Sym( nb_dim = 3 ).num_coeff.max == 6
+    assert Sym( nb_dim = 4 ).num_coeff.max == 10
+
+    # et le tenseur prend bien cette taille-la
+    s = Sym( nb_dim = 3 )
+    s.coeffs = [ [ 0.0 ] * 6, [ 1.0 ] * 6 ]
+    assert s.coeffs.shape == [ 2, 6 ], s.coeffs.shape
+    assert int( s.nb_items ) == 2
+
+    # LA FORMULE EST EVALUEE A LA DEMANDE, et il le faut : dans un agregat les champs sont batis
+    # dans l'ordre des annotations, donc l'axe existe AVANT que le ctor ait prescrit `nb_dim`.
+
+    # l'affine, elle, s'inverse toujours -- les deux chemins coexistent
+    class Bornes( Aggregate ):
+        v       : RealTensor[ "num_bound" ]
+        num_bound : Axis[ "nb_rows + 1" ]
+        nb_rows : ShapeVar
+
+    b = Bornes()
+    b.v = [ 0.0, 2.0, 2.0, 5.0 ]
+    assert int( b.nb_rows ) == 3
+
+    # un resultat non entier est une erreur de declaration, pas un arrondi silencieux
+    class Impair( Aggregate ):
+        w       : RealTensor[ "num_x" ]
+        num_x   : Axis[ "nb_dim / 2" ]
+        nb_dim  : CtShapeVar
+
+    try:
+        Impair( nb_dim = 5 ).num_x.max
+        assert False, "2.5 n'est pas un compte"
+    except ValueError:
+        pass
+
+
+if test( "un_compte_est_un_nombre" ):
+    # `int( sv )` et `sv` la ou une taille est attendue : sans ca, tout site qui dimensionne
+    # quelque chose ecrivait `int( sv.value )`.
+    n = ShapeVar( 7 )
+    assert int( n ) == 7
+    assert list( range( n ) ) == list( range( 7 ) )
+    assert [ 0 ] * n == [ 0 ] * 7
+
+    # un compte non resolu dit POURQUOI, au lieu de rendre None quelque part plus loin
+    try:
+        int( ShapeVar() )
+        assert False, "un compte non resolu ne vaut aucun entier"
+    except ValueError:
+        pass

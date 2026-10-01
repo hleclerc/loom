@@ -156,9 +156,13 @@ HD auto indices_over( auto &&...extents ) {
     return CartesianIndices<DECAYED_TYPE_OF( shape )>{ shape };
 }
 
-/// MANQUE ENCORE, et c'est ce qu'il faudra pour composer avec `vmap` : un domaine NOMMÉ ( dont les
-/// items portent `y = j, x = i`, donc consommables par nom ) et un moyen de le concaténer avec
-/// `global_batch_indices`. Un corps qui lance lui-même ignore aujourd'hui les axes de batch de
-/// l'appel, donc il ne se `vmap` pas tout seul.
+/// CE QUI MANQUE ENCORE : des extents CHOISIS et des axes NOMMÉS à la fois. Ici les axes sont
+/// anonymes, donc les items sont des multi-indices nus -- ce qui ne se compose pas avec les axes de
+/// batch de l'appel, et ne se consomme pas par nom.
+///
+/// Le cas qui comptait est déjà couvert par l'autre bout : `TensorView::domain( num_y, num_x )`,
+/// un SOUS-DOMAINE nommé d'un tenseur, qui se concatène avec `global_batch_indices` et dont les
+/// coordonnées se lisent par nom. C'est ce que `examples/splats` lance. Il reste à savoir nommer un
+/// domaine qui n'est l'ombre d'aucun tenseur.
 
 } // namespace sdot

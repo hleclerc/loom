@@ -42,17 +42,23 @@ d'entree ce qu'on derive. Le miroir est le contenu ; il n'y a rien de plus a ret
 
 LE VOCABULAIRE :
 
-    loom.out( x )                        x est ECRIT par le noyau
-    loom.out( cell, "nb_vertices" )      ... seulement ces membres ; le reste est observe
-    loom.mutable( x )                    x est LU puis RE-ECRIT ( voir `mutable` )
-    loom.scratch( x )                    un tampon de travail : alloue et ecrit a l'aller, pas
-                                         rendu a l'adjoint comme residu
-    loom.unbound( cell, "cut_offsets" )  ce que ce noyau n'a pas a toucher, meme si c'est rempli
+    loom.out( x )                             x est ECRIT par le noyau
+    loom.out( cell, writes = ( "nb_vertices", ) )   ... ceux-la, et eux seuls
+    loom.out( cell, reads  = ( "weights", ) )       ... tout sauf ceux-la ( le meme, par l'autre
+                                                    bout -- on donne la liste la plus courte )
+    loom.mutable( x )                         x est LU puis RE-ECRIT ( voir `mutable` )
+    loom.scratch( x )                         un tampon de travail : alloue et ecrit a l'aller,
+                                              pas rendu a l'adjoint comme residu
+    loom.unbound( cell, "cut_offsets" )       ce que ce noyau n'a pas a toucher, meme si c'est
+                                              rempli
 
 Un argument sans marqueur est une ENTREE, et une valeur brute y entre telle quelle : un tableau
 du framework, un tableau numpy, une liste, un flottant ( voir `Tensor.as_tensor` -- loom en lit
 le type d'element, qui est un fait, et laisse la taille du scalaire au driver, qui est une
 politique ).
+
+CE QUE L'APPEL REND : tout ce qu'il a ECRIT -- `out` comme `mutable` -- dans l'ordre des kwargs
+( voir `returned` ). Un appel qui n'ecrit rien rend `None`.
 """
 
 # LES ROLES. Des chaines et pas un enum : ces quatre valeurs ne sortent jamais de ce fichier.
@@ -64,34 +70,61 @@ class Arg:
 
     Bati par `loom.out` & co, jamais directement. `members` restreint le role a des sous-chemins
     de l'objet -- ce qu'un agregat demande : une `Cell` dont le noyau n'ecrit que `nb_vertices`
-    et `vertex_positions`. Vide, le role vaut pour tout l'objet.
+    et `vertex_positions`. Vide, le role vaut pour tout l'objet. `excluded` dit la MEME chose par
+    l'autre bout : l'objet entier tient le role, sauf ces sous-chemins ( voir `out` ).
     """
 
-    __slots__ = ( "kind", "value", "members", "capacities" )
+    __slots__ = ( "kind", "value", "members", "excluded", "capacities" )
 
-    def __init__( self, kind, value, members = (), capacities = {} ) -> None:
+    def __init__( self, kind, value, members = (), excluded = (), capacities = {} ) -> None:
+        if members and excluded:
+            raise ValueError(
+                "loom.out / loom.scratch : `writes` et `reads` disent la MEME chose par ses deux "
+                "bouts -- ce que le noyau ecrit, ou ce qu'il laisse. En donner les deux, c'est "
+                "ouvrir la porte a ce qu'ils se contredisent : n'en donne qu'un." )
         self.kind = kind
         self.value = value
         self.members = tuple( members )
+        self.excluded = tuple( excluded )
         self.capacities = dict( capacities )
 
     def paths( self, name ):
         """Les chemins que ce role designe, vus de l'appel : l'argument, ou ses membres."""
         return [ f"{ name }.{ m }" for m in self.members ] if self.members else [ name ]
 
+    def excluded_paths( self, name ):
+        """Les chemins DECOUPES de ce role : ils gardent celui qu'ils auraient eu sans la
+        declaration, c'est-a-dire ENTREE pour ce qui porte une valeur."""
+        return [ f"{ name }.{ m }" for m in self.excluded ]
+
     def capacity_paths( self, name ):
         """Les capacites, re-clefees sur le chemin complet ( `nb_vertices` -> `cell.nb_vertices` )."""
         return { f"{ name }.{ p }": c for p, c in self.capacities.items() }
 
 
-def out( value, *members, capacities = {} ):
+def out( value, *, writes = (), reads = (), capacities = {} ):
     """`value` est ECRIT par le noyau : un tampon neuf, rendu a l'objet une fois l'appel fini.
 
-    Nommer des `members` restreint l'ecriture a ces sous-chemins -- le reste de l'objet est alors
-    observe comme n'importe quelle entree. `capacities` dit COMBIEN allouer, quand seul l'appelant
-    le sait ( `loom.out( cell, capacities = { "nb_vertices": 8 } )` ) ; une capacite deja
-    materialisee dans un tampon n'a pas a etre repetee, elle s'y lit."""
-    return Arg( _OUT, value, members, capacities )
+    ET RENDU PAR L'APPEL, donc `return loom.ffi_call( ... )` suffit -- plus besoin de batir
+    l'objet, d'appeler, puis de le rendre sur une troisieme ligne ( voir `returned` ).
+
+    UN AGREGAT DONT LE NOYAU N'ECRIT QU'UNE PARTIE se dit par l'un des deux bouts, au choix, et
+    c'est le plus court qui gagne :
+
+        loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ) )   ceux-la, et eux seuls
+        loom.out( cell, reads  = ( "weights", ) )                          tout sauf ceux-la
+
+    LES DEUX LISTES SONT EXCLUSIVES, et non des indications : ce qui n'est pas ecrit est observe
+    comme n'importe quelle entree. Une faute de frappe ne passe pas -- un nom qui ne designe rien,
+    ou un `reads` qui n'exclut rien, est refuse.
+
+    `reads` est en general la liste qui ne pourrit pas : elle nomme ce que le noyau ne doit PAS
+    ecraser, donc elle ne bouge pas quand on ajoute une sortie a l'agregat.
+
+    `capacities` dit COMBIEN allouer, quand seul l'appelant le sait ( `loom.out( cell, capacities
+    = { "nb_vertices": 8 } )` ) ; une capacite deja materialisee dans un tampon n'a pas a etre
+    repetee, elle s'y lit."""
+    return Arg( _OUT, value, writes, reads, capacities )
 
 
 def mutable( value, *, capacities = {} ):
@@ -117,29 +150,37 @@ def mutable( value, *, capacities = {} ):
     return Arg( _MUTABLE, value, (), capacities )
 
 
-def scratch( value, *members, capacities = {} ):
+def scratch( value, *, writes = (), reads = (), capacities = {} ):
     """Un tampon de TRAVAIL : alloue et ecrit a l'aller comme une sortie, mais pas rendu a
     l'adjoint comme residu -- ce qu'il portait a l'aller est du transitoire par fil, que le retour
-    re-alloue et re-derive lui-meme."""
-    return Arg( _SCRATCH, value, members, capacities )
+    re-alloue et re-derive lui-meme. Il n'est pas rendu par l'appel non plus : un transitoire
+    n'est pas un resultat.
+
+    `writes` / `reads` comme pour `out`."""
+    return Arg( _SCRATCH, value, writes, reads, capacities )
 
 
 def unbound( value, *members ):
     """Ce que CE noyau n'a pas a toucher, meme si l'attribut est rempli : rien ne traverse la FFI,
     et -- n'etant pas un tampon -- rien ne devient une primale derivable, donc l'adjoint n'a pas
     de cotangente a lui trouver. Pour les membres qu'un agregat porte et dont ce noyau n'a que
-    faire."""
+    faire.
+
+    La liste est POSITIONNELLE ici, et c'est coherent : elle nomme ce qui n'est pas lie, donc elle
+    dit directement le role. `out`, lui, devait dire LEQUEL des deux roles sa liste designait --
+    d'ou `writes` / `reads`."""
     return Arg( _UNBOUND, value, members )
 
 
 def lower_args( args ):
     """LE VOCABULAIRE, traduit en ce que l'abaissement attend.
 
-    Rend `( donnees, sorties, scratchs, non_lies, capacites, groupes, mutables )` :
+    Rend `( donnees, sorties, scratchs, non_lies, capacites, groupes, rendus, exceptions )` :
 
-        donnees    { chemin: objet }         ce qui traverse
-        groupes    { groupe: { membre: chemin } }   le premier niveau de `args` cote C++
-        mutables   [ ( objet de sortie, ce qu'on nous a donne ) ]   pour ce qui est RENDU
+        donnees     { chemin: objet }        ce qui traverse
+        groupes     { groupe: { membre: chemin } }   le premier niveau de `args` cote C++
+        rendus      [ ( objet, ce qu'on nous a donne | None ) ]   ce que l'appel REND
+        exceptions  [ chemin ]               les sous-chemins DECOUPES d'une sortie ( `reads` )
 
     Le CHEMIN et le NOM C++ se separent ici, et c'est ce qui rend `mutable` possible : deux
     tampons portent le MEME nom C++ dans deux groupes, sous deux chemins distincts -- un chemin
@@ -149,7 +190,7 @@ def lower_args( args ):
     """
     donnees, sorties, scratchs, non_lies = {}, [], [], []
     capacites = {}
-    mutables = []
+    rendus, exceptions = [], []
     groupes = { "inputs": {}, "outputs": {}, "scratch": {} }
 
     for cle, valeur in args.items():
@@ -175,7 +216,7 @@ def lower_args( args ):
             groupes[ "outputs" ][ cle ] = sortie
             sorties.append( sortie )
             capacites.update( valeur.capacity_paths( sortie ) )
-            mutables.append( ( objet, valeur.value ) )
+            rendus.append( ( objet, valeur.value ) )
             continue
 
         donnees[ cle ] = valeur.value
@@ -191,32 +232,48 @@ def lower_args( args ):
             # l'ADJOINT en recoit, c'est-a-dire rien -- pas l'endroit ou il vit.
             sorties += chemins
             scratchs += chemins
+            exceptions += valeur.excluded_paths( cle )
             groupes[ "scratch" ][ cle ] = cle
         else:
             sorties += chemins
+            exceptions += valeur.excluded_paths( cle )
             groupes[ "outputs" ][ cle ] = cle
+            rendus.append( ( valeur.value, None ) )
 
     return ( donnees, sorties, scratchs, non_lies, capacites,
-             { g: m for g, m in groupes.items() if m }, mutables )
+             { g: m for g, m in groupes.items() if m }, rendus, exceptions )
 
 
-def returned( mutables ):
-    """Ce qu'un appel rend : la valeur des arguments `mutable`, dans l'ordre ou ils ont ete
-    donnes ( la valeur seule s'il n'y en a qu'un, un tuple sinon ), et `None` s'il n'y en a
-    aucun."""
-    if not mutables:
+def returned( rendus ):
+    """Ce qu'un appel REND : ses arguments ECRITS, dans l'ordre ou ils ont ete donnes ( la valeur
+    seule s'il n'y en a qu'un, un tuple sinon ), et `None` s'il n'y en a aucun.
+
+    `out` ET `mutable`, et c'est ce qui permet d'ecrire `return loom.ffi_call( ... )` au lieu de
+    batir l'objet, d'appeler, puis de le rendre sur une troisieme ligne.
+
+    Ce qui revient n'est pas le meme objet dans les deux cas, et ca ne peut pas l'etre : un `out`
+    rend CELUI QU'ON A DONNE -- il etait deja le notre, le resultat y a ete reecrit -- la ou un
+    `mutable` rend le NOUVEAU tampon ( les entrees et les sorties d'un appel sont disjointes ),
+    de la meme espece que ce qu'on avait donne ( voir `_same_kind` ).
+
+    `scratch` ne rend rien, et c'est sa definition : un transitoire n'est pas un resultat."""
+    if not rendus:
         return None
-    rendus = [ _same_kind( objet, donne ) for objet, donne in mutables ]
-    return rendus[ 0 ] if len( rendus ) == 1 else tuple( rendus )
+    res = [ objet if donne is None else _same_kind( objet, donne ) for objet, donne in rendus ]
+    return res[ 0 ] if len( res ) == 1 else tuple( res )
 
 
 def ffi_call( name, *kernels, **kwargs ):
     """Lance `kernels` sur les valeurs passees en kwargs.
 
     C'EST `driver.call`, sous le nom de ce qu'il fait : il n'y a qu'une forme d'appel, et `driver`
-    reste la couche basse que l'usager n'a pas a nommer. Ce qui est RENDU : la valeur des arguments
-    `mutable` ( voir `returned` ). Une sortie declaree par `loom.out` n'est pas rendue -- l'objet
-    est deja le notre, le resultat y est reecrit.
+    reste la couche basse que l'usager n'a pas a nommer.
+
+    CE QUI EST RENDU : les arguments ECRITS -- `loom.out` comme `loom.mutable` -- dans l'ordre ou
+    ils ont ete donnes ( voir `returned` ). D'ou la forme courte :
+
+        return loom.ffi_call( "mon_appel", noyau, entree = entree,
+                              sortie = loom.out( RealTensor[ n ]() ) )
     """
     from .drivers.driver import driver
     return driver.call( name, *kernels, **kwargs )

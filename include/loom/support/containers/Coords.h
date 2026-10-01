@@ -52,11 +52,36 @@ HD constexpr auto operator-( AxisSet<A...>, AxisSet<B...> ) {
     return typename detail::AxisDiff<AxisSet<B...>,AxisSet<>,A...>::type{};
 }
 
+/// LA DIFFERENCE AVEC UN SEUL AXE : `image.axes - num_channel`, qui est la facon dont un corps qui
+/// ne connait pas sa dimension dit « tous les axes sauf celui-la ». Un axe n'est pas un `AxisSet`,
+/// d'ou le `requires` : rien a departager avec la soustraction d'ensembles ci-dessus.
+template<class... A,class B> requires ( is_axis<B> )
+HD constexpr auto operator-( AxisSet<A...> a, B ) {
+    return a - AxisSet<B>{};
+}
+
 /// pour chaque axe. Un PLI, pas une boucle : les axes n'existent qu'a la compilation, donc le corps
 /// est deroule et `axis` est un type different a chaque tour ( c'est ce qui permet `coords + axis` ).
 template<class... Axes,class F>
 HD constexpr void for_each( AxisSet<Axes...>, F &&f ) {
     ( f( Axes{} ), ... );
+}
+
+/// LE MEME PLI, AVEC LA POSITION : `f( axis, d )`, `d` comptant de 0.
+///
+/// C'est ce qu'il faut pour franchir la frontiere entre les axes -- qui n'existent qu'a la
+/// compilation -- et un calcul ecrit en `for ( d = 0; d < D; ++d )`, qui est la facon naturelle
+/// d'ecrire une geometrie en D dimensions. Un corps y recopie ses coordonnees dans un tableau et
+/// n'a plus jamais a nommer un axe :
+///
+///     SI x[ D ];
+///     for_each_indexed( main_axes, [&]( auto axis, int d ) { x[ d ] = coords[ axis ]; } );
+///
+/// L'ordre est garanti : un pli sur `,` evalue de gauche a droite.
+template<class... Axes,class F>
+HD constexpr void for_each_indexed( AxisSet<Axes...>, F &&f ) {
+    int index = 0;
+    ( f( Axes{}, index++ ), ... );
 }
 
 /// vrai s'il existe un axe pour lequel `f` est vraie.

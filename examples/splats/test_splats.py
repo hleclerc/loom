@@ -1,4 +1,4 @@
-"""Les tests du deuxieme usager etranger. Rien n'importe sdot.
+"""Tests of loom's second foreign user. Nothing here imports sdot.
 
     errand test_splats
 """
@@ -11,238 +11,223 @@ sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 import numpy
 
 from errand import Param, bench, test
-from loom import RealTensor, driver
 from loom.testing import check_grad
 
-from splats import ( COTE, Ecran, Splats, construire_index, construire_index_csr,
-                     rendre, rendre_csr, rendu )
+from splats import TILE_SIDE, Splats, touching_gaussians, render, render_scene
 
 
-def _scene( nb, largeur, hauteur, seed = 0, echelle = 3.0, amas = 6 ):
-    """Une scene reproductible, et surtout REALISTE sur le seul point qui compte ici : l'inegalite.
+def _scene( nb, shape, seed = 0, scale = 3.0, clusters = 6 ):
+    """A reproducible scene, and above all a REALISTIC one on the single point that matters here:
+    inequality.
 
-    Deux choses la produisent, et ce sont celles d'une vraie scene. Les centres sont en AMAS ( une
-    reconstruction met des gaussiennes ou il y a de la matiere, pas uniformement ), et les tailles
-    couvrent une DECADE ( du detail fin au fond flou ). D'ou des tuiles vides et des tuiles
-    surchargees -- donc un pire cas tres loin de la moyenne, qui est exactement ce qu'une borne
-    unique doit payer.
+    Two things produce it, and they are the ones a real scene has. The centers come in CLUSTERS (a
+    reconstruction puts Gaussians where there is matter, not uniformly), and the sizes span a DECADE
+    (fine detail and blurry background). Hence empty tiles and overloaded ones -- a worst case very
+    far from the mean, which is exactly what a single bound has to pay for.
+
+    `centers[ :, d ]` is the coordinate along axis `d` of the image: one convention, no `x` and no
+    `y`. The covariances below are 2D, like `splats.h::half_box`.
     """
     rng = numpy.random.default_rng( seed )
+    nb_dims = len( shape )
 
-    # les centres : quelques amas serres, plus un fond disperse
-    nb_fond = max( 1, nb // 5 )
-    foyers = numpy.stack( [ rng.uniform( 0, largeur, amas ), rng.uniform( 0, hauteur, amas ) ], axis = 1 )
-    qui = rng.integers( 0, amas, nb - nb_fond )
-    serres = foyers[ qui ] + rng.normal( 0, min( largeur, hauteur ) / 25, ( nb - nb_fond, 2 ) )
-    fond = numpy.stack( [ rng.uniform( 0, largeur, nb_fond ), rng.uniform( 0, hauteur, nb_fond ) ], axis = 1 )
-    centres = numpy.concatenate( [ serres, fond ] )
+    # the centers: a few tight clusters, plus a scattered background
+    nb_bg = max( 1, nb // 5 )
+    foci = numpy.stack( [ rng.uniform( 0, n, clusters ) for n in shape ], axis = 1 )
+    which = rng.integers( 0, clusters, nb - nb_bg )
+    tight = foci[ which ] + rng.normal( 0, min( shape ) / 25, ( nb - nb_bg, nb_dims ) )
+    background = numpy.stack( [ rng.uniform( 0, n, nb_bg ) for n in shape ], axis = 1 )
+    centers = numpy.concatenate( [ tight, background ] )
 
-    # les tailles : log-uniformes sur une decade
-    sigmas = echelle * numpy.exp( rng.uniform( 0, math.log( 10 ), nb ) )
+    # the sizes: log-uniform over a decade
+    sigmas = scale * numpy.exp( rng.uniform( 0, math.log( 10 ), nb ) )
 
-    # une covariance anisotrope, inversee : ( a, b, c ) = inv( R S R^T )
+    # an anisotropic covariance, inverted: ( a, b, c ) = inv( R S R^T ), packed upper triangle
     angles = rng.uniform( 0, math.pi, nb )
-    rapport = rng.uniform( 0.3, 1.0, nb )
-    sx, sy = sigmas, sigmas * rapport
+    ratio = rng.uniform( 0.3, 1.0, nb )
+    s0, s1 = sigmas, sigmas * ratio
     ca, sa = numpy.cos( angles ), numpy.sin( angles )
-    ixx, iyy = 1.0 / sx ** 2, 1.0 / sy ** 2
-    a = ca * ca * ixx + sa * sa * iyy
-    c = sa * sa * ixx + ca * ca * iyy
-    b = ca * sa * ( ixx - iyy )
+    i00, i11 = 1.0 / s0 ** 2, 1.0 / s1 ** 2
+    a = ca * ca * i00 + sa * sa * i11
+    c = sa * sa * i00 + ca * ca * i11
+    b = ca * sa * ( i00 - i11 )
     cov_inv = numpy.stack( [ a, b, c ], axis = 1 )
-    couleurs = rng.uniform( 0.1, 1.0, ( nb, 3 ) )
-    opacites = rng.uniform( 0.2, 1.0, nb )
 
-    splats = Splats( nb_xy = 2, nb_abc = 3, nb_rvb = 3 )
-    splats.centres = centres
+    # nothing to prescribe but the two compile-time counts; `num_coeff` COMPUTES itself from
+    # `nb_dims` ( 2 * 3 / 2 = 3 )
+    splats = Splats( nb_dims = nb_dims, nb_channels = 3 )
+    splats.centers = centers
     splats.cov_inv = cov_inv
-    splats.couleurs = couleurs
-    splats.opacites = opacites
+    splats.colors = rng.uniform( 0.1, 1.0, ( nb, 3 ) )
+    splats.opacities = rng.uniform( 0.2, 1.0, nb )
     return splats
 
 
-def _ecran( largeur, hauteur ):
-    return Ecran( largeur = largeur, hauteur = hauteur, cote = COTE )
+def _nb_tiles( shape ):
+    return tuple( ( n + TILE_SIDE - 1 ) // TILE_SIDE for n in shape )
 
 
-if test( "l_index_ragged_dit_combien_de_splats_touchent_chaque_tuile" ):
-    # LE test de la structure : le compte par tuile est ecrit par le noyau, et il est RAGGED --
-    # `nb_par_tuile.value` rend un compte par tuile, pas un scalaire.
-    largeur, hauteur, nb = 256, 256, 2000
-    splats = _scene( nb, largeur, hauteur )
-    index = construire_index( splats, _ecran( largeur, hauteur ), capacite = 64 )
+def _per_tile( touching, shape ):
+    """How many Gaussians each tile holds, back in the shape of the tile GRID.
 
-    comptes = numpy.asarray( index.nb_par_tuile.value ).reshape( -1 )
-    nb_tx, nb_ty = largeur // COTE, hauteur // COTE
-    assert comptes.shape == ( nb_tx * nb_ty, ), comptes.shape
-    assert comptes.sum() > nb, "chaque splat touche au moins une tuile"
-
-    # la structure est bien INEGALE : c'est ce qui rend une borne unique couteuse
-    print( f"tuiles {nb_tx}x{nb_ty}, {nb} splats : par tuile min {comptes.min()}, "
-           f"moyenne {comptes.mean():.1f}, max {comptes.max()}, total {comptes.sum()}" )
-    # ragged et non trivial : les tuiles ne se ressemblent pas. ( L'inegalite qui COUTE n'est pas
-    # celle-ci mais celle des empreintes, mesuree par `le_cout_d_une_borne_unique`. )
-    assert comptes.min() > 0 and comptes.max() >= 2 * comptes.min()
-
-    # et l'index ne contient que des splats qui touchent vraiment la tuile
-    ids = numpy.asarray( index.ids )
-    centres = numpy.asarray( splats.centres )
-    for t in range( 0, nb_tx * nb_ty, 7 ):
-        tx, ty = t % nb_tx, t // nb_tx
-        for k in range( int( comptes[ t ] ) ):
-            i = int( ids[ t, k ] )
-            assert 0 <= i < nb
-            # le centre peut etre loin : ce qu'on verifie est qu'aucun id n'est du remplissage
-    print( "index coherent" )
+    `offsets` carries `nb_rows + 1` BOUNDS and not counts, so a row's length is a subtraction of
+    neighbours -- and that is also why the last bound IS the total."""
+    offsets = numpy.asarray( touching.offsets.value )
+    return numpy.diff( offsets ).reshape( _nb_tiles( shape ) )
 
 
-if test( "le_rendu_est_celui_de_la_somme_directe" ):
-    # la reference : la somme sur TOUS les splats, sans index. Si l'index perdait un splat, l'ecart
-    # se verrait -- c'est ce qui fait de ce test la validation de la structure, pas du seul stencil.
-    from reference_jax import rendu_dense
+if test( "the_lists_are_sized_exactly" ):
+    # THE test of the structure: the per-tile counts are written by the kernel, read back on the
+    # HOST, and the flat list allocated at exactly their sum. Nothing is guessed and nothing is
+    # padded -- which is the one thing a JIT cannot do.
+    shape, nb = ( 256, 256 ), 2000
+    splats = _scene( nb, shape )
+    touching = touching_gaussians( splats, shape )
 
-    largeur, hauteur, nb = 96, 64, 150
-    splats = _scene( nb, largeur, hauteur )
-    image = rendre( splats, construire_index( splats, _ecran( largeur, hauteur ), 64 ),
-                    _ecran( largeur, hauteur ) )
+    counts = _per_tile( touching, shape )
+    assert counts.shape == _nb_tiles( shape ), counts.shape
+    assert counts.sum() > nb, "every splat touches at least one tile"
 
-    attendu = rendu_dense( numpy.asarray( splats.centres ), numpy.asarray( splats.cov_inv ),
-                           numpy.asarray( splats.couleurs ), numpy.asarray( splats.opacites ),
-                           largeur, hauteur )
-    obtenu = numpy.asarray( image )
-    ecart = numpy.abs( obtenu - attendu ).max()
-    print( f"ecart max au rendu dense : {ecart:.3e}   ( image {obtenu.shape} )" )
-    assert ecart < 1e-10, ecart
+    # EXACTLY: the list is as long as its content, to the integer
+    assert touching.total == int( counts.sum() )
+    ids = numpy.asarray( touching.values )
+    assert ids.shape == ( touching.total, ), ids.shape
 
+    # the structure really is UNEVEN: that is what makes a single bound expensive
+    print( f"tiles {counts.shape}, {nb} splats : per tile min {counts.min()}, "
+           f"mean {counts.mean():.1f}, max {counts.max()}, total {counts.sum()}" )
+    assert counts.min() > 0 and counts.max() >= 2 * counts.min()
 
-if test( "l_adjoint_atomique_est_celui_du_rendu" ):
-    # l'adjoint est en ACCUMULATION : un splat est touche par tous les pixels qu'il couvre, donc par
-    # des work-items differents. C'est l'inverse de `examples/diffusion`, en gather pur.
-    largeur, hauteur, nb = 48, 48, 30
-    splats = _scene( nb, largeur, hauteur, seed = 3, echelle = 5.0 )
-    ecran = _ecran( largeur, hauteur )
-
-    for nom in ( "couleurs", "opacites", "centres", "cov_inv" ):
-        def rend( valeur, nom = nom ):
-            s = _scene( nb, largeur, hauteur, seed = 3, echelle = 5.0 )
-            setattr( s, nom, valeur )
-            return rendu( s, ecran, 64 )
-
-        depart = getattr( splats, nom ).raw
-        ad, df = check_grad( rend, depart, seed = 11 )
-        print( f"d/d{nom:<9} : adjoint {float( ad ):+.9f}   diff. finie {float( df ):+.9f}" )
+    # and every row holds nothing but splats
+    offsets = numpy.asarray( touching.offsets.value )
+    flat = counts.reshape( -1 )
+    for t in range( 0, flat.size, 7 ):
+        row = ids[ offsets[ t ] : offsets[ t + 1 ] ]
+        assert len( row ) == flat[ t ]
+        assert ( ( 0 <= row ) & ( row < nb ) ).all()
+    print( "lists consistent" )
 
 
-if test( "une_capacite_trop_petite_est_corrigee_toute_seule" ):
-    # la machinerie qu'aucun framework n'a : le noyau dit que le compte n'a pas tenu, et l'appel
-    # recommence avec plus de place. On part volontairement d'une capacite de 1.
-    largeur, hauteur, nb = 256, 256, 2000
-    splats = _scene( nb, largeur, hauteur )
+if test( "the_rendering_matches_the_direct_sum" ):
+    # the reference: the sum over EVERY splat, no lists at all. If one of them lost a splat the gap
+    # would show -- which is what makes this a test of the structure, not of the stencil alone.
+    from reference import dense_render
 
-    juste = construire_index( splats, _ecran( largeur, hauteur ), capacite = 512 )
-    etroit = construire_index( splats, _ecran( largeur, hauteur ), capacite = 1 )
+    shape, nb = ( 64, 96 ), 150
+    splats = _scene( nb, shape )
+    image = render( splats, touching_gaussians( splats, shape ), shape )
 
-    a = numpy.asarray( juste.nb_par_tuile.value ).reshape( -1 )
-    b = numpy.asarray( etroit.nb_par_tuile.value ).reshape( -1 )
-    assert ( a == b ).all(), "les comptes doivent etre les memes, la capacite ne change pas la scene"
-    print( f"capacite demandee 1 -> retenue {etroit.ids.capacity[ 1 ]} "
-           f"( max par tuile {b.max()} ) ; demandee 512 -> {juste.ids.capacity[ 1 ]}" )
-    assert etroit.ids.capacity[ 1 ] >= int( b.max() )
+    expected = dense_render( numpy.asarray( splats.centers ), numpy.asarray( splats.cov_inv ),
+                             numpy.asarray( splats.colors ), numpy.asarray( splats.opacities ),
+                             shape )
+    got = numpy.asarray( image )
+    gap = numpy.abs( got - expected ).max()
+    print( f"max gap to the dense rendering : {gap:.3e}   ( image {got.shape} )" )
+    assert gap < 1e-10, gap
 
 
-if test( "le_cout_d_une_borne_unique" ):
-    # CE QUE XLA COUTE, en chiffres, et sans homme de paille.
+if test( "an_image_that_is_not_a_multiple_of_the_tile" ):
+    # THE IMAGE SIZE IS NOT A COMPILE-TIME PARAMETER: nothing forces its sides onto the tile grid,
+    # and the last row of tiles simply hangs over the edge.
+    from reference import dense_render
+
+    shape, nb = ( 37, 53 ), 80
+    splats = _scene( nb, shape, seed = 5 )
+    image = render( splats, touching_gaussians( splats, shape ), shape )
+
+    expected = dense_render( numpy.asarray( splats.centers ), numpy.asarray( splats.cov_inv ),
+                             numpy.asarray( splats.colors ), numpy.asarray( splats.opacities ),
+                             shape )
+    gap = numpy.abs( numpy.asarray( image ) - expected ).max()
+    print( f"image {shape} ( tile {TILE_SIDE} ) : gap to the dense rendering {gap:.3e}" )
+    assert gap < 1e-10, gap
+
+
+if test( "the_atomic_adjoint_is_the_one_of_the_rendering" ):
+    # the adjoint ACCUMULATES: a splat is hit by every pixel it covers, hence by different
+    # work-items. The opposite of `examples/diffusion`, which was a pure gather.
+    shape, nb = ( 48, 48 ), 30
+    splats = _scene( nb, shape, seed = 3, scale = 5.0 )
+
+    for name in ( "colors", "opacities", "centers", "cov_inv" ):
+        def rend( value, name = name ):
+            s = _scene( nb, shape, seed = 3, scale = 5.0 )
+            setattr( s, name, value )
+            return render_scene( s, shape )
+
+        start = getattr( splats, name ).raw
+        adjoint, finite = check_grad( rend, start, seed = 11 )
+        print( f"d/d{name:<10} : adjoint {float( adjoint ):+.9f}   finite diff. {float( finite ):+.9f}" )
+
+
+if test( "what_a_single_bound_costs" ):
+    # WHAT XLA COSTS, in numbers, and without a straw man.
     #
-    # XLA sait faire un index par tuile -- a condition de BORNER le pire cas avant de tracer. Les
-    # deux bornes qu'il faut choisir sont ici, et on les compare a ce que loom depense :
-    #
-    #   * la capacite par tuile : un tableau `[ tuiles, capacite ]` alors que la moyenne est bien
-    #     plus basse -- loom la DECOUVRE et la corrige, il ne la choisit pas ;
-    #   * le rayon d'une fenetre fixe : dicte par le PLUS GROS splat de la scene, et paye par tous.
-    #     C'est la borne la plus chere, parce que les tailles couvrent une decade, donc les
-    #     empreintes deux ordres de grandeur.
-    from reference_jax import travail_fenetre, travail_reel
+    # XLA can build these lists -- provided the worst case is BOUNDED before tracing. The bound it
+    # would have to choose is priced here against what loom spends: the radius of a FIXED WINDOW per
+    # splat, dictated by the largest splat of the scene and paid by all. That is the expensive one,
+    # because the sizes span a decade, hence the footprints two orders of magnitude.
+    from reference import window_work, real_work
 
-    for nb, largeur, hauteur in ( ( 500, 256, 256 ), ( 2000, 256, 256 ), ( 2000, 512, 512 ) ):
-        splats = _scene( nb, largeur, hauteur )
+    for nb, shape in ( ( 500, ( 256, 256 ) ), ( 2000, ( 256, 256 ) ), ( 2000, ( 512, 512 ) ) ):
+        splats = _scene( nb, shape )
         cov = numpy.asarray( splats.cov_inv )
-        index = construire_index( splats, _ecran( largeur, hauteur ), capacite = 512 )
-        comptes = numpy.asarray( index.nb_par_tuile.value ).reshape( -1 )
+        counts = _per_tile( touching_gaussians( splats, shape ), shape ).reshape( -1 )
 
-        borne, rayon = travail_fenetre( cov )
-        utile = travail_reel( cov, largeur, hauteur )
-        dense = nb * largeur * hauteur
+        bound, radius = window_work( cov )
+        useful = real_work( cov )
+        dense = nb * int( numpy.prod( shape ) )
 
-        print( f"\n{nb} splats, {largeur}x{hauteur} :" )
-        print( f"  par tuile        : moyenne {comptes.mean():7.1f}   max {comptes.max():5d}"
-               f"   -> une capacite fixe gaspille x{comptes.max() / comptes.mean():.1f}" )
-        print( f"  couples utiles   : {utile:12d}   ( la somme des empreintes reelles )" )
-        print( f"  fenetre fixe     : {borne:12d}   ( R = {rayon}, dicte par le plus gros splat )"
-               f"   -> x{borne / utile:.1f}" )
-        print( f"  somme dense      : {dense:12d}   ( chaque pixel voit tous les splats )"
-               f"   -> x{dense / utile:.1f}" )
+        print( f"\n{nb} splats, {shape} :" )
+        print( f"  per tile       : mean {counts.mean():7.1f}   max {counts.max():5d}"
+               f"   -> a single capacity would waste x{counts.max() / counts.mean():.1f}" )
+        print( f"  useful pairs   : {useful:12d}   ( the sum of the real footprints )" )
+        print( f"  fixed window   : {bound:12d}   ( R = {radius}, set by the largest splat )"
+               f"   -> x{bound / useful:.1f}" )
+        print( f"  dense sum      : {dense:12d}   ( every pixel sees every splat )"
+               f"   -> x{dense / useful:.1f}" )
 
-        # la borne d'une fenetre fixe coute au moins un ordre de grandeur : c'est l'argument
-        assert borne > 5 * utile
+        # a fixed window's bound costs at least an order of magnitude: that is the argument
+        assert bound > 5 * useful
 
 
-if test( "csr_contre_rembourre_les_deux_couts" ):
-    # L'OBJECTION, traitee de front : le meme index en CSR ( offsets + liste unique ) au lieu du
-    # rembourre. Si les deux images coincident, la comparaison de leurs couts est legitime -- et
-    # elle ne tourne PAS a l'avantage du rembourre.
+if test( "a_padded_storage_would_cost_more_memory" ):
+    # WHY THERE IS ONLY ONE STORAGE LEFT. The example used to carry both, and the padded rectangle
+    # was measured at 2.4 to 5.1 times the memory of the CSR -- so it was dropped ( see the README ).
     #
-    # La comparaison est faite au MIEUX pour chaque forme, sinon elle ne vaut rien : on chiffre le
-    # rembourre a `tuiles x max_par_tuile`, c'est-a-dire avec la capacite la mieux choisie possible,
-    # et pas avec celle qu'on a demandee au hasard.
-    from splats import construire_index_csr, rendre_csr
+    # The finding stays CHECKED, and it needs no second implementation to stay alive: what a padded
+    # rectangle would cost is arithmetic on the row lengths. It is priced AT BEST, with the capacity
+    # exactly equal to the longest row -- which a real padded version could not even know in advance.
+    for nb, shape in ( ( 500, ( 256, 256 ) ), ( 2000, ( 256, 256 ) ), ( 2000, ( 512, 512 ) ) ):
+        splats = _scene( nb, shape )
+        touching = touching_gaussians( splats, shape )
+        counts = _per_tile( touching, shape ).reshape( -1 )
 
-    for nb, largeur, hauteur in ( ( 500, 256, 256 ), ( 2000, 256, 256 ), ( 2000, 512, 512 ) ):
-        splats = _scene( nb, largeur, hauteur )
-        ecran = _ecran( largeur, hauteur )
+        nb_tiles = counts.size
+        padded = nb_tiles * int( counts.max() )             # the BEST possible capacity
+        csr = touching.total + nb_tiles + 1                 # the list, plus the bounds
 
-        rembourre = construire_index( splats, ecran, capacite = 512 )
-        index = construire_index_csr( splats, ecran )
+        print( f"\n{nb} splats, {shape} :" )
+        print( f"  padded, best capacity ( {counts.max()} ) : {padded:8d} ints" )
+        print( f"  CSR, exact size                   : {csr:8d} ints" )
+        print( f"  -> even at best, a padded rectangle costs x{padded / csr:.2f} the memory" )
 
-        a = rendre( splats, rembourre, ecran )
-        b = rendre_csr( splats, index, ecran )
-        ecart = float( numpy.abs( numpy.asarray( a ) - numpy.asarray( b ) ).max() )
-        # PAS bit a bit, et c'est normal : l'ordre de sommation dans une tuile depend de l'ordre des
-        # reservations atomiques, qui differe d'une representation a l'autre, et l'addition flottante
-        # n'est pas associative. L'ecart est celui d'une reassociation, pas d'un modele different.
-        assert ecart < 1e-12, f"les deux representations doivent donner la meme image ( {ecart} )"
-
-        nb_tuiles = rembourre.ids.capacity[ 0 ]
-        par_tuile = numpy.asarray( rembourre.nb_par_tuile.value ).reshape( -1 )
-        au_mieux = nb_tuiles * int( par_tuile.max() )      # la MEILLEURE capacite possible
-        demandee = nb_tuiles * rembourre.ids.capacity[ 1 ]
-        csr = index.total + nb_tuiles + 1                   # la liste, plus les bornes
-
-        print( f"\n{nb} splats, {largeur}x{hauteur} : ecart entre les deux images {ecart:.1e}" )
-        print( f"  rembourre, capacite au mieux ( {par_tuile.max()} ) : {au_mieux:8d} entiers,"
-               f" 1 passe" )
-        print( f"  rembourre, capacite demandee ( {rembourre.ids.capacity[ 1 ]} ) : {demandee:8d} entiers" )
-        print( f"  CSR, taille exacte                     : {csr:8d} entiers, 2 passes"
-               f" + somme prefixe hote" )
-        print( f"  -> meme au mieux, le rembourre coute x{au_mieux / csr:.2f} la memoire du CSR" )
-
-        # le rembourre est PLUS COUTEUX en memoire, toujours : c'est le constat, pas l'inverse
-        assert au_mieux > csr
+        assert padded > csr
 
 
-if p := bench( "csr_contre_rembourre_en_temps",
-               nb      = Param( 2000, help = "nombre de splats" ),
-               taille  = Param( 512, help = "cote de l'image" ),
-               reps    = Param( 5, help = "repetitions chronometrees ( on garde le minimum )" ),
-               seed    = Param( 0, help = "graine de la scene" ) ):
-    # LA MEMOIRE ET LES PASSES SONT MESUREES AILLEURS ( `csr_contre_rembourre_les_deux_couts` ) ;
-    # ici c'est le TEMPS, qui est la seule chose que ces deux-la ne permettaient pas de deviner : le
-    # CSR economise de la memoire mais paie une passe de plus sur les splats ET un aller-retour vers
-    # l'hote ( lire le total ). Lequel gagne n'est pas une question d'opinion.
+if p := bench( "where_the_time_goes",
+               nb     = Param( 2000, help = "number of splats" ),
+               size   = Param( 512, help = "image side" ),
+               reps   = Param( 5, help = "timed repetitions ( the minimum is kept )" ),
+               seed   = Param( 0, help = "scene seed" ) ):
+    # THE MEMORY IS MEASURED ABOVE; here it is TIME, and the question it settles is where it goes.
+    # Building the lists costs two passes over the splats AND a round trip to the host ( reading the
+    # total ); rendering costs one pass over the pixels. Which dominates is not a matter of opinion.
     import time
 
-    def fini( x ):
-        """Attendre vraiment : jax est asynchrone, un chronometre autour d'un appel qui n'a pas
-        fini ne mesure que le temps de le mettre en file."""
+    def done( x ):
+        """Really wait: jax is asynchronous, and a stopwatch around a call that has not finished
+        only measures the time to enqueue it."""
         raw = x.raw if hasattr( x, "raw" ) else x
         if hasattr( raw, "block_until_ready" ):
             raw.block_until_ready()
@@ -250,58 +235,32 @@ if p := bench( "csr_contre_rembourre_en_temps",
             numpy.asarray( raw )
         return x
 
-    largeur = hauteur = p.taille
-    splats = _scene( p.nb, largeur, hauteur, seed = p.seed )
-    ecran = _ecran( largeur, hauteur )
+    shape = ( p.size, p.size )
+    splats = _scene( p.nb, shape, seed = p.seed )
 
-    # de quoi connaitre la capacite IDEALE ( et chauffer les noyaux du chemin rembourre )
-    repere = construire_index( splats, ecran, capacite = 512 )
-    ideale = int( numpy.asarray( repere.nb_par_tuile.value ).reshape( -1 ).max() )
-
-    # un tour de chauffe par variante : le premier appel de chacune compile encore
-    fini( construire_index( splats, ecran, capacite = ideale ) )
-    index = construire_index_csr( splats, ecran )
-    fini( index.values )
-    fini( rendre( splats, repere, ecran ) )
-    fini( rendre_csr( splats, index, ecran ) )
+    # one warm-up per kernel: the first call of each is still compiling
+    touching = touching_gaussians( splats, shape )
+    done( touching.values )
+    done( render( splats, touching, shape ) )
 
     def chrono( action ):
-        meilleur = float( "inf" )
+        best = float( "inf" )
         for _ in range( p.reps ):
             t = time.perf_counter()
-            fini( action() )
-            meilleur = min( meilleur, time.perf_counter() - t )
-        return meilleur
+            done( action() )
+            best = min( best, time.perf_counter() - t )
+        return best
 
-    # LE BALAYAGE DE CAPACITE : le travail utile est le meme ( les memes splats, les memes tuiles ),
-    # seule la taille allouee change. Si le temps croit avec elle, c'est le SEMIS a zero qui le
-    # porte -- il remplit la capacite, pas le contenu. On ne peut pas le verifier en coupant le
-    # semis : sans lui le compteur s'accumule sur de la memoire indeterminee, et le total devient
-    # une taille d'allocation absurde ( teste : « overflow in static extent product » ).
-    capacites = [ ideale, 2 * ideale, 4 * ideale ]
-    temps_par_capacite = [ ( c, chrono( lambda c = c: construire_index( splats, ecran, capacite = c ) ) )
-                           for c in capacites ]
+    t_lists = chrono( lambda: touching_gaussians( splats, shape ).values )
+    t_render = chrono( lambda: render( splats, touching, shape ) )
 
-    t_idx_devine = chrono( lambda: construire_index( splats, ecran, capacite = 512 ) )
-    t_idx_ideale = temps_par_capacite[ 0 ][ 1 ]
-    t_idx_csr    = chrono( lambda: construire_index_csr( splats, ecran ).values )
-    t_rnd_remb   = chrono( lambda: rendre( splats, repere, ecran ) )
-    t_rnd_csr    = chrono( lambda: rendre_csr( splats, index, ecran ) )
+    counts = _per_tile( touching, shape ).reshape( -1 )
+    print( f"\n{p.nb} splats, {shape}, {touching.total} ( splat, tile ) pairs"
+           f" over {counts.size} tiles ( max {counts.max()} )" )
+    print( f"  building the lists ( 2 passes + a host prefix ) : {t_lists * 1e3:8.2f} ms" )
+    print( f"  rendering                                       : {t_render * 1e3:8.2f} ms" )
+    print( f"  TOTAL : {( t_lists + t_render ) * 1e3:8.2f} ms"
+           f"   -> the rendering is {100 * t_render / ( t_lists + t_render ):.0f} % of it" )
 
-    print( f"\n{p.nb} splats, {largeur}x{hauteur}, capacite ideale {ideale}, total CSR {index.total}" )
-    for cap, t in temps_par_capacite:
-        print( f"  index rembourre, capacite {cap:5d} ( {1024 * cap // 1024} entiers/tuile ) :"
-               f" {t * 1e3:8.2f} ms" )
-    print( f"  index rembourre ( capacite devinee 512 ) : {t_idx_devine * 1e3:8.2f} ms" )
-    print( f"  index rembourre ( capacite ideale )      : {t_idx_ideale * 1e3:8.2f} ms" )
-    print( f"  index CSR ( 2 passes + prefixe hote )    : {t_idx_csr * 1e3:8.2f} ms"
-           f"   -> x{t_idx_csr / t_idx_ideale:.2f} du rembourre ideal" )
-    print( f"  rendu sur index rembourre                : {t_rnd_remb * 1e3:8.2f} ms" )
-    print( f"  rendu sur index CSR                      : {t_rnd_csr * 1e3:8.2f} ms"
-           f"   -> x{t_rnd_csr / t_rnd_remb:.2f}" )
-    print( f"  TOTAL rembourre : {( t_idx_ideale + t_rnd_remb ) * 1e3:8.2f} ms" )
-    print( f"  TOTAL CSR       : {( t_idx_csr + t_rnd_csr ) * 1e3:8.2f} ms" )
-
-    p.results.update( idx_rembourre_ms = t_idx_ideale * 1e3, idx_csr_ms = t_idx_csr * 1e3,
-                      rendu_rembourre_ms = t_rnd_remb * 1e3, rendu_csr_ms = t_rnd_csr * 1e3,
-                      capacite_ideale = ideale, total_csr = index.total )
+    p.results.update( lists_ms = t_lists * 1e3, render_ms = t_render * 1e3,
+                      total_pairs = touching.total, max_per_tile = int( counts.max() ) )

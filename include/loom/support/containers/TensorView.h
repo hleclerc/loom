@@ -125,6 +125,32 @@ public:
     /// méthode, là où `axes` ci-dessous est une constante de compilation.
     HD auto          domain                 () const;
 
+    /// UN SOUS-DOMAINE, par NOM : `image.domain( num_y, num_x )` -- les pixels, pas les canaux.
+    ///
+    /// C'est ce qui manquait pour qu'un corps qui lance lui-même reste tensoriel. `domain()` prend
+    /// TOUS les axes, ce qui n'est le bon parcours que quand le tenseur n'en a que des axes à
+    /// parcourir ; une image `( y, x, rvb )` n'est pas dans ce cas -- un item par canal lui ferait
+    /// recalculer trois fois la même gaussienne. La parade était de se fabriquer un rang plat et de
+    /// le redécouper en `/` et `%`, c'est-à-dire de perdre les axes au moment précis où on itère
+    /// dessus.
+    ///
+    /// Les extents GARDENT LEUR TYPE ( `size( axis )` rend un `Ct<SI,N>` quand il en est un ), donc
+    /// une étendue connue à la compilation le reste dans le domaine.
+    template<class A,class... B> requires ( is_axis<A> )
+    HD auto domain( A, B... ) const {
+        auto shape = tuple( size( A{} ), size( B{} )... );
+        return CartesianIndices<DECAYED_TYPE_OF( shape ),Tuple<A,B...>>{ shape };
+    }
+
+    /// LE MÊME, DEPUIS UN ENSEMBLE : `image.domain( image.axes - num_channel )`.
+    ///
+    /// C'est la forme qu'un corps écrit quand il ne connaît PAS sa dimension : il ne nomme que
+    /// l'axe à retirer, et les autres -- deux en 2D, trois en 3D -- suivent sans être épelés.
+    template<class... A>
+    HD auto domain( AxisSet<A...> ) const {
+        return domain( A{}... );
+    }
+
     /// NOS AXES, comme un ensemble ( voir `Coords.h` ) : de quoi soustraire et itérer, sans
     /// extents. Purement des types, donc gratuit -- et le même nom que `coords.axes`.
     static constexpr typename detail::AxesOfTuple<_AxisNames>::type axes = {};

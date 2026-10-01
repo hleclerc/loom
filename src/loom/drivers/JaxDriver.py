@@ -382,8 +382,7 @@ class JaxDriver:
         dépassée une fois tend à l'être encore, donc on fait de la place plutôt que de compter.
         """
         from ..calls import lower_args, returned
-        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, mutables = lower_args( args )
-        output_exceptions = ()
+        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, rendus, output_exceptions = lower_args( args )
 
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
@@ -413,10 +412,10 @@ class JaxDriver:
                 # caller knows whether a count is prescribed or produced.
                 if has_dynamic_capacity:
                     jax.debug.callback( _raise_on_error, ca.errors.raw )
-                return returned( mutables )
+                return returned( rendus )
 
             if not overflows:
-                return returned( mutables )
+                return returned( rendus )
 
             # `SDOT_DEBUG_CAPACITY=1` : ce que le kernel a VRAIMENT demandé, tour par tour. Une
             # capacité qui double sans fin est le symptôme d'un `wanted` qui n'arrive pas (buffer

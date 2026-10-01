@@ -78,7 +78,7 @@ if test( "basic" ):
         outputs.cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
         """ ),
         # la capacite en sommets => `vertex_positions` est alloue en 8x2
-        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
+        cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
     )
 
     # the kernel wrote the count, and the count is what makes the tensor read 1x2 -- while the
@@ -145,7 +145,7 @@ if test( "partial_init" ):
         static_assert( outputs.cell.vertex_positions.is_valid );
         static_assert( ! outputs.cell.vertex_indices  .is_valid );
         """ ),
-        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
+        cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
     )
 
     assert cell.nb_vertices.value == 1
@@ -182,7 +182,7 @@ if test( "input_exceptions" ):
         outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 1;
         outputs.cell.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 2;
         """ ),
-        cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
+        cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
     )
 
     loom.ffi_call(
@@ -231,8 +231,8 @@ if test( "two_instances" ):
         outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
         outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
         """ ),
-        flat = loom.out( flat, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 8 } ),
-        volu = loom.out( volu, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
+        flat = loom.out( flat, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
+        volu = loom.out( volu, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
     )
 
     # one class, two instantiations: the compile-time `nb_dims` differ, and so do the capacities.
@@ -325,7 +325,7 @@ if test( "vmap" ):
         loom.ffi_call(
             "test_call_vmap",
             noyau,
-            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
+            cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
             scale = scale,
         )
         return cell.vertex_positions.raw
@@ -375,7 +375,7 @@ if test( "capacity_overflow" ):
         loom.ffi_call(
             "test_call_overflow",
             noyau,
-            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": capacity } ),
+            cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": capacity } ),
         )
         return cell
 
@@ -628,7 +628,7 @@ if test( "batch_alignment_forced" ):
         loom.ffi_call(
             "test_call_batch_align",
             noyau,
-            cell = loom.out( cell, "nb_vertices", "vertex_positions", capacities = { "nb_vertices": 4 } ),
+            cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
             batch_alignment = alignment,
         )
         return cell.vertex_positions
@@ -761,7 +761,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     loom.ffi_call(
         "test_call_scalar_count",
         noyau,
-        cnt = loom.out( cnt, "nb_out", "out", capacities = { "nb_out": 8 } ),
+        cnt = loom.out( cnt, writes = ( "nb_out", "out" ), capacities = { "nb_out": 8 } ),
     )
 
     assert cnt.nb_out.value == 3
@@ -937,8 +937,9 @@ if test( "le_role_se_dit_sur_la_valeur" ):
                            output_attributes = 10.0,
                            sortie = loom.out( sortie ) )
 
-    # `loom.out` ne rend rien : l'objet etait deja le notre, le resultat y est reecrit.
-    assert rendu is None
+    # `loom.out` REND L'OBJET QU'ON A DONNE -- il etait deja le notre, le resultat y a ete
+    # reecrit. C'est ce qui permet `return loom.ffi_call( ... )` au lieu de batir, appeler, rendre.
+    assert rendu is sortie
     assert numpy.asarray( sortie.raw ).tolist() == attendu
 
 
@@ -991,3 +992,57 @@ if test( "un_argument_mutable_rend_sa_nouvelle_valeur" ):
         assert False, "la collision sur 'v_input' aurait du etre refusee"
     except ValueError as e:
         assert "v_input" in str( e ), e
+
+
+if test( "writes_et_reads_disent_la_meme_chose_par_ses_deux_bouts" ):
+    # LA LISTE EST EXCLUSIVE, et se dit par le bout qu'on veut : `writes` nomme ce que le noyau
+    # ECRIT, `reads` ce qu'il LAISSE. Le reste suit, et les deux formes doivent donner le meme
+    # appel -- on donne simplement la plus courte.
+    import numpy
+
+    class Grille( Aggregate ):
+        valeurs  : RealTensor[ "num_case" ]
+        compte   : ShapeVar      # ce que le noyau ecrit
+        taille   : ShapeVar      # une DECLARATION : le noyau la lit, et elle dimensionne
+        num_case : Axis[ "taille" ]
+
+    # `g` est UN argument, donc il vit dans UN groupe -- celui de son marqueur. La decoupe
+    # `writes` / `reads` ne change pas ou il vit, elle change la POLITIQUE io de chaque membre :
+    # `taille` se lit sous `outputs.g`, et c'est bien une entree ( rien ne l'a remise a zero ).
+    noyau = FfiCode.per_item( code = """
+        const SI n = SI( outputs.g.taille );
+        outputs.g.compte.set( n );
+        for ( SI i = 0; i < n; ++i )
+            outputs.g.valeurs( num_case = i ) = 10 + i;
+    """ )
+
+    def remplie( **role ):
+        return loom.ffi_call( "test_writes_reads", noyau,
+                              g = loom.out( Grille( taille = 4 ), **role ) )
+
+    par_ecrit = remplie( writes = ( "valeurs", "compte" ) )
+    par_lu    = remplie( reads = ( "taille", ) )
+
+    for g in ( par_ecrit, par_lu ):
+        # `loom.out` rend l'objet : il n'y a pas eu a le batir sur une ligne a part
+        assert isinstance( g, Grille )
+        assert numpy.asarray( g.valeurs.value ).tolist() == [ 10.0, 11.0, 12.0, 13.0 ]
+        assert int( g.compte ) == 4
+        # et `taille` n'a PAS ete remise a zero : c'est tout l'enjeu de la decoupe
+        assert int( g.taille ) == 4
+
+    # les deux bouts a la fois pourraient se contredire : refuse
+    try:
+        remplie( writes = ( "valeurs", ), reads = ( "taille", ) )
+        assert False, "writes et reads ensemble doivent etre refuses"
+    except ValueError:
+        pass
+
+    # une faute de frappe ne passe pas en silence, dans un sens comme dans l'autre
+    for faux in ( dict( writes = ( "valeurz", ) ), dict( reads = ( "taile", ) ) ):
+        try:
+            remplie( **faux )
+            assert False, f"un nom qui ne designe rien doit etre refuse ( { faux } )"
+        except ValueError:
+            pass
+    print( "writes et reads : meme appel, et les deux listes sont verifiees" )

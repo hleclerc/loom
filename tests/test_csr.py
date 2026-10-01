@@ -28,7 +28,7 @@ if test( "le_i_va_chercher_dans_les_offsets" ):
     assert csr.total == 5          # la derniere borne EST le total
     assert csr.nb_rows_value == 3
 
-    loom.ffi_call( "csr_remplir", _REMPLIR, csr = loom.out( csr, "values" ), nb_items = 3 )
+    loom.ffi_call( "csr_remplir", _REMPLIR, csr = loom.out( csr, writes = ( "values", ) ), nb_items = 3 )
 
     # ligne 0 -> 0, 1 ; ligne 1 -> rien ; ligne 2 -> 20, 21, 22
     assert numpy.asarray( csr.values.value ).reshape( -1 ).tolist() == [ 0, 1, 20, 21, 22 ]

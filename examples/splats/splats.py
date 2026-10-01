@@ -1,270 +1,182 @@
-"""Du splatting gaussien 2D : un RAGGED dont la longueur est decouverte par le noyau.
+"""Gaussian splatting: a RAGGED structure whose length the kernel discovers.
 
-Deuxieme usager delibererement etranger de loom ( le premier est `examples/diffusion` ). Il
-n'importe que `loom`, son C++ ne connait que `<loom/support/...>`, et ce qu'il exerce est
-exactement ce que `diffusion` ne touchait pas :
+The second deliberately FOREIGN user of loom (the first is `examples/diffusion`). It imports only
+`loom`, its C++ lives next door in `splats.h`, and it exercises exactly what `diffusion` did not:
 
-  * un `ShapeVar` PAR TUILE, ecrit par le noyau -- donc une forme que Python ne connait pas au
-    tracage, et la boucle capacite / depassement / on-recommence ;
-  * un PIPELINE a plusieurs passes qui se partagent des agregats ;
-  * un adjoint en ACCUMULATION ATOMIQUE ( celui de `diffusion` etait en gather pur ).
+  * a structure the host sizes from a count A KERNEL WROTE -- so a shape that is not known at trace
+    time, and the host read-back that is loom's one irreplaceable trick;
+  * a PIPELINE of several passes sharing aggregates;
+  * an adjoint in ATOMIC ACCUMULATION (`diffusion`'s was a pure gather).
 
-    image( p ) = somme_i  opacite_i * exp( -q_i( p ) / 2 ) * couleur_i
+    image( p ) = sum_i  opacity_i * exp( -q_i( p ) / 2 ) * color_i
 
-Melange ADDITIF : pas d'ordre, donc pas de tri -- la composition alpha viendra apres.
+ADDITIVE blending: no order, hence no sort -- alpha compositing comes later.
 
-= Pourquoi le ragged n'est pas un confort ici
+= Why the ragged structure is not a convenience here
 
-Un pixel ne doit regarder que les splats qui l'atteignent, sinon le rendu est en O( pixels x
-splats ). D'ou un index `tuile -> splats qui la touchent`, dont la longueur DEPEND DES DONNEES.
+A pixel must only look at the splats that reach it, otherwise rendering is O( pixels x splats ). So
+every tile needs the list of the Gaussians TOUCHING it, and the length of that list DEPENDS ON THE
+DATA.
 
-Ce que XLA peut et ne peut pas, exactement -- parce que l'argument doit etre honnete : il peut
-construire un tel index, a condition qu'on BORNE le total a l'avance ( un compte, une somme
-prefixe, un scatter de taille fixe ). Ce qu'il ne peut pas, c'est le decouvrir. La difference se
-paie : une borne trop petite perd des splats en silence, une borne sure coute le pire cas pour tout
-le monde. Ici le noyau ECRIT le compte, et si la capacite etait trop petite il le dit -- l'hote
-reserve plus grand et relance. `reference_jax.py` mesure ce que la borne coute.
+What XLA can and cannot do, exactly -- because the argument has to be honest: it CAN build such a
+structure, provided the total is BOUNDED ahead of time (a count, a prefix sum, a fixed-size
+scatter). What it cannot do is DISCOVER it. The difference is paid for: too small a bound loses
+splats silently, a safe bound makes everyone pay the worst case. Here the kernel COUNTS, the host
+READS the total, and the list is allocated at exactly that -- no bound anywhere. `reference.py`
+measures what a bound would have cost.
+
+= One storage, and why this one
+
+The lists are kept in CSR: the bounds of each row, plus one flat list of everything. It was a
+measured choice and not a taste -- the obvious alternative, a PADDED rectangle `tiles x
+max_per_tile`, cost 2.4 to 5.1 times the memory on the same scenes, for the same images. The
+comparison is in the README, and `test_splats.py` still checks the ratio on every run (it is
+arithmetic on the row lengths, so it needs no second implementation to keep alive).
+
+= How to read this
+
+    splats.py     this file: the data, the calls, and what each pass does
+    splats.h      the C++ of the four kernels, in the same order
+    reference.py  what one would write without loom, and what the bound costs
+    test_splats.py
+
+= Nothing is flat, and nothing is named `x`
+
+No flat rank, no division by an image side, no `int( ... .value )`, and no axis called `x` or `y`.
+Every kernel asks for THE DOMAIN IT WANTS and reads its coordinates BY NAME; the C++ then copies
+them into a small array and loops over `d`. The whole example therefore has no dimension baked in
+-- `splats.h` has exactly one function that is still 2D, and it says so.
 """
-from pathlib import Path
-
-# `loom.Truc` et jamais `Truc` tout court : dans un exemple, on doit voir d'ou vient chaque nom.
+# `loom.Thing` and never a bare `Thing`: in an example one must see where every name comes from.
 import loom
-import loom.compilation
 
-# le C++ de CE paquet, enregistre aupres de loom comme n'importe quel usager
-loom.compilation.register_include_root( Path( __file__ ).resolve().parent / "include" )
-
-COTE = 16          # une tuile de 16 x 16 pixels
+TILE_SIDE = 16          # a tile is TILE_SIDE pixels along every axis
 
 
 class Splats( loom.Aggregate ):
-    """Les gaussiennes : centre, inverse de covariance ( a, b, c ), couleur, opacite."""
-    centres   : loom.RealTensor[ "splat", "xy" ]
-    cov_inv   : loom.RealTensor[ "splat", "abc" ]
-    couleurs  : loom.RealTensor[ "splat", "rvb" ]
-    opacites  : loom.RealTensor[ "splat" ]
+    """The Gaussians: center, inverse covariance, color, opacity.
 
-    splat     : loom.Axis[ "nb_splats" ]
-    xy        : loom.Axis[ "nb_xy" ]
-    abc       : loom.Axis[ "nb_abc" ]
-    rvb       : loom.Axis[ "nb_rvb" ]
-
-    nb_splats : loom.ShapeVar
-    nb_xy     : loom.CtShapeVar
-    nb_abc    : loom.CtShapeVar
-    nb_rvb    : loom.CtShapeVar
-
-
-class Index( loom.Aggregate ):
-    """L'INDEX RAGGED : pour chaque tuile, les splats qui la touchent.
-
-    `nb_par_tuile : ShapeVar[ "tuile" ]` est UN COMPTE PAR TUILE -- un `ShapeVar` qui varie le long
-    d'un axe ( ses `dep_axes` ). C'est la declaration d'un ragged en loom, et c'est une capacite que
-    son seul usager reel n'exerce nulle part : `grep dep_axes sdot/src` ne rend rien.
-
-    Le compte est ECRIT PAR LE NOYAU ( passe 1 ) ; `ids` est alloue a la capacite que l'appel
-    demande, et un compte qui la depasse est signale au lieu d'etre tronque en silence.
+    `num_coeff` is a COMPUTED extent: the inverse covariance is SYMMETRIC, so it has
+    `D ( D + 1 ) / 2` independent coefficients -- 3 in 2D, 6 in 3D. That is a formula, not an
+    affine expression, and loom evaluates it because `nb_dims` is known at compile time (see
+    `ShapeVar.set_formula`). Nothing to prescribe, hence nothing to keep in agreement.
     """
-    ids          : loom.IntTensor[ "tuile", "fente" ]
+    centers     : loom.RealTensor[ "num_splat", "num_dim" ]
+    cov_inv     : loom.RealTensor[ "num_splat", "num_coeff" ]
+    colors      : loom.RealTensor[ "num_splat", "num_channel" ]
+    opacities   : loom.RealTensor[ "num_splat" ]
 
-    tuile        : loom.Axis[ "nb_tuiles" ]
-    fente        : loom.Axis[ "nb_par_tuile" ]
+    num_splat   : loom.Axis[ "nb_splats" ]
+    num_dim     : loom.Axis[ "nb_dims" ]
+    num_coeff   : loom.Axis[ "nb_dims * ( nb_dims + 1 ) / 2" ]
+    num_channel : loom.Axis[ "nb_channels" ]
 
-    nb_tuiles    : loom.CtShapeVar
-    nb_par_tuile : loom.ShapeVar[ "tuile" ]
-
-
-class Ecran( loom.Aggregate ):
-    """La geometrie de l'image, connue a la compilation : le stencil de tuiles y gagne, au prix
-    d'une compilation par resolution ( comme la grille de `examples/diffusion` )."""
-    largeur : loom.CtShapeVar
-    hauteur : loom.CtShapeVar
-    cote    : loom.CtShapeVar
+    nb_splats   : loom.ShapeVar
+    nb_dims     : loom.CtShapeVar
+    nb_channels : loom.CtShapeVar
 
 
-def _nb_tuiles( largeur, hauteur, cote = COTE ):
-    return ( ( largeur + cote - 1 ) // cote ) * ( ( hauteur + cote - 1 ) // cote )
+# `shape` below is ALWAYS the image shape, axis by axis: `( 480, 640 )` for a 2D image, and axis `d`
+# of the image is coordinate `d` of a center. That single convention is what lets everything here be
+# written without ever naming a dimension.
+
+def _tile_axes( shape ):
+    """The axes of the tile grid -- one per dimension of the image, and that is all there is to it.
+    `num_tile_0`, `num_tile_1`, ... on the C++ side."""
+    return [ loom.Axis( ( n + TILE_SIDE - 1 ) // TILE_SIDE, name = f"num_tile_{ k }" )
+             for k, n in enumerate( shape ) ]
 
 
-_INSCRIRE = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        const SI i = flat_index;
-        splats::inscrire( inputs.splats, i, SI( inputs.ecran.largeur ), SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ),
-                          outputs.index.nb_par_tuile, outputs.index.ids );
-    """,
-)
-
-_RENDRE = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        const SI p = flat_index;
-        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
-        const SI px = p % largeur, py = p / largeur;
-        const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
-
-        splats::rendre_pixel( inputs.splats, inputs.index.ids, SI( inputs.index.nb_par_tuile( t ) ), t, px, py,
-                              outputs.image( y = py, x = px ) );
-    """,
-)
-
-_RENDRE_BWD = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        const SI p = flat_index;
-        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
-        const SI px = p % largeur, py = p / largeur;
-        const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
-
-        if constexpr ( ! grad_of_outputs.image.surely_null )
-            splats::rendre_pixel_bwd( inputs.splats, inputs.index.ids, SI( inputs.index.nb_par_tuile( t ) ), t, px, py,
-                                      grad_of_outputs.image( y = py, x = px ), grad_of_inputs.splats );
-    """,
-)
+def _empty_image( splats, shape ):
+    """An image of `shape`, plus the channel axis -- which the splats already own."""
+    pixels = [ loom.Axis( n, name = f"num_pixel_{ k }" ) for k, n in enumerate( shape ) ]
+    return loom.RealTensor[ *pixels, splats.num_channel ]()
 
 
-def construire_index( splats, ecran, capacite ):
-    """PASSE 1 : l'index ragged. NON differentiable ( il rend des entiers, et son lien aux centres
-    est discontinu -- un splat entre ou n'entre pas dans une tuile ).
+# Each kernel is written where it is LAUNCHED, right below. `loom.FfiCode.inline` takes the body of
+# the handler -- loom calls `kernel( queue, batch_axes, args )` -- and ours forwards to `splats.h`,
+# which holds the C++. `TILE_SIDE` crosses as a TEMPLATE argument, so it stays a compile-time
+# constant on the C++ side without being written there: the knob lives here, where one starts
+# reading.
 
-    `capacite` est une DEVINETTE : combien de splats par tuile au plus. Si elle est trop petite, le
-    noyau ecrit quand meme le compte VOULU et signale le depassement, et `driver.call` reserve plus
-    grand et relance tout seul -- l'appelant n'a rien a faire. La capacite finalement retenue se lit
-    dans `index.ids.capacity`, ce qui est la façon d'observer que la croissance a eu lieu.
+
+def touching_gaussians( splats, shape ):
+    """PASS 1: for each tile, which Gaussians reach it -- a `loom.CsrTensor` sized EXACTLY.
+
+    TWO PASSES, and that is what the exactness costs: COUNT, then -- the offsets being known --
+    FILL. In between, `CsrTensor.from_counts` does the prefix sum ON THE DEVICE and allocates
+    `values` at exactly the total.
+
+    THE ONE THING LOOM CAN DO THAT A JIT CANNOT is the line in the middle: sizing `values` means
+    READING the total, which is a count a kernel has just written. Under `jit` that count is a
+    tracer, so the total would have to be bounded before tracing -- and a bound is precisely what
+    this example does without.
+
+    NOT differentiable: it returns integers, and its link to the centers is discontinuous -- a splat
+    either enters a tile or it does not.
     """
-    index = Index( nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ),
-                                           int( ecran.cote.value ) ) )
-    loom.ffi_call(
-        "splats_inscrire",
-        _INSCRIRE,
+    tiles = _tile_axes( shape )
+
+    # 1. count. Nothing is written but one integer per tile, whose size is known: no capacity to
+    #    guess, no list to allocate yet.
+    counts = loom.ffi_call(
+        "splats_count",
+        loom.FfiCode.inline( f"splats::count< { TILE_SIDE } >( queue, batch_axes, args );",
+                             includes = [ "splats.h" ] ),
         splats = splats,
-        ecran = ecran,
-        index = loom.out( index, capacities = { "nb_par_tuile": capacite } ),
-        nb_items = int( splats.nb_splats.value ),
+        counts = loom.out( loom.IntTensor[ *tiles ]() ),
     )
-    return index
 
+    # 2. the storage. The GRID of counts becomes a SEQUENCE of rows here, read row-major -- a CSR's
+    #    rows are a sequence by construction, its offsets being a prefix sum along one order.
+    touching = loom.CsrTensor.from_counts( counts )
 
-def rendre( splats, index, ecran ):
-    """PASSE 2 : l'image. Differentiable par rapport a tout ce que porte `splats`."""
-    largeur, hauteur = int( ecran.largeur.value ), int( ecran.hauteur.value )
-    image = loom.RealTensor[ loom.Axis( loom.ShapeVar( hauteur ), name = "y" ),
-                        loom.Axis( loom.ShapeVar( largeur ), name = "x" ), splats.rvb ]()
-    loom.ffi_call(
-        "splats_rendre",
-        _RENDRE, _RENDRE_BWD,
+    # 3. fill -- the per-tile cursor gives the place within a row. Two outputs, so the call hands
+    #    back both, in the order they were given; only the second interests us.
+    _, touching = loom.ffi_call(
+        "splats_fill",
+        loom.FfiCode.inline( f"splats::fill< { TILE_SIDE } >( queue, batch_axes, args );",
+                             includes = [ "splats.h" ] ),
         splats = splats,
-        index = index,
-        ecran = ecran,
-        image = loom.out( image ),
-        nb_items = largeur * hauteur,
+        cursors = loom.out( loom.IntTensor[ *tiles ]() ),
+        touching = loom.out( touching, writes = ( "values", ) ),
     )
-    return image.value
+    return touching
 
 
-def rendu( splats, ecran, capacite ):
-    """Le rendu de bout en bout, differentiable : l'index est construit sur des centres dont le
-    gradient est COUPE ( l'affectation d'un splat a une tuile est discontinue, et ce n'est pas par
-    la que passe la derivee -- c'est aussi ce que fait un 3DGS ), puis l'image est rendue."""
-    index = construire_index( _sans_gradient( splats ), ecran, capacite )
-    return rendre( splats, index, ecran )
+def render( splats, touching, shape ):
+    """PASS 2: the image. Differentiable with respect to everything the splats carry.
+
+    Two kernels, and the second is the ADJOINT -- a kernel in its own right, running on other
+    buffers with its own launch domain. The call takes both and names the pair.
+
+    `.value` because what a caller wants here is the BACKEND array, not loom's tensor: it is what
+    `jax.vjp` differentiates through, and what `numpy.asarray` reads."""
+    return loom.ffi_call(
+        "splats_render",
+        loom.FfiCode.inline( f"splats::render< { TILE_SIDE } >( queue, batch_axes, args );",
+                             includes = [ "splats.h" ] ),
+        loom.FfiCode.inline( f"splats::render_bwd< { TILE_SIDE } >( queue, batch_axes, args );",
+                             includes = [ "splats.h" ] ),
+        splats = splats,
+        touching = touching,
+        image = loom.out( _empty_image( splats, shape ) ),
+    ).value
 
 
-def _sans_gradient( splats ):
-    """Les memes splats, detaches : ce que la passe 1 lit."""
-    autre = Splats( nb_xy = 2, nb_abc = 3, nb_rvb = 3 )
-    autre.centres  = loom.stop_gradient( splats.centres )
-    autre.cov_inv  = loom.stop_gradient( splats.cov_inv )
-    autre.couleurs = loom.stop_gradient( splats.couleurs )
-    autre.opacites = loom.stop_gradient( splats.opacites )
-    return autre
-
-# ── L'AUTRE REPRESENTATION : CSR, en deux passes ─────────────────────────────────────────────────
-#
-# L'index rembourre ci-dessus coute `tuiles x max_par_tuile`, alors que le contenu utile est
-# `total_des_couples`. Un CSU -- offsets + liste unique -- coute exactement l'utile. La question
-# honnete est donc : le ragged rembourre vaut-il son gaspillage ?
-#
-# Ce qu'il echange, c'est de la MEMOIRE contre une PASSE. Le rembourre inscrit en un seul balayage
-# des splats ( reserver une fente et ecrire ). Le CSR en demande deux : compter, puis -- les offsets
-# etant connus -- remplir. Entre les deux il faut une somme prefixe, et surtout il faut LIRE LE
-# TOTAL pour allouer la liste.
-#
-# Et c'est la que se trouve la vraie difference avec un JIT, pas dans le rembourrage : lire ce total
-# est une lecture HOTE d'un compte qu'un noyau vient d'ecrire. loom sait le faire ( `ShapeArray` est
-# fait pour ca ), et alloue donc EXACTEMENT. XLA ne peut pas : sous `jit` le compte est un tracer,
-# et il faut borner le total avant de tracer. Voir le tableau du README.
-
-_COMPTER = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        splats::compter( inputs.splats, flat_index, SI( inputs.ecran.largeur ),
-                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), outputs.comptes );
-    """,
-)
-
-_REMPLIR = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        splats::remplir( inputs.splats, flat_index, SI( inputs.ecran.largeur ),
-                         SI( inputs.ecran.hauteur ), SI( inputs.ecran.cote ), outputs.curseurs, outputs.index );
-    """,
-)
-
-_RENDRE_CSR = loom.FfiCode.per_item(
-    includes = [ "splats/rendu.h" ],
-    code = """
-        const SI p = flat_index;
-        const SI largeur = SI( inputs.ecran.largeur ), cote = SI( inputs.ecran.cote );
-        const SI px = p % largeur, py = p / largeur;
-        const SI t = ( py / cote ) * ( ( largeur + cote - 1 ) / cote ) + ( px / cote );
-
-        splats::rendre_pixel_csr( inputs.splats, inputs.index, t, px, py, outputs.image( y = py, x = px ) );
-    """,
-)
+def render_scene( splats, shape ):
+    """The whole thing, differentiable: the lists are built on centers whose gradient is CUT (which
+    tile a splat lands in is discontinuous, and that is not where the derivative goes -- a 3DGS does
+    the same), then the image is rendered."""
+    return render( splats, touching_gaussians( _detached( splats ), shape ), shape )
 
 
-def construire_index_csr( splats, ecran ):
-    """L'index en CSR : un `loom.CsrTensor`, de taille EXACTE.
-
-    DEUX PASSES : compter, puis remplir une fois les offsets connus -- c'est ce qu'un CSR echange
-    contre la memoire que le rembourre gaspille. `CsrTensor.from_counts` fait tout l'entre-deux :
-    la somme prefixe SUR LE DEVICE, et `values` alloue au total exactement.
-
-    NON utilisable sous `jit` : dimensionner `values` demande de LIRE le total, donc un compte
-    qu'un noyau vient d'ecrire. C'est le prix de l'exactitude, et c'est ce qu'un JIT ne peut pas
-    payer.
-    """
-    nb_tuiles = _nb_tuiles( int( ecran.largeur.value ), int( ecran.hauteur.value ), int( ecran.cote.value ) )
-    tuile = loom.Axis( loom.ShapeVar( nb_tuiles ), name = "tuile_csr" )
-    nb_splats = int( splats.nb_splats.value )
-
-    # 1. compter
-    comptes = loom.IntTensor[ tuile ]()
-    loom.ffi_call( "splats_compter", _COMPTER,
-                   splats = splats, ecran = ecran, comptes = loom.out( comptes ), nb_items = nb_splats )
-
-    # 2. l'index : offsets + liste plate, aux tailles exactes
-    index = loom.CsrTensor.from_counts( comptes )
-
-    # 3. remplir -- le curseur par tuile donne la place dans la ligne
-    curseurs = loom.IntTensor[ tuile ]()
-    loom.ffi_call( "splats_remplir", _REMPLIR,
-                   splats = splats, ecran = ecran, curseurs = loom.out( curseurs ),
-                   index = loom.out( index, "values" ), nb_items = nb_splats )
-    return index
-
-
-def rendre_csr( splats, index, ecran ):
-    """Le meme rendu, sur l'index CSR. Doit donner la meme image, au bit pres -- et c'est le MEME
-    corps de contribution, seule la facon de parcourir une tuile change."""
-    largeur, hauteur = int( ecran.largeur.value ), int( ecran.hauteur.value )
-    image = loom.RealTensor[ loom.Axis( loom.ShapeVar( hauteur ), name = "y" ),
-                        loom.Axis( loom.ShapeVar( largeur ), name = "x" ), splats.rvb ]()
-    loom.ffi_call(
-        "splats_rendre_csr",
-        _RENDRE_CSR,
-        splats = splats, ecran = ecran, index = index, image = loom.out( image ),
-        nb_items = largeur * hauteur,
-    )
-    return image.value
+def _detached( splats ):
+    """The same splats, detached: what pass 1 reads. The counts are SHARED rather than restated --
+    passing a `ShapeVar` makes both aggregates reference the same object."""
+    other = Splats( nb_dims = splats.nb_dims, nb_channels = splats.nb_channels )
+    other.centers   = loom.stop_gradient( splats.centers )
+    other.cov_inv   = loom.stop_gradient( splats.cov_inv )
+    other.colors    = loom.stop_gradient( splats.colors )
+    other.opacities = loom.stop_gradient( splats.opacities )
+    return other

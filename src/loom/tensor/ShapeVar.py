@@ -142,26 +142,34 @@ class ShapeVar( Attribute ):
     def _formula_value( self ):
         """La formule évaluée, `None` tant qu'un de ses symboles n'a pas de compte hôte.
 
-        Le résultat doit être un ENTIER : `2 * 3 / 2` vaut `3.0`, ce qui est bien le compte 3 ;
-        `5 / 2` ne vaut aucun compte, et c'est une erreur de déclaration, pas un arrondi à faire
-        en silence."""
+        PAR SEGMENT SI SES SYMBOLES LE SONT. Les symboles entrent TELS QUELS ( `static_raw`, et non
+        `static_count` qui en prend le maximum ), donc `( nb_pixels + 15 ) // 16` sur un `nb_pixels`
+        qui vaut `[ 256, 300 ]` rend `[ 16, 19 ]` : une étendue par dimension, ce qu'une `AxisList`
+        déroule. C'est l'arithmétique de numpy qui travaille, donc la FORME suit les symboles sans
+        qu'on ait à la dire -- un compte simple reste un scalaire.
+
+        Le résultat doit être ENTIER : `2 * 3 / 2` vaut `3.0`, ce qui est bien le compte 3 ; `5 / 2`
+        ne vaut aucun compte, et c'est une erreur de déclaration, pas un arrondi à faire en
+        silence."""
         if self._formula is None:
             return None
         expr, symbols = self._formula
 
         env = {}
         for nom, shape_var in symbols.items():
-            compte = shape_var.static_count()
+            compte = shape_var.static_raw()
             if compte is None:
                 return None
-            env[ nom ] = compte
+            env[ nom ] = numpy.asarray( compte )
 
-        res = eval( compile( expr, f"<taille d'axe { self.name }>", "eval" ), { "__builtins__": {} }, env )
-        if res != int( res ):
+        res = numpy.asarray( eval( compile( expr, f"<taille d'axe { self.name }>", "eval" ),
+                                   { "__builtins__": {} }, env ) )
+        entier = numpy.rint( res ).astype( int )
+        if not numpy.all( res == entier ):
             raise ValueError(
                 f"la taille d'axe '{ expr }' vaut { res }, qui n'est pas un entier -- un compte en "
                 f"est un ( avec { ', '.join( f'{ n } = { v }' for n, v in env.items() ) } )" )
-        return int( res )
+        return entier
 
     def _pull( self, kind ):
         """Solve our count from the tensors that use us: the FIRST usage able to invert one of its
@@ -182,8 +190,8 @@ class ShapeVar( Attribute ):
     def raw( self ) -> ArrayLike:
         """The raw COUNT as a backend / numpy array, or `None` while UNRESOLVED -- the same role
         `Tensor.raw` plays: the backend buffer behind the nice object. A kernel-written count wins,
-        being the freshest truth (and it is then a DEVICE value, never size a buffer with it); then
-        a user prescription; then what the LOGICAL sizes of a using tensor solve to (`_pull`).
+        being the freshest truth (and it is then a DEVICE value, never size a buffer with it); what
+        the HOST holds otherwise, in the order `static_raw` says.
 
         Users read `value` (a host `ShapeArray`); `raw` is the escape hatch to the backend array
         (what the shape math and the FFI read, without wrapping) -- and it is where a count that
@@ -191,16 +199,8 @@ class ShapeVar( Attribute ):
         if self._count is not None:
             return self._count
 
-        if self.prescribed_value is not None:
-            return self.prescribed_value
-
-        # une FORMULE d'autres comptes ( voir `set_formula` ) : elle CALCULE, donc elle passe avant
-        # le pull, qui lui cherche à DÉDUIRE le compte d'une taille observée.
-        calcule = self._formula_value()
-        if calcule is not None:
-            return numpy.array( calcule, dtype = int )
-
-        return self._pull( "logical" )
+        brut = self.static_raw()
+        return None if brut is None else numpy.asarray( brut )
 
     @property
     def value( self ):
@@ -266,13 +266,28 @@ class ShapeVar( Attribute ):
         solved = self._pull( "capacity" )
         return int( numpy.max( solved ) ) if solved is not None else None
 
-    def static_count( self ):
-        """Our count when PYTHON holds it (prescribed, or solved from the LOGICAL sizes of a tensor
-        we were given). `None` when it only lives on the device -- where it cannot size anything."""
+    def static_raw( self ):
+        """Our count when PYTHON holds it, AS IT IS: a scalar for a plain count, a VECTOR for one
+        count per segment (`dep_axes` -- an image side per dimension). `None` when it only lives on
+        the device, which is the whole meaning of "Python holds it".
+
+        Three sources, in this order: what a user PRESCRIBED, what a FORMULA over other counts
+        CALCULATES (`set_formula` -- it computes, so it comes before anything that tries to deduce),
+        then what the LOGICAL sizes of a using tensor solve to (`_pull`).
+
+        This is the raw count; `static_count` is its maximum. The split is what each is FOR: a size
+        to allocate wants one number (the max), an extent to compute with wants the count itself."""
         if self.prescribed_value is not None:
-            return int( numpy.max( self.prescribed_value ) )
+            return self.prescribed_value
+
         calcule = self._formula_value()
         if calcule is not None:
             return calcule
-        solved = self._pull( "logical" )
-        return int( numpy.max( solved ) ) if solved is not None else None
+
+        return self._pull( "logical" )
+
+    def static_count( self ):
+        """Our count when PYTHON holds it, as ONE number -- the MAXIMUM when there is one per
+        segment, because that is what sizes things. See `static_raw`."""
+        brut = self.static_raw()
+        return None if brut is None else int( numpy.max( brut ) )

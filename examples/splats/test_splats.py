@@ -13,7 +13,7 @@ import numpy
 from errand import Param, bench, test
 from loom.testing import check_grad
 
-from splats import TILE_SIDE, Splats, touching_gaussians, render, render_scene
+from splats import Screen, Splats, touching_gaussians, render, render_scene
 
 
 def _scene( nb, shape, seed = 0, scale = 3.0, clusters = 6 ):
@@ -63,17 +63,21 @@ def _scene( nb, shape, seed = 0, scale = 3.0, clusters = 6 ):
     return splats
 
 
-def _nb_tiles( shape ):
-    return tuple( ( n + TILE_SIDE - 1 ) // TILE_SIDE for n in shape )
+def _nb_tiles( screen ):
+    """The tiling rule, computed HERE -- which is the point: `Screen` declares it as an axis extent,
+    and the first test below checks that loom's grid is this one. Both of its ingredients are counts
+    the screen carries, so there is no constant to agree with."""
+    side = int( screen.tile_side )
+    return tuple( ( int( n ) + side - 1 ) // side for n in screen.nb_pixels.value )
 
 
-def _per_tile( touching, shape ):
+def _per_tile( touching, screen ):
     """How many Gaussians each tile holds, back in the shape of the tile GRID.
 
     `offsets` carries `nb_rows + 1` BOUNDS and not counts, so a row's length is a subtraction of
     neighbours -- and that is also why the last bound IS the total."""
     offsets = numpy.asarray( touching.offsets.value )
-    return numpy.diff( offsets ).reshape( _nb_tiles( shape ) )
+    return numpy.diff( offsets ).reshape( _nb_tiles( screen ) )
 
 
 if test( "the_lists_are_sized_exactly" ):
@@ -82,10 +86,15 @@ if test( "the_lists_are_sized_exactly" ):
     # padded -- which is the one thing a JIT cannot do.
     shape, nb = ( 256, 256 ), 2000
     splats = _scene( nb, shape )
-    touching = touching_gaussians( splats, shape )
+    screen = Screen( splats, shape )
+    touching = touching_gaussians( splats, screen )
 
-    counts = _per_tile( touching, shape )
-    assert counts.shape == _nb_tiles( shape ), counts.shape
+    # the grid is loom's, from an extent it computed: `( nb_pixels + tile_side - 1 ) // tile_side`,
+    # one per dimension
+    assert tuple( screen.num_tile.max_list() ) == _nb_tiles( screen ), screen.num_tile.max_list()
+
+    counts = _per_tile( touching, screen )
+    assert counts.shape == _nb_tiles( screen ), counts.shape
     assert counts.sum() > nb, "every splat touches at least one tile"
 
     # EXACTLY: the list is as long as its content, to the integer
@@ -115,7 +124,8 @@ if test( "the_rendering_matches_the_direct_sum" ):
 
     shape, nb = ( 64, 96 ), 150
     splats = _scene( nb, shape )
-    image = render( splats, touching_gaussians( splats, shape ), shape )
+    screen = Screen( splats, shape )
+    image = render( splats, touching_gaussians( splats, screen ), screen )
 
     expected = dense_render( numpy.asarray( splats.centers ), numpy.asarray( splats.cov_inv ),
                              numpy.asarray( splats.colors ), numpy.asarray( splats.opacities ),
@@ -133,13 +143,18 @@ if test( "an_image_that_is_not_a_multiple_of_the_tile" ):
 
     shape, nb = ( 37, 53 ), 80
     splats = _scene( nb, shape, seed = 5 )
-    image = render( splats, touching_gaussians( splats, shape ), shape )
+    screen = Screen( splats, shape )
+    image = render( splats, touching_gaussians( splats, screen ), screen )
+
+    # the last row of tiles hangs over the edge: 53 pixels is 3 tiles and a third
+    assert tuple( screen.num_tile.max_list() ) == ( 3, 4 ), screen.num_tile.max_list()
 
     expected = dense_render( numpy.asarray( splats.centers ), numpy.asarray( splats.cov_inv ),
                              numpy.asarray( splats.colors ), numpy.asarray( splats.opacities ),
                              shape )
     gap = numpy.abs( numpy.asarray( image ) - expected ).max()
-    print( f"image {shape} ( tile {TILE_SIDE} ) : gap to the dense rendering {gap:.3e}" )
+    print( f"image {shape} ( tile {int( screen.tile_side )} ) :"
+           f" gap to the dense rendering {gap:.3e}" )
     assert gap < 1e-10, gap
 
 
@@ -172,7 +187,8 @@ if test( "what_a_single_bound_costs" ):
     for nb, shape in ( ( 500, ( 256, 256 ) ), ( 2000, ( 256, 256 ) ), ( 2000, ( 512, 512 ) ) ):
         splats = _scene( nb, shape )
         cov = numpy.asarray( splats.cov_inv )
-        counts = _per_tile( touching_gaussians( splats, shape ), shape ).reshape( -1 )
+        screen = Screen( splats, shape )
+        counts = _per_tile( touching_gaussians( splats, screen ), screen ).reshape( -1 )
 
         bound, radius = window_work( cov )
         useful = real_work( cov )
@@ -200,8 +216,9 @@ if test( "a_padded_storage_would_cost_more_memory" ):
     # exactly equal to the longest row -- which a real padded version could not even know in advance.
     for nb, shape in ( ( 500, ( 256, 256 ) ), ( 2000, ( 256, 256 ) ), ( 2000, ( 512, 512 ) ) ):
         splats = _scene( nb, shape )
-        touching = touching_gaussians( splats, shape )
-        counts = _per_tile( touching, shape ).reshape( -1 )
+        screen = Screen( splats, shape )
+        touching = touching_gaussians( splats, screen )
+        counts = _per_tile( touching, screen ).reshape( -1 )
 
         nb_tiles = counts.size
         padded = nb_tiles * int( counts.max() )             # the BEST possible capacity
@@ -237,11 +254,12 @@ if p := bench( "where_the_time_goes",
 
     shape = ( p.size, p.size )
     splats = _scene( p.nb, shape, seed = p.seed )
+    screen = Screen( splats, shape )
 
     # one warm-up per kernel: the first call of each is still compiling
-    touching = touching_gaussians( splats, shape )
+    touching = touching_gaussians( splats, screen )
     done( touching.values )
-    done( render( splats, touching, shape ) )
+    done( render( splats, touching, screen ) )
 
     def chrono( action ):
         best = float( "inf" )
@@ -251,10 +269,10 @@ if p := bench( "where_the_time_goes",
             best = min( best, time.perf_counter() - t )
         return best
 
-    t_lists = chrono( lambda: touching_gaussians( splats, shape ).values )
-    t_render = chrono( lambda: render( splats, touching, shape ) )
+    t_lists = chrono( lambda: touching_gaussians( splats, screen ).values )
+    t_render = chrono( lambda: render( splats, touching, screen ) )
 
-    counts = _per_tile( touching, shape ).reshape( -1 )
+    counts = _per_tile( touching, screen ).reshape( -1 )
     print( f"\n{p.nb} splats, {shape}, {touching.total} ( splat, tile ) pairs"
            f" over {counts.size} tiles ( max {counts.max()} )" )
     print( f"  building the lists ( 2 passes + a host prefix ) : {t_lists * 1e3:8.2f} ms" )

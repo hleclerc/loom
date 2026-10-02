@@ -39,10 +39,10 @@ and size the next allocation with it**. That is what makes the CSR path *exact* 
 ```python
 counts = loom.ffi_call(
     "splats_count",
-    loom.FfiCode.inline( f"splats::count< { TILE_SIDE } >( queue, batch_axes, args );",
+    loom.FfiCode.inline( f"splats::count< { int( screen.tile_side ) } >( queue, batch_axes, args );",
                          includes = [ "splats.h" ] ),
     splats = splats,
-    counts = loom.out( loom.IntTensor[ *tile_axes ]() ),
+    counts = loom.out( loom.IntTensor[ screen.num_tile ]() ),
 )
 
 touching = loom.CsrTensor.from_counts( counts )   # <- the total is READ on the host,
@@ -124,22 +124,33 @@ line of `splats.h` names a dimension**, save one, which says so:
 
 Consequences down the chain, every one of them *removing* something:
 
-- **the tile grid stays a grid, with as many axes as the splats have dimensions** — `_tile_axes(
-  shape )` is a comprehension, and the C++ reads its extents off the tensor it is about to write
-  into (`to_array<D>( counts.shape(), nb_tiles )`). The one place anything is flattened is the CSR's
-  `row_of`, and that is not a shortcut: a CSR's rows ARE a sequence, its offsets being a prefix sum
-  along one order;
-- **no screen object** — width, height and tile counts are read off the tensors
-  (`counts.shape()`, `image.size( axis )`). They no longer cross, and above all they are **no longer
-  compile-time**: one more resolution recompiles nothing, where a `Ecran` of `CtShapeVar`s
+- **the tile grid stays a grid, with as many axes as the splats have dimensions** — one `AxisList`
+  declares the family (`num_tile_0, num_tile_1, …`), and the C++ reads its extents off the tensor it
+  is about to write into (`to_array<D>( counts.shape(), nb_tiles )`). The one place anything is
+  flattened is the CSR's `row_of`, and that is not a shortcut: a CSR's rows ARE a sequence, its
+  offsets being a prefix sum along one order;
+- **an axis extent can be computed** — and that is now where the *tiling rule* lives:
+  `num_tile : AxisList[ "num_dim", "( nb_pixels + tile_side - 1 ) // tile_side" ]`, one extent per
+  dimension, written as a formula rather than interpolated into one because `tile_side` is a
+  **count** and not a module constant. Same
+  mechanism as `num_coeff : Axis[ "nb_dims * ( nb_dims + 1 ) / 2" ]` (the inverse covariance being
+  symmetric: 3 in 2D, 6 in 3D). It is a *formula*, not an affine expression — **computed** instead of
+  inverted (see `ShapeVar.set_formula`), and loom admits both side by side. So the grid follows the
+  image by construction, and no host arithmetic stands between them;
+- **a `Screen` that crosses nothing** — it holds no buffer: it is where the image axes and the tile
+  axes are *declared*, once. An axis is a **reference**, and that is the whole reason it is a
+  declaration and not a function handing back a fresh list: the same `num_tile` object sizes the
+  counts and the cursors, which is what makes them the same grid. What it is **not** is a size fixed
+  at compile time: one more resolution recompiles nothing, where an `Ecran` of `CtShapeVar`s
   recompiled every kernel for every image size. Measured on the test suite, which renders at
   256×256, 96×64, 37×53, 48×48 and 512×512: **one** library per kernel, not five each. The only number
-  left at compile time is the **tile side**, which is a choice of algorithm — and it lives in
-  Python, crossing as a template argument;
-- **an axis extent can be computed** — `num_coeff : Axis[ "nb_dims * ( nb_dims + 1 ) / 2" ]`, because
-  the inverse covariance is symmetric. 3 in 2D, 6 in 3D, nothing to prescribe and nothing to keep in
-  agreement. It is a *formula*, not an affine expression: it is **computed** instead of being
-  inverted (see `ShapeVar.set_formula`), and loom admits both side by side.
+  left at compile time is the **tile side**, which is a choice of algorithm — a `CtShapeVar` the
+  screen carries, read on the host (`int( screen.tile_side )`) and crossing as a template argument,
+  so it is chosen per screen and nowhere a global;
+- **the detached twin is not written by hand** — `loom.stop_gradient` takes the *aggregate*: it
+  detaches the tensors and shares the counts and the axes, so `render_scene` cuts the gradient of
+  pass 1 in one line. Restating a count field by field is code that goes stale the day a field is
+  added, and that can contradict itself meanwhile.
 
 ## The numbers
 
@@ -198,8 +209,9 @@ And the finding that matters most to loom: the ragged machinery — a `ShapeVar`
 count per cell, capacity-checked on write by `ShapeVarView::set` — was developed for Laguerre cells,
 and **sdot does not use it anywhere**. This example was its first real use, and it concluded that a
 CSR does better. So after this cleanup **nothing in the repository writes a ragged count**: the
-`dep_axes` of a `ShapeVar` are still used to SIZE things (`Image`'s per-dimension `shape`), but the
-per-cell counter, its capacity bound and its error slot have no user left. That is an argument for
+`dep_axes` of a `ShapeVar` are still used to SIZE things — `Image`'s per-dimension `shape`, and this
+example's own `nb_pixels : ShapeVar[ "num_dim" ]`, one image side per dimension — but the per-cell
+counter, its capacity bound and its error slot have no user left. That is an argument for
 simplifying loom, and it is information about loom, not about splatting.
 
 ## What the exercise returned to loom

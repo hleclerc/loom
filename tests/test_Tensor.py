@@ -797,6 +797,48 @@ if test( "every_operation_has_both_forms" ):
                  RealTensor[ i ]( [ 0.0, 0.5 ] ).arcsin() )
 
 
+if test( "un_agregat_se_detache_en_entier" ):
+    # `loom.stop_gradient` PREND L'AGREGAT : il detache les tenseurs et PARTAGE tout le reste. Sans
+    # ca chaque appelant recopiait ses champs un par un -- du code qui perime le jour ou un champ
+    # s'ajoute, et qui restate des comptes qui peuvent alors se contredire.
+    import loom
+    from loom import CtShapeVar
+
+    class Points( Aggregate ):
+        pos     : RealTensor[ "num_point", "num_dim" ]
+        poids   : RealTensor[ "num_point" ]
+
+        num_point : Axis[ "nb_points" ]
+        num_dim   : Axis[ "nb_dims" ]
+
+        nb_points : ShapeVar
+        nb_dims   : CtShapeVar
+
+    p = Points( nb_dims = 2 )
+    p.pos   = [ [ 0.0, 1.0 ], [ 2.0, 3.0 ], [ 4.0, 5.0 ] ]
+    p.poids = [ 1.0, 2.0, 3.0 ]
+
+    q = loom.stop_gradient( p )
+
+    # les valeurs sont les memes, les tampons sont d'autres objets
+    assert numpy.asarray( q.pos.value ).tolist() == numpy.asarray( p.pos.value ).tolist()
+    assert numpy.asarray( q.poids.value ).tolist() == [ 1.0, 2.0, 3.0 ]
+    assert q.pos is not p.pos
+
+    # les comptes et les axes sont LES MEMES OBJETS : un compte restate est un compte qui peut
+    # se contredire, et un axe est une reference
+    assert q.nb_points is p.nb_points
+    assert q.nb_dims is p.nb_dims
+    assert q.num_dim is p.num_dim
+    assert int( q.nb_points ) == 3 and int( q.nb_dims ) == 2
+
+    # les dimensions du detache sont nommees comme celles de l'original
+    assert q.pos.shape == [ 3, 2 ], q.pos.shape
+    assert q.pos.name == "pos"
+
+    info( "un agregat se detache en entier" )
+
+
 if test( "a_result_keeps_its_extents_after_its_operand_is_gone" ):
     import gc
 
@@ -1132,6 +1174,41 @@ if test( "une_taille_d_axe_peut_etre_une_formule" ):
         assert False, "2.5 n'est pas un compte"
     except ValueError:
         pass
+
+
+if test( "une_formule_suit_ses_symboles_dimension_par_dimension" ):
+    # UNE FORMULE PAR DIMENSION. Les symboles entrent TELS QUELS, donc une formule sur un compte
+    # par segment ( une taille d'image par dimension ) en rend un aussi -- c'est l'arithmetique de
+    # numpy qui porte la forme. C'est ce qui permet a une famille d'axes entiere de se CALCULER a
+    # partir d'une autre : la grille de tuiles qui couvre une image ( `examples/splats` ).
+    from loom import CtShapeVar
+
+    class Grille( Aggregate ):
+        num_pixel : AxisList[ "num_dim", "nb_pixels" ]
+        num_tile  : AxisList[ "num_dim", "( nb_pixels + 15 ) // 16" ]
+
+        num_dim   : Axis[ "nb_dims" ]
+
+        nb_pixels : ShapeVar[ "num_dim" ]
+        nb_dims   : CtShapeVar
+
+    g = Grille( nb_dims = 2, nb_pixels = ( 256, 300 ) )
+    assert g.num_pixel.max_list() == [ 256, 300 ]
+    assert g.num_tile.max_list() == [ 16, 19 ], g.num_tile.max_list()        # 300 = 18 tuiles + 12
+
+    # et un tenseur declare dessus prend cette forme-la, une dimension par membre deroule
+    counts = IntTensor[ g.num_tile ]()
+    assert counts.shape == [ 16, 19 ], counts.shape
+
+    # en 3D sans rien changer d'autre
+    g3 = Grille( nb_dims = 3, nb_pixels = ( 64, 65, 1 ) )
+    assert g3.num_tile.max_list() == [ 4, 5, 1 ], g3.num_tile.max_list()
+
+    # `static_count` reste UN nombre -- le maximum, qui est ce qui dimensionne
+    assert g.nb_pixels.static_count() == 300
+    assert list( g.nb_pixels.static_raw() ) == [ 256, 300 ]
+
+    info( "une formule par dimension" )
 
 
 if test( "un_compte_est_un_nombre" ):

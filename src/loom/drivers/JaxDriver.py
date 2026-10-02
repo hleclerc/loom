@@ -69,6 +69,18 @@ class JaxDriver:
         #
         device.driver_version = device.driver_version_for_jax( jax.devices )
 
+        # LE DEVICE DE LOOM EST LE DEVICE, pour tout ce qui ne dit pas le contraire. Sans cette
+        # ligne, `LOOM_DEVICE=cpu` ne déplaçait que les tampons DES APPELS : un `jnp.array` fabriqué
+        # à côté restait sur le défaut de jax, qui est la carte dès qu'il y en a une -- et la
+        # première addition entre les deux échoue sur `Received incompatible devices for jitted
+        # computation ... on platform CPU and ... on platform GPU`. Le choix du device appartient à
+        # l'appelant, pas à la moitié de ses tenseurs.
+        #
+        # C'est une config GLOBALE de jax, posée par une bibliothèque : assumé, et c'est déjà ce que
+        # fait `jax_enable_x64` juste au-dessus. Un tenseur qui nomme son device explicitement n'est
+        # pas concerné ( `jax_default_device` ne vaut que pour le défaut ).
+        jax.config.update( "jax_default_device", device.driver_version )
+
     def driver_dtype_version( self, kind, size ):
         """The jax dtype a `( kind, size )` denotes. `size is None` means "the driver's own",
         which is exactly what `TF` / `TI` are -- resolved here, once the driver exists."""

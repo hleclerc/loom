@@ -46,11 +46,14 @@ No flat rank, no division by an image side, no `int( ... .value )`, and no axis 
 Every kernel asks for THE DOMAIN IT WANTS and reads its coordinates BY NAME; the C++ then copies
 them into a small array and loops over `d`. The whole example therefore has no dimension baked in
 -- `splats.h` has exactly one function that is still 2D, and it says so.
+
+The shapes are not computed on the side either. The image axes and the tile axes are each ONE
+declaration (`Screen`), the tile extents being `( nb_pixels + tile_side - 1 ) // tile_side` -- an
+axis extent loom evaluates, so no host arithmetic stands between an image and its grid. And there is
+no module-level constant: the tile side is a COUNT the screen carries, like the others.
 """
 # `loom.Thing` and never a bare `Thing`: in an example one must see where every name comes from.
 import loom
-
-TILE_SIDE = 16          # a tile is TILE_SIDE pixels along every axis
 
 
 class Splats( loom.Aggregate ):
@@ -76,31 +79,56 @@ class Splats( loom.Aggregate ):
     nb_channels : loom.CtShapeVar
 
 
-# `shape` below is ALWAYS the image shape, axis by axis: `( 480, 640 )` for a 2D image, and axis `d`
-# of the image is coordinate `d` of a center. That single convention is what lets everything here be
-# written without ever naming a dimension.
+class Screen( loom.Aggregate ):
+    """What the Gaussians are drawn ON: the geometry of an image, and of the grid of tiles that
+    covers it. No buffer at all -- this is where the AXES are written, once.
 
-def _tile_axes( shape ):
-    """The axes of the tile grid -- one per dimension of the image, and that is all there is to it.
-    `num_tile_0`, `num_tile_1`, ... on the C++ side."""
-    return [ loom.Axis( ( n + TILE_SIDE - 1 ) // TILE_SIDE, name = f"num_tile_{ k }" )
-             for k, n in enumerate( shape ) ]
+    AN AXIS IS A REFERENCE, and that is why this is a declaration and not a function returning a
+    fresh list. The same `num_tile` object sizes the counts and the cursors below, which is what
+    makes them the same grid; two grids built apart would merely happen to agree.
 
+    THE TILING RULE IS AN EXTENT, not arithmetic the host does behind loom's back: that
+    `// tile_side` is an axis extent like `num_coeff`'s, evaluated when someone asks (see
+    `ShapeVar.set_formula`). So the grid FOLLOWS the image -- there is nothing to keep in agreement,
+    and a reader finds the rule once, where the grid is declared.
 
-def _empty_image( splats, shape ):
-    """An image of `shape`, plus the channel axis -- which the splats already own."""
-    pixels = [ loom.Axis( n, name = f"num_pixel_{ k }" ) for k, n in enumerate( shape ) ]
-    return loom.RealTensor[ *pixels, splats.num_channel ]()
+    `tile_side` IS A COUNT and not a module constant, which is what lets the rule be written as that
+    formula rather than interpolated into it. A `CtShapeVar` because it really is compile-time: it
+    crosses as the kernels' template argument.
+
+    And both families are declared over `num_dim`: one axis per dimension, unrolled into
+    `num_pixel_0, num_pixel_1, ...` on the C++ side. Hence a rank that follows the image, and not
+    one dimension named here.
+    """
+    num_pixel : loom.AxisList[ "num_dim", "nb_pixels" ]
+    num_tile  : loom.AxisList[ "num_dim", "( nb_pixels + tile_side - 1 ) // tile_side" ]
+
+    num_dim   : loom.Axis[ "nb_dims" ]
+
+    nb_pixels : loom.ShapeVar[ "num_dim" ]      # one image side per dimension
+    nb_dims   : loom.CtShapeVar
+    tile_side : loom.CtShapeVar                 # pixels per tile, along every axis
+
+    def __init__( self, splats, shape, tile_side = 16 ):
+        # `shape` is the image shape, axis by axis: `( 480, 640 )` for a 2D image, and axis `d` of
+        # the image is coordinate `d` of a center. That one convention is what lets everything here
+        # be written without naming a dimension.
+        #
+        # `nb_dims` is SHARED and not restated -- passing the `ShapeVar` object makes this screen
+        # and the splats reference the same count, so there is no way for them to disagree.
+        assert len( shape ) == int( splats.nb_dims ), \
+            "the image must have one axis per dimension of the splats"
+        super().__base_init__( nb_dims = splats.nb_dims, nb_pixels = shape, tile_side = tile_side )
 
 
 # Each kernel is written where it is LAUNCHED, right below. `loom.FfiCode.inline` takes the body of
 # the handler -- loom calls `kernel( queue, batch_axes, args )` -- and ours forwards to `splats.h`,
-# which holds the C++. `TILE_SIDE` crosses as a TEMPLATE argument, so it stays a compile-time
-# constant on the C++ side without being written there: the knob lives here, where one starts
-# reading.
+# which holds the C++. The tile side crosses as a TEMPLATE argument: `int( screen.tile_side )` reads
+# the count on the HOST and writes it into the generated source, so it stays a compile-time constant
+# on the C++ side while being a field of the screen rather than a constant of this module.
 
 
-def touching_gaussians( splats, shape ):
+def touching_gaussians( splats, screen ):
     """PASS 1: for each tile, which Gaussians reach it -- a `loom.CsrTensor` sized EXACTLY.
 
     TWO PASSES, and that is what the exactness costs: COUNT, then -- the offsets being known --
@@ -115,16 +143,16 @@ def touching_gaussians( splats, shape ):
     NOT differentiable: it returns integers, and its link to the centers is discontinuous -- a splat
     either enters a tile or it does not.
     """
-    tiles = _tile_axes( shape )
+    side = int( screen.tile_side )
 
     # 1. count. Nothing is written but one integer per tile, whose size is known: no capacity to
     #    guess, no list to allocate yet.
     counts = loom.ffi_call(
         "splats_count",
-        loom.FfiCode.inline( f"splats::count< { TILE_SIDE } >( queue, batch_axes, args );",
+        loom.FfiCode.inline( f"splats::count< { side } >( queue, batch_axes, args );",
                              includes = [ "splats.h" ] ),
         splats = splats,
-        counts = loom.out( loom.IntTensor[ *tiles ]() ),
+        counts = loom.out( loom.IntTensor[ screen.num_tile ]() ),
     )
 
     # 2. the storage. The GRID of counts becomes a SEQUENCE of rows here, read row-major -- a CSR's
@@ -135,16 +163,16 @@ def touching_gaussians( splats, shape ):
     #    back both, in the order they were given; only the second interests us.
     _, touching = loom.ffi_call(
         "splats_fill",
-        loom.FfiCode.inline( f"splats::fill< { TILE_SIDE } >( queue, batch_axes, args );",
+        loom.FfiCode.inline( f"splats::fill< { side } >( queue, batch_axes, args );",
                              includes = [ "splats.h" ] ),
         splats = splats,
-        cursors = loom.out( loom.IntTensor[ *tiles ]() ),
+        cursors = loom.out( loom.IntTensor[ screen.num_tile ]() ),
         touching = loom.out( touching, writes = ( "values", ) ),
     )
     return touching
 
 
-def render( splats, touching, shape ):
+def render( splats, touching, screen ):
     """PASS 2: the image. Differentiable with respect to everything the splats carry.
 
     Two kernels, and the second is the ADJOINT -- a kernel in its own right, running on other
@@ -152,31 +180,26 @@ def render( splats, touching, shape ):
 
     `.value` because what a caller wants here is the BACKEND array, not loom's tensor: it is what
     `jax.vjp` differentiates through, and what `numpy.asarray` reads."""
+    side = int( screen.tile_side )
     return loom.ffi_call(
         "splats_render",
-        loom.FfiCode.inline( f"splats::render< { TILE_SIDE } >( queue, batch_axes, args );",
+        loom.FfiCode.inline( f"splats::render< { side } >( queue, batch_axes, args );",
                              includes = [ "splats.h" ] ),
-        loom.FfiCode.inline( f"splats::render_bwd< { TILE_SIDE } >( queue, batch_axes, args );",
+        loom.FfiCode.inline( f"splats::render_bwd< { side } >( queue, batch_axes, args );",
                              includes = [ "splats.h" ] ),
         splats = splats,
         touching = touching,
-        image = loom.out( _empty_image( splats, shape ) ),
+        image = loom.out( loom.RealTensor[ screen.num_pixel, splats.num_channel ]() ),
     ).value
 
 
 def render_scene( splats, shape ):
     """The whole thing, differentiable: the lists are built on centers whose gradient is CUT (which
     tile a splat lands in is discontinuous, and that is not where the derivative goes -- a 3DGS does
-    the same), then the image is rendered."""
-    return render( splats, touching_gaussians( _detached( splats ), shape ), shape )
+    the same), then the image is rendered.
 
-
-def _detached( splats ):
-    """The same splats, detached: what pass 1 reads. The counts are SHARED rather than restated --
-    passing a `ShapeVar` makes both aggregates reference the same object."""
-    other = Splats( nb_dims = splats.nb_dims, nb_channels = splats.nb_channels )
-    other.centers   = loom.stop_gradient( splats.centers )
-    other.cov_inv   = loom.stop_gradient( splats.cov_inv )
-    other.colors    = loom.stop_gradient( splats.colors )
-    other.opacities = loom.stop_gradient( splats.opacities )
-    return other
+    `loom.stop_gradient` takes the AGGREGATE: it detaches the four tensors and shares everything
+    else, so the detached twin and the splats hold the same counts by construction. Spelling it out
+    field by field would say the same thing, until the day a fifth field is added."""
+    screen = Screen( splats, shape )
+    return render( splats, touching_gaussians( loom.stop_gradient( splats ), screen ), screen )

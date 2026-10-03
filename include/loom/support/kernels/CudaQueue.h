@@ -14,6 +14,7 @@
 #include "../Ct.h"
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <stdexcept>
 #include <cstdint>
 #include <cstdlib>
@@ -437,6 +438,52 @@ auto submit_kernel_grouped( const CudaQueue &queue, const Deps &deps, Func &&fun
     } );
     cuda_check( cudaGetLastError(), "launch (groups)" );
     return QueueEvent( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync (groups)" ); } );
+}
+
+// ── hand-written kernels ──────────────────────────────────────────────────────────────────────
+// The two launches above are loom's: a functor per item, a block of 128 threads (or a block per
+// group), the geometry decided here. A body that writes its OWN `__global__` -- its block size, its
+// `__launch_bounds__`, several launches chained on the stream, a second pass on what the first
+// one left over -- launches it with `launch_kernel`, which keeps what loom adds to a launch: the
+// call's stream ( ordered with the rest of the XLA program ), the error check, and the kernel-only
+// timing of `LOOM_KERNEL_TIMING` ( slot kind "custom", same registry as the others ).
+
+/// `kernel<<<grid, block, dynamic_shared, queue.stream>>>( args... )`, timed and checked. A
+/// `grid` of 0 launches nothing ( an empty second pass is not an error ).
+template<class... KArgs,class... Args>
+void launch_kernel( const CudaQueue &queue, void ( *kernel )( KArgs... ), int grid, int block, int dynamic_shared, Args &&...args ) {
+    if ( grid <= 0 )
+        return;
+    detail::CudaQueueTiming::timed_launch( kernel, "custom", grid, block, dynamic_shared, queue.stream, [&] {
+        kernel<<<grid, block, dynamic_shared, queue.stream>>>( KArgs( args )... );
+    } );
+    cuda_check( cudaGetLastError(), "launch (custom kernel)" );
+}
+
+/// how many blocks of `block` threads of `kernel` the whole card holds at once ( resident blocks
+/// per SM x SMs ): the grid of a kernel that strides over a count only the card knows ( a list
+/// filled by a previous launch ), so that it can be launched without reading that count back.
+template<class... KArgs>
+int resident_grid( void ( *kernel )( KArgs... ), int block, int dynamic_shared = 0 ) {
+    int dev = 0, nb_sm = 0, per_sm = 0;
+    cuda_check( cudaGetDevice( &dev ), "get device" );
+    cuda_check( cudaDeviceGetAttribute( &nb_sm, cudaDevAttrMultiProcessorCount, dev ), "SM count" );
+    cuda_check( cudaOccupancyMaxActiveBlocksPerMultiprocessor( &per_sm, kernel, block, dynamic_shared ), "occupancy" );
+    return std::max( per_sm, 1 ) * nb_sm;
+}
+
+/// `n` values of `T` back from the card, once everything queued BEFORE on the call's stream is
+/// done. A synchronization: what a body pays to size a launch on a count a kernel produced.
+template<class T>
+void read_back( const CudaQueue &queue, T *host, const T *dev, SI n ) {
+    cuda_check( cudaMemcpyAsync( host, dev, sizeof( T ) * n, cudaMemcpyDeviceToHost, queue.stream ), "memcpy device -> host (read back)" );
+    cuda_check( cudaStreamSynchronize( queue.stream ), "sync (read back)" );
+}
+
+/// `nb_bytes` zeros at `dev`, queued on the call's stream ( no synchronization )
+inline void zero_fill( const CudaQueue &queue, void *dev, SI nb_bytes ) {
+    if ( nb_bytes > 0 )
+        cuda_check( cudaMemsetAsync( dev, 0, size_t( nb_bytes ), queue.stream ), "memset (zero fill)" );
 }
 
 } // namespace sdot

@@ -9,21 +9,21 @@
 
 namespace sdot {
 
-/// LA file de threads du processus : une seule, pour tous les noyaux (`cpu_thread_pool()`), dans
-/// la bibliothèque runtime `libloom_runtime` que chaque bibliothèque générée lie. Les workers sont
-/// créés au premier lancement et dorment sur une variable de condition entre deux : coût nul au
-/// repos, ~10 µs par réveil. Le fil appelant fait office de worker 0 (pas de réveil pour lui).
+/// THE process-wide thread pool: a single one, for all the kernels (`cpu_thread_pool()`), in
+/// the runtime library `libloom_runtime` that every generated library links. The workers are
+/// created at the first launch and sleep on a condition variable between two: zero cost at
+/// rest, ~10 µs per wake-up. The calling thread acts as worker 0 (no wake-up for it).
 ///
-/// `SDOT_NB_THREADS` fixe leur nombre (défaut : `hardware_concurrency`), `SDOT_PIN_THREADS=1`
-/// épingle le worker `w` sur le CPU `w`.
+/// `SDOT_NB_THREADS` sets their number (default: `hardware_concurrency`), `SDOT_PIN_THREADS=1`
+/// pins worker `w` to CPU `w`.
 ///
-/// Répartition : `run_threads( T, job )` appelle `job( t )` pour `t` dans `[ 0, T )`, les fils
-/// virtuels étant répartis en tranches CONTIGUËS sur les workers. C'est le découpage qui a gagné
-/// dans le banc (`solvers_des_familles/src/util/parallel.h`, « blocks contre strided ») : un fil
-/// reste dans SA région de l'espace, ce qui compte quand les items sont en ordre d'arbre.
+/// Distribution: `run_threads( T, job )` calls `job( t )` for `t` in `[ 0, T )`, the virtual
+/// threads being distributed in CONTIGUOUS slices over the workers. This is the split that won
+/// in the benchmark (`solvers_des_familles/src/util/parallel.h`, "blocks vs strided"): a thread
+/// stays in ITS region of space, which matters when the items are in tree order.
 ///
-/// L'implémentation est dans `loom/cpp/runtime/cpu_thread_pool.cpp` : rien de tout cela n'a à
-/// être recompilé avec chaque noyau.
+/// The implementation is in `loom/cpp/runtime/cpu_thread_pool.cpp`: none of this has to
+/// be recompiled with each kernel.
 class LOOM_EXPORT CpuThreadPool {
 public:
     CpuThreadPool();
@@ -32,8 +32,8 @@ public:
     CpuThreadPool( const CpuThreadPool & ) = delete;
     CpuThreadPool &operator=( const CpuThreadPool & ) = delete;
 
-    /// `job( t )` pour chaque fil virtuel `t` de `[ 0, nb_threads )`. Rend la main quand tout est
-    /// fait. Non réentrant (un `job` ne relance pas la file).
+    /// `job( t )` for each virtual thread `t` of `[ 0, nb_threads )`. Returns when everything is
+    /// done. Not reentrant (a `job` does not relaunch the pool).
     void run_threads( int nb_threads, const std::function<void( int )> &job );
 
     int  nb_workers() const { return _nb_workers; }
@@ -57,8 +57,8 @@ private:
     bool                              _stop               = false;
 };
 
-/// La file du processus, créée au premier appel, jamais détruite (elle peut encore posséder des
-/// fils quand le processus démonte ses bibliothèques).
+/// The process-wide pool, created at the first call, never destroyed (it may still own
+/// threads when the process unloads its libraries).
 LOOM_EXPORT CpuThreadPool &cpu_thread_pool();
 
 } // namespace sdot

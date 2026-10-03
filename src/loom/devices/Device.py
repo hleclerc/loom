@@ -102,26 +102,26 @@ class Device:
     def cpp_queue_decl( self ):
         return "static Queue &queue = *new Queue();"
 
-    # ── allouer PENDANT l'appel, à une taille que seul le noyau connaît ──────────────────
-    # D'où vient la mémoire n'est pas la même question partout : sur GPU il faut le pool d'XLA
-    # ( c'est lui qui détient la carte ), sur CPU un `malloc` suffit ( le handler tourne sur
-    # l'hôte, et le backend CPU d'XLA répond « No device memory allocator available on this
-    # platform » -- il a raison, il n'y a pas de device ). Le corps du noyau, lui, ne voit qu'un
-    # `scratch` et ne change pas. Voir `support/kernels/Scratch.h`.
+    # ── allocating DURING the call, at a size only the kernel knows ──────────────────────
+    # Where memory comes from is not the same question everywhere: on GPU it takes XLA's pool
+    # ( which is what holds the card ), on CPU a `malloc` is enough ( the handler runs on
+    # the host, and XLA's CPU backend answers "No device memory allocator available on this
+    # platform" -- it is right, there is no device ). The kernel body, for its part, only sees a
+    # `scratch` and does not change. See `support/kernels/Scratch.h`.
     def cpp_scratch_param( self ):
-        """Le paramètre du handler qui porte de quoi allouer, ou "" (rien à recevoir)."""
+        """The handler parameter that carries what is needed to allocate, or "" (nothing to receive)."""
         return ""
 
     def cpp_scratch_bind( self ):
-        """La clause `Bind()` qui le lie, ou ""."""
+        """The `Bind()` clause that binds it, or ""."""
         return ""
 
     def cpp_scratch_decl( self ):
-        """La déclaration de `scratch` dans le handler. Un device qui ne sait pas allouer le dit
-        ici, plutôt que de laisser passer un noyau qui s'en croit capable."""
+        """The declaration of `scratch` in the handler. A device that cannot allocate says so
+        here, rather than letting through a kernel that believes it can."""
         raise NotImplementedError(
-            f"{ self.name }: `FfiCode( allocator = True )` -- ce device ne sait pas allouer pendant "
-            f"un appel ( voir `Device.cpp_scratch_decl` )" )
+            f"{ self.name }: `FfiCode( allocator = True )` -- this device cannot allocate during "
+            f"a call ( see `Device.cpp_scratch_decl` )" )
 
     # ── the catalogue (precompiled kernels in a wheel, see compilation/catalogue.py) ──────
     def catalogue_kind( self ) -> str:
@@ -200,13 +200,13 @@ class Device:
         total = 1
         for axis in batch_axes:
             total *= int( axis.max )
-        # Le plafond par NOMBRE D'ITEMS s'applique toujours, y compris quand `batch_axes` est vide
-        # -- une liste vide ne veut pas dire « on ne sait pas », elle veut dire UN item. Tous les
-        # appelants la passent pour dire sur quoi le travail s'étale ; ne pas plafonner dans ce
-        # cas-là réservait un scratch pour tout le parallélisme de la machine alors qu'un seul
-        # work-item allait tourner. Invisible sur CPU (le plafond matériel y est le nombre de
-        # cœurs), fatal sur GPU où il se déduit de la RAM du device : `Cell.cut` sur UNE cellule
-        # y demandait 5.28 GiB de table de compaction.
+        # The cap by NUMBER OF ITEMS always applies, even when `batch_axes` is empty
+        # -- an empty list does not mean "we don't know", it means ONE item. All the
+        # callers pass it to say what the work is spread over; not capping in that
+        # case reserved scratch for all the parallelism of the machine when a single
+        # work-item was going to run. Invisible on CPU (the hardware cap there is the number of
+        # cores), fatal on GPU where it is derived from the device RAM: `Cell.cut` on ONE cell
+        # asked for 5.28 GiB of compaction table there.
         return max( 1, min( n, total ) )
 
     def _hw_thread_cap( self, **per_thread ) -> int:

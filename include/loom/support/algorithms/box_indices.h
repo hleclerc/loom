@@ -7,15 +7,15 @@
 
 namespace sdot {
 
-/// LE PONT entre les positions -- connues à la compilation -- et une boucle `for ( d = 0; d < D; ++d )`.
+/// THE BRIDGE between positions -- known at compile time -- and a `for ( d = 0; d < D; ++d )` loop.
 ///
-/// Un corps qui veut être écrit UNE FOIS pour toutes les dimensions calcule naturellement avec ses
-/// coordonnées comme avec des nombres : une boucle sur `d`, un tableau de `D` entiers. Un tenseur,
-/// lui, s'indexe par un `Tuple`, dont les positions sont des types. Ces deux fonctions font
-/// l'aller-retour, et c'est tout ce qui manque pour que les deux mondes se parlent.
+/// A body that wants to be written ONCE for all dimensions naturally computes with its
+/// coordinates as with numbers: a loop over `d`, an array of `D` integers. A tensor,
+/// for its part, is indexed by a `Tuple`, whose positions are types. These two functions do
+/// the round trip, and that is all that is missing for the two worlds to talk to each other.
 ///
-/// `to_array` lit une forme ( ou n'importe quel `Tuple` d'entiers ) dans un tableau ; `to_tuple`
-/// refait un `Tuple` à partir du tableau, qu'un tenseur accepte alors directement :
+/// `to_array` reads a shape ( or any `Tuple` of integers ) into an array; `to_tuple`
+/// rebuilds a `Tuple` from the array, which a tensor then accepts directly:
 ///
 ///     SI nb[ D ];  to_array<D>( grid.shape(), nb );
 ///     ...
@@ -36,17 +36,17 @@ HD auto to_tuple( const SI *src ) {
         return to_tuple<N-1>( src ).with_appended_value( src[ N - 1 ] );
 }
 
-/// TOUS LES MULTI-INDICES D'UNE BOÎTE `[ lo, hi [`, passés à `f` sous forme de `Tuple`. Rien du
-/// tout si la boîte est vide le long d'un seul axe.
+/// ALL THE MULTI-INDICES OF A BOX `[ lo, hi [`, passed to `f` as a `Tuple`. Nothing at
+/// all if the box is empty along a single axis.
 ///
-/// UN ODOMÈTRE, et pas `D` boucles imbriquées : `D` est connu à la compilation mais les BORNES ne
-/// le sont pas, et un nid de profondeur `D` ne s'écrit pas sans récursion. L'odomètre, lui, se lit
-/// -- et c'est ce qui permet à un noyau de parcourir l'empreinte d'un objet en nD sans qu'une seule
-/// ligne de son corps mentionne `x` ou `y`.
+/// AN ODOMETER, and not `D` nested loops: `D` is known at compile time but the BOUNDS are not,
+/// and a nest of depth `D` cannot be written without recursion. The odometer, for its part, reads
+/// -- and that is what lets a kernel walk an object's footprint in nD without a single
+/// line of its body mentioning `x` or `y`.
 ///
-/// `CartesianIndices` ne fait pas ça : il part de 0 et ses extents sont dans son type, ce qui est
-/// la bonne forme pour un domaine de LANCEMENT. Ici la boîte dépend de la donnée ( l'empreinte d'un
-/// splat ), donc elle ne peut être qu'une valeur.
+/// `CartesianIndices` does not do that: it starts at 0 and its extents are in its type, which is
+/// the right shape for a LAUNCH domain. Here the box depends on the data ( the footprint of a
+/// splat ), so it can only be a value.
 template<int D>
 HD void for_each_in_box( const SI *lo, const SI *hi, auto &&f ) {
     SI at[ D > 0 ? D : 1 ];

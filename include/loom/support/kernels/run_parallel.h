@@ -6,12 +6,12 @@
 
 namespace sdot {
 
-/// NOTE : plus personne n'appelle ces deux adaptateurs. Ils servaient à injecter dans un foncteur
-/// une géométrie de lancement DÉCIDÉE EN PYTHON (`FfiCode( thread_cap = "..." )`, une chaîne
-/// d'expression C++ rendue au site d'appel). La géométrie est maintenant écrite là où elle a un
-/// sens -- des méthodes du foncteur, que `_run_kernel` détecte directement (`requires`) -- donc
-/// le code engendré passe le foncteur tel quel. Ils restent pour un foncteur ÉCRIT À LA MAIN qui
-/// voudrait poser un plafond sans se déclarer de méthode.
+/// NOTE: nobody calls these two adapters anymore. They were used to inject into a functor
+/// a launch geometry DECIDED IN PYTHON (`FfiCode( thread_cap = "..." )`, a C++
+/// expression string rendered at the call site). The geometry is now written where it makes
+/// sense -- methods of the functor, which `_run_kernel` detects directly (`requires`) -- so
+/// the generated code passes the functor as is. They remain for a HAND-WRITTEN functor that
+/// wants to set a cap without declaring a method.
 ///
 /// Wrap a functor with an explicit `max_nb_threads` cap that `run_parallel` reads (`_run_kernel`) to
 /// bound the launched work-items to `min( nb_items, cap )` -- so a body's PER-THREAD scratch is sized
@@ -59,21 +59,21 @@ GroupKernel<std::decay_t<Func>> with_group_kernel( int cap, int group_size, int 
 }
 
 /// call func for each list item, parallel way.
-///   func may define directly (in method) or indirectly (via surdefinitions) the limits in terms of nb threads, ...
+///   func may define directly (in method) or indirectly (via overloads) the limits in terms of nb threads, ...
 ///
-/// On sélectionne la queue en fonction des arguments
+/// The queue is selected according to the arguments
 ///
-/// On transforme tous les objets en LocalMemory pour le kernel
+/// All objects are transformed into LocalMemory for the kernel
 ///
 /// run_parallel( range(), []( auto idx, auto &&a, auto &&b, auto &&v ) { a = b; ... },
 ///   OutList(), a
 ///   InpList(), b, 34
 /// )
-/// `second` = item_list, ou un `Dependencies` (via `after(...)`) suivi de l'item_list.
+/// `second` = item_list, or a `Dependencies` (via `after(...)`) followed by the item_list.
 ///
-/// `queue_list` peut aussi être une queue seule (`run_parallel( queue, ... )`) : c'est le cas
-/// courant d'un kernel généré, qui n'a qu'un contexte d'exécution -- la liste ne sert que quand
-/// il y a un choix à faire (on prend alors le moins coûteux, transferts compris).
+/// `queue_list` may also be a single queue (`run_parallel( queue, ... )`): this is the usual
+/// case of a generated kernel, which has only one execution context -- the list is only useful when
+/// there is a choice to make (the cheapest is then taken, transfers included).
 auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest );
 
 } // namespace sdot

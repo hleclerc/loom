@@ -4,13 +4,13 @@
 
 namespace sdot {
 
-/// mémoire globale du GPU, telle que vue depuis l'hôte : une adresse device, qu'on ne peut pas
-/// déréférencer ici. C'est la zone dans laquelle XLA nous remet DÉJÀ les buffers d'un call GPU,
-/// donc celle qu'un `TensorView` généré porte dans son type quand le device est un GPU (rien à
-/// transférer : voir `transfer_cost_per_byte` près de `CudaQueue`).
+/// global memory of the GPU, as seen from the host: a device address, which cannot be
+/// dereferenced here. It is the space in which XLA ALREADY hands us the buffers of a GPU call,
+/// hence the one a generated `TensorView` carries in its type when the device is a GPU (nothing to
+/// transfer: see `transfer_cost_per_byte` near `CudaQueue`).
 struct CudaGlobalMemorySpace {
-    static constexpr bool directly_accessible = false; ///< adresse device : pas de déréf hôte
-    static constexpr bool kernel_context      = false; ///< vue hôte, pas un tag kernel
+    static constexpr bool directly_accessible = false; ///< device address: no host dereference
+    static constexpr bool kernel_context      = false; ///< host view, not a kernel tag
 
        bool operator==( const CudaGlobalMemorySpace & ) const = default;
     HD void display ( auto &os ) const { os << "CudaGlobalMemorySpace"; }

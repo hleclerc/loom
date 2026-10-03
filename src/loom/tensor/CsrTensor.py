@@ -1,4 +1,4 @@
-"""Le tenseur RAGGED en CSR : des lignes de longueurs differentes, rangees bout a bout."""
+"""The RAGGED tensor as CSR: rows of different lengths, stored end to end."""
 
 from ..util.Aggregate import Aggregate
 from .CtShapeVar import CtShapeVar
@@ -9,29 +9,29 @@ from .Axis import Axis
 
 
 class CsrTensor( Aggregate ):
-    """Des lignes de longueurs differentes, rangees BOUT A BOUT -- pas de rembourrage.
+    """Rows of different lengths, stored END TO END -- no padding.
 
-        offsets  [ 0, 2, 2, 5 ]        quatre bornes pour trois lignes
+        offsets  [ 0, 2, 2, 5 ]        four bounds for three rows
         values   [ a, b, c, d, e ]
-        => ligne 0 = { a, b }, ligne 1 = {}, ligne 2 = { c, d, e }
+        => row 0 = { a, b }, row 1 = {}, row 2 = { c, d, e }
 
-    Cote C++ ( `loom/include/sdot/CsrTensor.h` ), le seul geste a connaitre est :
+    On the C++ side ( `loom/include/sdot/CsrTensor.h` ), the only gesture to know is:
 
-        csr( i, j )        le `i` va chercher dans les OFFSETS, le `j` indexe dans la ligne
-        csr.row_size( i )  la longueur de la ligne `i`
+        csr( i, j )        the `i` looks up the OFFSETS, the `j` indexes into the row
+        csr.row_size( i )  the length of row `i`
 
-    CE QU'IL ECHANGE CONTRE LE RAGGED REMBOURRE de loom ( `ShapeVar[ "axe" ]`, un compte par
-    ligne, un tampon `lignes x plus_longue_ligne` ) : de la MEMOIRE contre une PASSE. Le rembourre
-    s'inscrit en un seul balayage -- reserver une fente et ecrire -- la ou le CSR demande de
-    COMPTER d'abord, puis de remplir une fois les offsets connus. Mesure sur `examples/splats` :
-    le rembourre y coute de x2.38 a x5.08 la memoire du CSR.
+    WHAT IT TRADES AGAINST loom's PADDED RAGGED ( `ShapeVar[ "axis" ]`, one count per
+    row, a `rows x longest_row` buffer ): MEMORY for a PASS. The padded form
+    is registered in a single sweep -- reserve a slot and write -- whereas the CSR asks to
+    COUNT first, then fill once the offsets are known. Measured on `examples/splats`:
+    the padded form costs x2.38 to x5.08 the memory of the CSR there.
 
-    ET UNE LECTURE HOTE, qui est le vrai prix : le TOTAL dimensionne `values`, et c'est un compte
-    qu'un noyau vient d'ecrire. Une forme batie par `from_counts` n'est donc pas utilisable sous
-    `jit` -- exactement ce qu'un JIT ne peut pas payer, et ce que `driver.call` sait faire.
+    AND A HOST READ, which is the real price: the TOTAL sizes `values`, and it is a count
+    that a kernel has just written. A shape built by `from_counts` is therefore not usable under
+    `jit` -- exactly what a JIT cannot pay, and what `driver.call` knows how to do.
 
-    `offsets` porte `nb_rows + 1` BORNES et non `nb_rows` comptes : la taille d'une ligne est alors
-    une soustraction de deux voisins, sans tableau de plus, et la derniere borne EST le total.
+    `offsets` carries `nb_rows + 1` BOUNDS and not `nb_rows` counts: the size of a row is then
+    a subtraction of two neighbours, with no extra array, and the last bound IS the total.
     """
 
     offsets   : IntTensor[ "num_bound" ]
@@ -45,47 +45,47 @@ class CsrTensor( Aggregate ):
 
     @classmethod
     def from_counts( cls, counts, **template_kwargs ):
-        """Le CSR qu'un tenseur de COMPTES decrit : `offsets` est leur somme prefixe exclusive,
-        plus le total en derniere borne, et `values` est alloue a ce total EXACTEMENT.
+        """The CSR that a tensor of COUNTS describes: `offsets` is their exclusive prefix sum,
+        plus the total as the last bound, and `values` is allocated at EXACTLY that total.
 
-            comptes  [ 2, 0, 3 ]   ->   offsets [ 0, 2, 2, 5 ]   et  values de 5 fentes
+            counts   [ 2, 0, 3 ]   ->   offsets [ 0, 2, 2, 5 ]   and  values of 5 slots
 
-        La somme prefixe se fait SUR LE DEVICE ( `Tensor.cumsum` ). Le total, lui, revient sur
-        l'hote : c'est lui qui dimensionne l'allocation, et une taille ne peut pas etre une valeur
-        device. C'est la seule chose ici qu'un `jit` ne peut pas traverser, et c'est ce qu'on
-        achete en echange de l'exactitude.
+        The prefix sum is done ON THE DEVICE ( `Tensor.cumsum` ). The total, for its part, comes back to
+        the host: it is what sizes the allocation, and a size cannot be a device
+        value. It is the only thing here that a `jit` cannot go through, and it is what we
+        buy in exchange for exactness.
 
-        LES COMPTES PEUVENT AVOIR N'IMPORTE QUEL RANG, et sont lus dans l'ordre du tenseur : une
-        GRILLE de comptes ( une grille de tuiles ) donne autant de lignes, prises ligne par ligne.
-        C'est le seul endroit ou une structure a plusieurs axes s'aplatit, et c'est ce qu'est un
-        CSR -- des bornes cumulees le long d'UN ordre, donc une suite de lignes et pas une grille.
+        THE COUNTS CAN HAVE ANY RANK, and are read in the tensor's order: a
+        GRID of counts ( a grid of tiles ) gives as many rows, taken row by row.
+        This is the only place where a multi-axis structure gets flattened, and that is what a
+        CSR is -- cumulative bounds along ONE order, so a sequence of rows and not a grid.
 
-        `template_kwargs` va a `values` ( `dtype`, `size`, `device` ) : ce que les lignes PORTENT
-        n'est pas decide par les comptes.
+        `template_kwargs` goes to `values` ( `dtype`, `size`, `device` ): what the rows CARRY
+        is not decided by the counts.
         """
         from ..drivers.driver import driver
         from .functions import cumsum
 
-        brut = counts.value if isinstance( counts, Tensor ) else counts
-        plat = Tensor.wrap( brut.reshape( -1 ) )
+        raw = counts.value if isinstance( counts, Tensor ) else counts
+        flat = Tensor.wrap( raw.reshape( -1 ) )
 
-        total = int( plat.sum() )
-        nb = int( plat.shape[ 0 ] )
+        total = int( flat.sum() )
+        nb = int( flat.shape[ 0 ] )
 
         res = cls( nb_rows = nb, nb_slots = max( total, 1 ),
                    values = dict( template_kwargs ) if template_kwargs else {} )
-        # les bornes : la somme prefixe exclusive, PUIS le total -- `nb + 1` entrees. Le
-        # `concatenate` passe par le driver, donc il reste la ou la donnee vit.
-        debuts = cumsum( plat, exclusive = True )
-        res.offsets = driver.concatenate( [ debuts.value, driver.array( [ total ], dtype = debuts.dtype ) ] )
+        # the bounds: the exclusive prefix sum, THEN the total -- `nb + 1` entries. The
+        # `concatenate` goes through the driver, so it stays where the data lives.
+        starts = cumsum( flat, exclusive = True )
+        res.offsets = driver.concatenate( [ starts.value, driver.array( [ total ], dtype = starts.dtype ) ] )
         return res
 
     @property
     def nb_rows_value( self ) -> int:
-        """Combien de lignes -- la derniere borne n'en est pas une."""
+        """How many rows -- the last bound is not one."""
         return int( self.nb_rows.value )
 
     @property
     def total( self ) -> int:
-        """Combien d'elements en tout : la derniere borne."""
+        """How many elements in all: the last bound."""
         return int( self.nb_slots.value )

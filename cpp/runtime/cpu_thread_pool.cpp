@@ -1,4 +1,4 @@
-// La file de threads du processus -- voir `loom/support/kernels/CpuThreadPool.h`.
+// The process-wide thread pool -- see `loom/support/kernels/CpuThreadPool.h`.
 #include <loom/support/kernels/CpuThreadPool.h>
 #include <cstdlib>
 

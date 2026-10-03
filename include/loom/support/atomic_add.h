@@ -8,16 +8,16 @@ namespace sdot {
 
 namespace detail {
 
-/// CUDA N'A PAS D'ATOMIQUE POUR UN ENTIER SIGNE DE 64 BITS : ses surcharges couvrent `int`,
-/// `unsigned int`, `unsigned long long`, `float` et `double`, et rien entre les deux. Or `SI` est
-/// un `int64_t`, donc tout compteur d'items en 64 bits tombait dessus -- `no instance of
-/// overloaded function "atomicAdd" matches the argument list`, sur la carte seulement.
+/// CUDA HAS NO ATOMIC FOR A 64-BIT SIGNED INTEGER: its overloads cover `int`,
+/// `unsigned int`, `unsigned long long`, `float` and `double`, and nothing in between. Now `SI` is
+/// an `int64_t`, so every 64-bit item counter ran into it -- `no instance of
+/// overloaded function "atomicAdd" matches the argument list`, on the GPU only.
 ///
-/// En COMPLEMENT A DEUX, l'addition et le OU bit a bit sont les MEMES operations signees ou non :
-/// on passe par la surcharge non signee, et le resultat est exact ( ce n'est pas une troncature
-/// ni une approximation, c'est la meme suite de bits ). C'est l'idiome usuel du code CUDA.
+/// In TWO'S COMPLEMENT, addition and bitwise OR are the SAME operations signed or unsigned:
+/// we go through the unsigned overload, and the result is exact ( it is neither a truncation
+/// nor an approximation, it is the same sequence of bits ). It is the usual CUDA idiom.
 template<class T>
-constexpr bool est_signe_64 = std::is_integral_v<T> && std::is_signed_v<T> && sizeof( T ) == 8;
+constexpr bool is_signed_64 = std::is_integral_v<T> && std::is_signed_v<T> && sizeof( T ) == 8;
 
 using U64 = unsigned long long;
 
@@ -28,13 +28,13 @@ using U64 = unsigned long long;
 /// shared 2D-point gradient). Relaxed order is all we need -- correctness of the sum, not any
 /// ordering.
 ///
-/// Le shim par device : `std::atomic_ref` sur CPU (C++20, `fetch_add` défini pour les flottants
-/// aussi), `atomicAdd` dans du code device CUDA. C'est l'UN des deux endroits où un `#if` sur la
-/// cible est légitime (l'autre est `math.h`) : une intrinsèque n'a pas d'autre forme.
+/// The per-device shim: `std::atomic_ref` on CPU (C++20, `fetch_add` defined for floats
+/// too), `atomicAdd` in CUDA device code. It is ONE of the two places where an `#if` on the
+/// target is legitimate (the other is `math.h`): an intrinsic has no other form.
 template<class T>
 HD_INLINE void atomic_add( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    if constexpr ( detail::est_signe_64<T> )
+    if constexpr ( detail::is_signed_64<T> )
         atomicAdd( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) );
     else
         atomicAdd( &target, value );
@@ -50,7 +50,7 @@ HD_INLINE void atomic_add( T &target, T value ) {
 template<class T>
 HD_INLINE void atomic_or( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    if constexpr ( detail::est_signe_64<T> )
+    if constexpr ( detail::is_signed_64<T> )
         atomicOr( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) );
     else
         atomicOr( &target, value );
@@ -63,7 +63,7 @@ HD_INLINE void atomic_or( T &target, T value ) {
 template<class T>
 HD_INLINE T atomic_fetch_add( T &target, T value ) {
 #ifdef __CUDA_ARCH__
-    if constexpr ( detail::est_signe_64<T> )
+    if constexpr ( detail::is_signed_64<T> )
         return T( atomicAdd( reinterpret_cast<detail::U64 *>( &target ), detail::U64( value ) ) );
     else
         return atomicAdd( &target, value );

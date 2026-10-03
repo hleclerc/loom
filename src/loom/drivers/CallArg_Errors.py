@@ -83,6 +83,10 @@ class CallArg_Errors( CallArg ):
     def jax_ffi_type( self ):
         return "ffi::BufferR1<ffi::S32>"
 
+    def out_shape_dtype( self ):
+        import numpy
+        return tuple( self.shape ), numpy.dtype( numpy.int32 )
+
     def jax_out_spec( self ):
         import jax
         import jax.numpy as jnp

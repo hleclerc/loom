@@ -41,12 +41,12 @@ class CallArg_Tensor( CallArg ):
         # what decides our C++ form: `cpp_type` / `cpp_view` / `_jax_buffer_shape` all ask IT, and
         # this class only supplies the spelling primitives (see `loom/tensor/storage.py`).
         self.storage = inst.storage
-        # la SEULE référence remontante de tout l'arbre d'abaissement, et elle est FAIBLE : notre
-        # analyse nous tient (`args` -> ... -> nous), donc la tenir en retour fermait l'anneau
-        # `CallArgsAnalysis <-> CallArg_*`, que seul le ramasse-miettes cyclique défait. Ce n'est
-        # pas qu'une question de nommage d'axes : cet anneau retenait aussi les agrégats de
-        # l'appel, donc leurs tampons -- des tableaux du device -- bien après la fin de l'appel.
-        # Faible est sûr : on ne s'en sert que pendant la génération de code, que l'analyse pilote.
+        # the ONLY back-reference in the whole lowering tree, and it is WEAK: our analysis holds
+        # us (`args` -> ... -> us), so holding it in return closed the ring
+        # `CallArgsAnalysis <-> CallArg_*`, which only the cyclic garbage collector undoes. It is
+        # not just a matter of axis naming: that ring also retained the call's aggregates, hence
+        # their buffers -- device arrays -- long after the call ended.
+        # Weak is safe: we only use it during code generation, which the analysis drives.
         self._caa = weakref.ref( call_args_analysis )
         self.memory_space = call_args_analysis.cpp_memory_space
 
@@ -64,21 +64,21 @@ class CallArg_Tensor( CallArg ):
         # about the tensor. Concatenating gives one name per dimension (count == rank), each
         # `DEFINE_AXIS`'d by the aggregate (which folds in `axis_names`). No unrolling logic lives
         # here -- so nothing assumes a single, or any, `AxisList`.
-        # ... sous leur nom CANONIQUE : un axe de batch est nomme par l'appel, pas par l'objet
-        # `Axis` ( voir `CallArgsAnalysis.cpp_axis_name` ), pour que deux appels identiques
-        # rendent la meme source.
+        # ... under their CANONICAL name: a batch axis is named by the call, not by the `Axis`
+        # object ( see `CallArgsAnalysis.cpp_axis_name` ), so that two identical calls
+        # produce the same source.
         self.axis_names = [ call_args_analysis.cpp_axis_name( n )
                             for index, axis in enumerate( inst.axes ) for n in axis.cpp_dim_names( index ) ]
 
-        # Et, par dimension, l'extent que le TYPE peut porter : `None` quand il n'est connu qu'a
-        # l'execution, l'entier quand il est fige a la COMPILATION -- c'est-a-dire quand l'extent de
-        # l'axe ne depend que de `CtShapeVar`s (`RealTensor[ "num_vertex", "dim" ]` : `dim` oui,
-        # `num_vertex` non, sa capacite double en cours de route). Le lowering le repand alors dans
-        # le tuple de shape (`Ct<SI,2>` au lieu d'un `SI`), et `contiguous_strides` -- qui derive les
-        # strides du TYPE de la shape -- en tire un stride de LIGNE compile-time : `vertex_positions(
-        # v, d )` devient `base + v * 16 + d * 8` au lieu d'une multiplication par un `long long` lu
-        # en memoire. Une capacite, elle, ne DOIT pas y aller : elle changerait a chaque doublement,
-        # donc un noyau recompile a chaque fois.
+        # And, per dimension, the extent the TYPE can carry: `None` when it is only known at run
+        # time, the integer when it is frozen at COMPILE time -- that is, when the axis's extent
+        # depends on `CtShapeVar`s only (`RealTensor[ "num_vertex", "dim" ]`: `dim` yes,
+        # `num_vertex` no, its capacity doubles along the way). The lowering then spreads it into
+        # the shape tuple (`Ct<SI,2>` instead of an `SI`), and `contiguous_strides` -- which derives
+        # the strides from the shape's TYPE -- gets a compile-time ROW stride out of it:
+        # `vertex_positions( v, d )` becomes `base + v * 16 + d * 8` instead of a multiplication by
+        # a `long long` read from memory. A capacity, on the other hand, MUST NOT go in there: it
+        # would change at every doubling, hence a kernel recompiled each time.
         self._dim_ct_extent = _ct_extents_of( inst )
 
         # the PHYSICAL layout this buffer has (input: the one it already carries) or should get
@@ -92,7 +92,7 @@ class CallArg_Tensor( CallArg ):
         # would freeze a stale `buffer_shape`. The vmap path is also its own (contiguous) universe --
         # the framework handed us the extra dim -- so it never wants our batch-flatten policy.
         import numpy
-        self.itemsize = int( numpy.dtype( self.dtype.driver_version ).itemsize )
+        self.itemsize = int( self.dtype.numpy_dtype.itemsize )
         self._alignment_bytes = call_args_analysis.batch_alignment_bytes
         self._dim_is_batch = list( inst._dim_batch() )
         self._device = call_args_analysis.device
@@ -156,7 +156,7 @@ class CallArg_Tensor( CallArg ):
     # variant there, not another branch here. --
     def cpp_scalar( self ):
         import numpy
-        dt = numpy.dtype( self.dtype.driver_version )
+        dt = self.dtype.numpy_dtype
         return { ( "f", 4 ): "float", ( "f", 8 ): "double",
                  ( "i", 4 ): "std::int32_t", ( "i", 8 ): "std::int64_t",
                  ( "u", 4 ): "std::uint32_t", ( "u", 8 ): "std::uint64_t" }[ ( dt.kind, dt.itemsize ) ]
@@ -226,13 +226,13 @@ class CallArg_Tensor( CallArg ):
 
     # -- seeding: what an output must hold before the body runs --
     def cpp_seed_root( self, var_name ):
-        """Le semis d'un tenseur passé NU (pas membre d'un agrégat).
+        """The seed of a tensor passed BARE (not a member of an aggregate).
 
-        Il manquait : `JaxFfi._render_call` demande un `cpp_seed_root` à chaque argument racine qui
-        en a un, et seuls les agrégats en avaient -- donc une sortie tensorielle nue (le cas le plus
-        simple : `driver.call( ..., out = RealTensor[ ... ]() )`) n'était jamais semée, alors même
-        que `LOOM_ZERO_OUTPUTS` promet le contraire. Même règle que pour un membre, la vue étant
-        ici la variable elle-même."""
+        It was missing: `JaxFfi._render_call` asks every root argument that has one for a
+        `cpp_seed_root`, and only aggregates had one -- so a bare tensor output (the simplest
+        case: `driver.call( ..., out = RealTensor[ ... ]() )`) was never seeded, even though
+        `LOOM_ZERO_OUTPUTS` promises otherwise. Same rule as for a member, the view being here
+        the variable itself."""
         return self._seed_of( var_name )
 
     def cpp_seed_member( self, owner_name ):
@@ -250,95 +250,97 @@ class CallArg_Tensor( CallArg ):
         if not ( self.io_category.is_bound and self.io_category.is_output ):
             return ""
 
-        # Toute sortie part à ZÉRO, sur toute sa CAPACITÉ, avant le corps.
+        # Every output starts at ZERO, over its whole CAPACITY, before the body.
         #
-        # Un tampon de sortie que le corps n'écrit que PARTIELLEMENT laisse le reste tel que
-        # l'allocateur l'a rendu -- et sur GPU ce n'est pas zéro. Deux façons d'en arriver là, et la
-        # seconde est la règle, pas l'exception :
-        #  * une boucle striée `for i = thread_index; i < n; i += nb_threads` ne touche rien quand
-        #    `thread_index >= n`, ni un scratch déclaré en sortie que le forward n'écrit jamais ;
-        #  * surtout, la dimension de BATCH est allouée à la capacité alignée (16 emplacements pour
-        #    4 items), et le corps ne parcourt que le COMPTE -- depuis que la boucle se borne au
-        #    compte et non plus à cette capacité (voir `CallArgsAnalysis.batch_dim_expr`), la queue
-        #    rembourrée n'est plus écrite du tout.
+        # An output buffer that the body writes only PARTIALLY leaves the rest as the allocator
+        # returned it -- and on GPU that is not zero. Two ways to get there, and the second is the
+        # rule, not the exception:
+        #  * a strided loop `for i = thread_index; i < n; i += nb_threads` touches nothing when
+        #    `thread_index >= n`, nor does a scratch declared as an output that the forward never
+        #    writes;
+        #  * above all, the BATCH dimension is allocated at the aligned capacity (16 slots for
+        #    4 items), and the body only walks the COUNT -- since the loop is bounded by the
+        #    count and no longer by that capacity (see `CallArgsAnalysis.batch_dim_expr`), the
+        #    padded tail is no longer written at all.
         #
-        # Ce que lit ensuite quelqu'un qui parcourt la capacité est alors indéterminé, et un COMPTE
-        # indéterminé y borne une boucle : un accès des gigaoctets hors de toute allocation. Semer
-        # rend cela inoffensif sans rien exiger des lecteurs.
+        # What someone walking the capacity then reads is indeterminate, and an indeterminate
+        # COUNT bounds a loop there: an access gigabytes outside any allocation. Seeding makes
+        # that harmless without requiring anything of the readers.
         #
-        # Ce n'est pas gratuit -- un remplissage par sortie et par appel -- d'où l'interrupteur, qui
-        # sert maintenant à MESURER ce que coûte le semis, pas à décider s'il a lieu.
+        # It is not free -- one fill per output and per call -- hence the switch, which now
+        # serves to MEASURE what the seeding costs, not to decide whether it happens.
         #
-        # IL Y A DEUX SORTES DE SORTIES, et une seule peut être empoisonnée.
+        # THERE ARE TWO KINDS OF OUTPUTS, and only one can be poisoned.
         #
-        # Une sortie PARTAGÉE d'un appel batché ne porte aucun axe de batch alors que l'appel en a :
-        # chaque item écrit le MÊME tampon, donc le kernel y ACCUMULE (le gradient de positions d'un
-        # `PowerDiagram`, ajouté par chaque cellule ; celui d'un `ProjectedSumOfDiracs`, par chaque
-        # angle ; le compteur par tuile de `examples/splats`, par chaque splat). Partir de zéro n'y
-        # est pas un filet, c'est le CONTRAT de l'accumulation -- un poison y serait absorbé par la
-        # première addition et rendrait un NaN parfaitement légitime. Celle-là part à zéro, quel que
-        # soit le mode.
+        # A SHARED output of a batched call carries no batch axis while the call has some: every
+        # item writes the SAME buffer, so the kernel ACCUMULATES into it (the positions gradient of
+        # a `PowerDiagram`, added by every cell; that of a `ProjectedSumOfDiracs`, by every
+        # angle; the per-tile counter of `examples/splats`, by every splat). Starting from zero is
+        # not a safety net there, it is the CONTRACT of the accumulation -- a poison would be
+        # absorbed by the first addition and yield a perfectly legitimate-looking NaN. That one
+        # starts at zero, whatever the mode.
         #
-        # C'est le mode poison qui a rendu la distinction visible : sans elle, les 14 tests de
-        # DÉRIVÉE de `test_PowerDiagram` rendaient `adjoint = nan` -- pas une écriture oubliée,
-        # juste une accumulation empoisonnée d'avance.
+        # It was the poison mode that made the distinction visible: without it, the 14
+        # DERIVATIVE tests of `test_PowerDiagram` returned `adjoint = nan` -- not a forgotten
+        # write, just an accumulation poisoned in advance.
         #
-        # Le critère est « PARTAGÉE », pas « flottante ». Il a porté sur le type jusqu'à ce que
-        # `examples/splats` amène le contre-exemple : un compteur ENTIER par tuile, accumulé par
-        # tous les splats. Lancé avec `LOOM_ZERO_OUTPUTS=0`, il rend un total indéterminé qui
-        # devient une TAILLE D'ALLOCATION -- `overflow in static extent product:
-        # dimensions=[2421069375325856419]`. Un gradient faux se voit ; une allocation de deux
-        # exaoctets aussi, mais l'un et l'autre viennent de la même omission.
-        accumulee = ( self._call_batch_axes
-                      and not any( b in self.axis_names for b in self._call_batch_axes ) )
+        # The criterion is "SHARED", not "floating". It rested on the type until
+        # `examples/splats` brought the counter-example: an INTEGER per-tile counter, accumulated
+        # by all the splats. Run with `LOOM_ZERO_OUTPUTS=0`, it returns an indeterminate total that
+        # becomes an ALLOCATION SIZE -- `overflow in static extent product:
+        # dimensions=[2421069375325856419]`. A wrong gradient shows; so does a two-exabyte
+        # allocation, but both come from the same omission.
+        accumulated = ( self._call_batch_axes
+                        and not any( b in self.axis_names for b in self._call_batch_axes ) )
 
-        # UNE SORTIE ACCUMULÉE PART À ZÉRO, QUEL QUE SOIT LE MODE : c'est un contrat, pas un
-        # réglage. Rien ne peut le désactiver -- et `LOOM_ZERO_OUTPUTS=0` ne veut donc pas dire
-        # « rien », il veut dire « rien DE PLUS ».
-        if accumulee:
+        # AN ACCUMULATED OUTPUT STARTS AT ZERO, WHATEVER THE MODE: it is a contract, not a
+        # setting. Nothing can disable it -- and `LOOM_ZERO_OUTPUTS=0` therefore does not mean
+        # "nothing", it means "nothing MORE".
+        if accumulated:
             return f"{ view }.fill_with( queue, 0 );"
 
-        # Le reste -- une sortie ORDINAIRE, une par item, écrite entièrement dans sa région
-        # logique -- n'est PLUS semé par défaut, et c'est là qu'était toute la dépense : ce sont
-        # les grandes. Dans `examples/splats`, le compte fait 4 ko et la liste 2 Mo dont 8 % sont
-        # écrits ; semer la seconde remplit la CAPACITÉ, pas le contenu.
+        # The rest -- an ORDINARY output, one per item, written entirely within its logical
+        # region -- is NO LONGER seeded by default, and that is where all the expense was: those
+        # are the big ones. In `examples/splats`, the count is 4 KB and the list 2 MB of which 8%
+        # is written; seeding the latter fills the CAPACITY, not the content.
         #
-        # Ce que ça cesse de couvrir est l'ÉCRITURE OUBLIÉE. Mais un zéro ne la couvrait pas, il la
-        # CACHAIT derrière une valeur plausible -- l'argument même qui a fait introduire `poison`.
-        # Ce qui reste garanti sans rien semer : un compte est toujours à zéro (`CallArg_ShapeVar`,
-        # inconditionnel) et il est clampé à la capacité, donc une lecture qui respecte le compte ne
-        # touche que des emplacements écrits. Le rembourrage au-delà -- la queue d'une dimension de
-        # batch alignée, les fentes après le compte -- n'est lu par personne : `Tensor.value` le
-        # découpe, et un appel chaîné relie le tampon à sa taille LOGIQUE.
+        # What that stops covering is the FORGOTTEN WRITE. But a zero did not cover it, it HID it
+        # behind a plausible value -- the very argument that introduced `poison`.
+        # What stays guaranteed without seeding anything: a count is always zero
+        # (`CallArg_ShapeVar`, unconditional) and it is clamped to the capacity, so a read that
+        # respects the count only touches written slots. The padding beyond -- the tail of an
+        # aligned batch dimension, the slots after the count -- is read by nobody: `Tensor.value`
+        # slices it off, and a chained call links the buffer to its LOGICAL size.
         #
-        #   ( défaut )  ce qui en a besoin : les comptes et les accumulations
-        #   poison      remplit le reste d'un NaN / d'un entier hors bornes -- l'état d'une suite
-        #               de tests, où une écriture oubliée doit ÉCHOUER
-        #   all         remplit le reste de zéros : l'ancien défaut, pour soupçonner un oubli sans
-        #               se prendre des NaN, et pour mesurer ce que le filet coûte
-        # ATTENTION -- LE DEFAUT EST REVENU A « TOUT SEMER », et il faut savoir pourquoi.
+        #   ( default ) what needs it: counts and accumulations
+        #   poison      fills the rest with a NaN / an out-of-range integer -- the state of a test
+        #               suite, where a forgotten write must FAIL
+        #   all         fills the rest with zeros: the old default, to suspect an omission without
+        #               catching NaNs, and to measure what the net costs
+        # WARNING -- THE DEFAULT IS BACK TO "SEED EVERYTHING", and you should know why.
         #
-        # Une tentative de ne semer que le necessaire ( les comptes, minuscules, et les accumulations )
-        # a ete ecrite puis RETIREE. Deux choses l'ont fait retirer :
+        # An attempt to seed only what is necessary ( the counts, tiny, and the accumulations )
+        # was written and then WITHDRAWN. Two things got it withdrawn:
         #
-        #  * elle ne gagnait rien. Le cout qui croit avec la capacite ( mesure sur
-        #    `examples/splats` : 4,7 / 5,8 / 8,8 ms pour une capacite x1 / x2 / x4, a travail utile
-        #    CONSTANT ) n'est pas le remplissage mais l'ALLOCATION du tampon de sortie, qu'XLA refait
-        #    a chaque appel. Ne pas ecrire une capacite trop genereuse ne la rend pas gratuite.
-        #  * et surtout, deux observations du MEME code se sont contredites sur la question de savoir
-        #    si un compteur accumule etait encore seme : une instrumentation disait oui, la source
-        #    engendree disait non. Tant que cet ecart n'est pas explique, retrecir le semis ferait
-        #    dependre la justesse d'une classification qu'on ne sait pas prevoir -- et le symptome
-        #    serait invisible sur Linux, qui zerote les pages neuves, pour n'apparaitre que sur GPU.
+        #  * it gained nothing. The cost that grows with the capacity ( measured on
+        #    `examples/splats`: 4.7 / 5.8 / 8.8 ms for a capacity x1 / x2 / x4, at CONSTANT useful
+        #    work ) is not the fill but the ALLOCATION of the output buffer, which XLA redoes at
+        #    every call. Not writing an overly generous capacity does not make it free.
+        #  * and above all, two observations of the SAME code contradicted each other on whether
+        #    an accumulated counter was still seeded: an instrumentation said yes, the generated
+        #    source said no. As long as that gap is unexplained, shrinking the seeding would make
+        #    correctness depend on a classification we cannot predict -- and the symptom would be
+        #    invisible on Linux, which zeroes fresh pages, only to appear on GPU.
         #
-        # Ce qui reste de la tentative, et qui est un gain net : le critere `accumulee` ne porte plus
-        # sur `dtype.floating_point` mais sur « partagee », parce qu'un compteur ENTIER accumule
-        # existe ( `examples/splats` ) et qu'il etait empoisonne par erreur.
+        # What remains of the attempt, and is a net gain: the `accumulated` criterion no longer
+        # rests on `dtype.floating_point` but on "shared", because an accumulated INTEGER counter
+        # exists ( `examples/splats` ) and it was poisoned by mistake.
         #
-        # Ce qu'il faudrait pour retrecir pour de bon : que l'appelant DECLARE ses sorties accumulees
-        # ( `accumulated_outputs = [ ... ]` ), parce que « lu-modifie-ecrit » est une propriete du
-        # CORPS et pas des formes -- `ids` et `comptes` sont tous deux partages, l'un n'a besoin de
-        # rien, l'autre en a absolument besoin, et l'analyse ne peut pas les distinguer.
+        # What it would take to shrink for good: the caller DECLARES its accumulated outputs
+        # ( `accumulated_outputs = [ ... ]` ), because "read-modify-write" is a property of the
+        # BODY and not of the shapes -- `ids` and `counts` are both shared, one needs nothing,
+        # the other absolutely needs it, and the analysis cannot tell them apart.
+
         mode = env.var( "ZERO_OUTPUTS", "" ).strip().lower()
         if mode == "poison":
             return f"{ view }.fill_with( queue, poison_value<DECAYED_TYPE_OF( { view } )::TF>() );"
@@ -360,7 +362,7 @@ class CallArg_Tensor( CallArg ):
     # -- Jax FFI ABI --
     def _jax_ffi_elem( self ):
         import numpy
-        dt = numpy.dtype( self.dtype.driver_version )
+        dt = self.dtype.numpy_dtype
         return { ( "f", 4 ): "ffi::F32", ( "f", 8 ): "ffi::F64",
                  ( "i", 4 ): "ffi::S32", ( "i", 8 ): "ffi::S64",
                  ( "u", 4 ): "ffi::U32", ( "u", 8 ): "ffi::U64" }[ ( dt.kind, dt.itemsize ) ]
@@ -378,6 +380,11 @@ class CallArg_Tensor( CallArg ):
 
     def jax_input_array( self ):
         return self.inst.raw
+
+    def out_shape_dtype( self ):
+        """`( shape, numpy dtype )` of the physical buffer a kernel writes -- what any driver allocates."""
+        import numpy
+        return tuple( int( s ) for s in self._jax_buffer_shape() ), self.dtype.numpy_dtype
 
     def jax_out_spec( self ):
         import jax

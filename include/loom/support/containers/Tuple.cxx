@@ -132,9 +132,9 @@ UTP T_T HD auto DTP::without_index( T index ) const {
 #undef DTP
 
 // ---- rank 0 ------------------------------------------------------------------------
-// les membres NON template de la spécialisation `Tuple<>` sont `inline` : ce sont des définitions
-// ordinaires, une par unité de compilation -- et un catalogue lie des centaines d'unités dans une
-// même bibliothèque
+// the NON-template members of the `Tuple<>` specialization are `inline`: they are ordinary
+// definitions, one per translation unit -- and a catalogue links hundreds of units into a
+// single library
 #define UTP // template<>
 #define DTP Tuple<>
 

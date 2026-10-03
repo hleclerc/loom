@@ -6,10 +6,10 @@ def _round_up( x, multiple ):
     return ( ( x + multiple - 1 ) // multiple ) * multiple if multiple > 1 else x
 
 
-# Ce qu'on s'autorise a depenser en padding, PAR TENSEUR, pour separer les blocs du lot (voir
-# `PhysicalLayout.of`). Assez large pour le scratch par work-item -- quelques dizaines d'items,
-# donc quelques kilo-octets -- et assez etroit pour ne jamais toucher un tableau dimensionne sur
-# les donnees, ou le meme padding se compterait en dizaines de mega-octets.
+# What we allow ourselves to spend on padding, PER TENSOR, to separate the batch blocks (see
+# `PhysicalLayout.of`). Wide enough for per-work-item scratch -- a few dozen items,
+# hence a few kilobytes -- and narrow enough never to touch an array sized on
+# the data, where the same padding would amount to tens of megabytes.
 MAX_PADDING_BYTES = 1 << 20
 
 
@@ -97,42 +97,42 @@ class PhysicalLayout:
         multiple = items_per_alignment( alignment_bytes, itemsize )
         padded = _round_up( math.prod( batch_caps ), multiple ) if batch else 0
 
-        # ---- la FOULEE par item du lot, arrondie a l'alignement -- SUR DEMANDE SEULEMENT ------
+        # ---- the per-item STRIDE of the batch, rounded to the alignment -- ON REQUEST ONLY ------
         #
-        # `item_alignment_bytes = 0` par defaut, donc rien ne bouge tant qu'un tenseur ne le demande
-        # pas : la disposition reste EXACTEMENT celle d'avant, aux octets pres. C'est voulu -- ce
-        # padding se paie en memoire et ne rapporte que sur les tenseurs REELLEMENT partages entre
-        # work-items, qui sont une poignee. Voir `Tensor.item_alignment_bytes` pour le demander.
+        # `item_alignment_bytes = 0` by default, so nothing moves until a tensor asks for it:
+        # the layout stays EXACTLY what it was before, to the byte. This is deliberate -- this
+        # padding costs memory and only pays off on tensors REALLY shared between
+        # work-items, which are a handful. See `Tensor.item_alignment_bytes` to request it.
         #
-        # Deux items voisins du lot sont traites par deux work-items DIFFERENTS, en meme temps (la
-        # boucle du kernel est striee). Si leurs blocs se touchent, ils partagent une ligne de
-        # cache -- et chaque ecriture de l'un invalide la ligne chez l'autre. C'est le FAUX PARTAGE,
-        # et il ne se voit pas: le travail est le meme, seuls les cycles doublent.
+        # Two neighbouring batch items are processed by two DIFFERENT work-items, at the same time (the
+        # kernel loop is strided). If their blocks touch, they share a cache line -- and every
+        # write by one invalidates the line in the other. This is FALSE SHARING,
+        # and it cannot be seen: the work is the same, only the cycles double.
         #
-        # Mesure qui a motive ceci (Xeon W-2145, 8 threads, 1e6 germes en 2D, `sdot` PowerDiagram):
-        # a instructions EGALES a 0.1 % pres, l'IPC tombe de 1.60 a 0.455 et
-        # `mem_load_l3_hit_retired.xsnp_hitm` -- « ce chargement a trouve la ligne modifiee dans le
-        # cache d'un AUTRE coeur » -- passe de 1.5e3 a 2.7e7. `perf c2c` a nomme les lignes: deux
-        # tableaux d'`int32` a un element par work-item (des compteurs) portent a eux seuls 65 % du
-        # trafic, aux offsets 0x0, 0x4, 0x8 ... d'une meme ligne.
+        # Measurement that motivated this (Xeon W-2145, 8 threads, 1e6 seeds in 2D, `sdot` PowerDiagram):
+        # at EQUAL instructions to within 0.1 %, IPC drops from 1.60 to 0.455 and
+        # `mem_load_l3_hit_retired.xsnp_hitm` -- "this load found the line modified in the
+        # cache of ANOTHER core" -- goes from 1.5e3 to 2.7e7. `perf c2c` named the lines: two
+        # `int32` arrays with one element per work-item (counters) alone carry 65 % of the
+        # traffic, at offsets 0x0, 0x4, 0x8 ... of the same line.
         #
-        # Le cas qui fait mal est donc exactement celui d'un bloc PLUS PETIT qu'une ligne: un
-        # scalaire par work-item en met seize dans la meme. Un bloc deja gros, lui, ne gagne qu'un
-        # arrondi.
+        # The case that hurts is therefore exactly that of a block SMALLER than a line: a
+        # scalar per work-item puts sixteen of them in the same one. An already large block only gains a
+        # rounding.
         #
-        # ---- et pourquoi c'est BORNE
+        # ---- and why it is BOUNDED
         #
-        # Le padding coute `( lead - inner ) * padded` elements, et cette depense n'a de sens que
-        # devant ce qu'elle achete. Un axe de lot dimensionne sur les THREADS est minuscule (seize
-        # items: ~1 Ko de padding, pour supprimer le faux partage). Un axe de lot dimensionne sur
-        # les DONNEES ne l'est pas: un scalaire par germe a 1e6 germes passerait de 4 a 64 Mo. On
-        # ne pade donc que tant que la depense reste NEGLIGEABLE EN ABSOLU -- une regle qui n'a pas
-        # besoin de savoir ce que l'axe signifie, et qui retient d'elle-meme le scratch par
-        # work-item sans toucher aux tableaux de donnees.
+        # The padding costs `( lead - inner ) * padded` elements, and this expense only makes sense
+        # relative to what it buys. A batch axis sized on THREADS is tiny (sixteen
+        # items: ~1 KB of padding, to eliminate false sharing). A batch axis sized on
+        # the DATA is not: a scalar per seed at 1e6 seeds would go from 4 to 64 MB. So we
+        # only pad as long as the expense stays NEGLIGIBLE IN ABSOLUTE TERMS -- a rule that does not
+        # need to know what the axis means, and that by itself holds back per-work-item scratch
+        # without touching the data arrays.
         #
-        # CE QUE CA RAPPORTE, mesure : sur le `sdot` PowerDiagram a huit threads, `xsnp_hitm` baisse
-        # de 21 % et le temps de 1.4 %. Le faux partage est donc REEL mais PAS le cout dominant --
-        # raison de plus pour que ce soit un reglage par tenseur et non une politique.
+        # WHAT IT BUYS, measured: on the `sdot` PowerDiagram with eight threads, `xsnp_hitm` drops
+        # by 21 % and the time by 1.4 %. False sharing is therefore REAL but NOT the dominant cost --
+        # all the more reason for this to be a per-tensor setting and not a policy.
         inner = math.prod( other_caps_phys ) if other_caps_phys else 1
         lead = inner
         if batch and item_alignment_bytes:
@@ -143,8 +143,8 @@ class PhysicalLayout:
                     lead = candidate
 
         # physical buffer, row-major: [ flattened+padded batch ] (only if there IS a batch) then the
-        # non-batch axes in physical order -- SAUF quand la foulee par item est padee, auquel cas le
-        # bloc d'un item occupe `lead` elements dont `inner` seulement portent les axes non-lot.
+        # non-batch axes in physical order -- EXCEPT when the per-item stride is padded, in which case the
+        # block of an item occupies `lead` elements of which only `inner` carry the non-batch axes.
         if lead != inner:
             buffer_shape = [ padded, lead ]
             inner_strides = _contiguous( other_caps_phys )

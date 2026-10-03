@@ -12,11 +12,11 @@
 namespace sdot {
 
 namespace detail::RunParallel {
-    /// La forme noyau de chaque argument, dans un `std::tuple` : `( io, a, io, b, c, ... )` ->
-    /// `( map( io, a ), map( io, b ), map( io, c ) )`, une catégorie valant pour ce qui la suit.
-    /// Un pli sur la liste, sans compteur ni continuation -- `kernel_form` rend une VALEUR, et la
-    /// forme d'origine (compteur `Ct<int,n>` + continuations, les valeurs tournées en fin de
-    /// liste) faisait s'effondrer le frontend de nvcc 13.4 dès que le compteur était dépendant.
+    /// The kernel form of each argument, in a `std::tuple`: `( io, a, io, b, c, ... )` ->
+    /// `( map( io, a ), map( io, b ), map( io, c ) )`, a category applying to what follows it.
+    /// A fold over the list, with no counter or continuation -- `kernel_form` returns a VALUE, and the
+    /// original form (`Ct<int,n>` counter + continuations, values rotated to the end of the
+    /// list) made the nvcc 13.4 frontend collapse as soon as the counter was dependent.
     auto _map_args( const auto &/*map*/, auto /*io_category*/ ) {
         return std::tuple<>();
     }
@@ -28,10 +28,10 @@ namespace detail::RunParallel {
             return std::tuple_cat( std::make_tuple( map( io_category, FORWARD( head ) ) ), _map_args( map, io_category, FORWARD( tail )... ) );
     }
 
-    /// Pèle les `ReductionTarget` (forcément en tête des args : les accumulateurs suivent
-    /// immédiatement l'item dans la signature du corps) dans `reduction_targets`, un `std::tuple`
-    /// que la queue reçoit tel quel -- c'est elle qui sait comment accumuler (une ligne par fil sur
-    /// CPU) et recopier dans la cible hôte.
+    /// Peels the `ReductionTarget`s (necessarily at the head of the args: the accumulators follow
+    /// the item immediately in the body's signature) into `reduction_targets`, a `std::tuple`
+    /// that the queue receives as is -- it is the one that knows how to accumulate (one line per thread on
+    /// CPU) and copy back into the host target.
     auto _submit_kernel( auto &queue, const auto &deps, auto &&func, auto &&item_list,
                          int nb_items, int nb_threads, auto reduction_targets, auto &&head, auto &&...tail ) {
         if constexpr ( is_reduction_target<DECAYED_TYPE_OF( head )> )
@@ -41,7 +41,7 @@ namespace detail::RunParallel {
             return submit_kernel( queue, deps, FORWARD( func ), FORWARD( item_list ), nb_items, nb_threads, reduction_targets, FORWARD( head ), FORWARD( tail )... );
     }
 
-    /// cas de base : plus aucun argument (que des réductions, ou liste vide).
+    /// base case: no argument left (only reductions, or empty list).
     auto _submit_kernel( auto &queue, const auto &deps, auto &&func, auto &&item_list,
                          int nb_items, int nb_threads, auto reduction_targets ) {
         return submit_kernel( queue, deps, FORWARD( func ), FORWARD( item_list ), nb_items, nb_threads, reduction_targets );
@@ -72,10 +72,10 @@ namespace detail::RunParallel {
         if ( nb_threads <= 0 )
             return {};
 
-        // chemin coopératif : opt-in via `func.group_size(...)`/`local_mem_elems(...)`
-        // (`with_group_kernel`, cf run_parallel.h), même mécanisme opt-in que `max_nb_threads`
-        // ci-dessus -- absent (tout kernel qui ne demande pas de groupe, ex `Cell.measure`), on
-        // garde le chemin plat, ci-dessous.
+        // cooperative path: opt-in via `func.group_size(...)`/`local_mem_elems(...)`
+        // (`with_group_kernel`, see run_parallel.h), same opt-in mechanism as `max_nb_threads`
+        // above -- when absent (any kernel that does not ask for a group, e.g. `Cell.measure`), we
+        // keep the flat path, below.
         if constexpr ( requires { func.group_size( args... ); func.local_mem_elems( args... ); } ) {
             const int group_size  = func.group_size( args... );
             const int local_elems = func.local_mem_elems( args... );
@@ -87,19 +87,19 @@ namespace detail::RunParallel {
         }
     }
 
-    // corps de run_parallel, avec dépendances explicites `deps` (peut être Dependencies<0>).
+    // body of run_parallel, with explicit dependencies `deps` (may be Dependencies<0>).
     //
-    // UNE queue. La forme d'origine prenait une LISTE de queues et choisissait la moins coûteuse
-    // (transferts compris) dans une boucle `for_each_item` à lambda générique -- un choix que rien
-    // n'exerce (un appel a UN contexte, celui de son device), et une construction sur laquelle le
-    // frontend de nvcc 13.4 (EDG) s'effondre (« Segmentation fault » sur tout noyau, quand 13.3
-    // passait). Le jour où deux contextes se disputent un appel, la sélection se fera ICI, avant
-    // la chaîne de continuations, pas dedans.
+    // ONE queue. The original form took a LIST of queues and chose the cheapest one
+    // (transfers included) in a `for_each_item` loop with a generic lambda -- a choice that nothing
+    // exercises (a call has ONE context, that of its device), and a construction on which the
+    // nvcc 13.4 (EDG) frontend collapses ("Segmentation fault" on any kernel, whereas 13.3
+    // was fine). The day two contexts compete for a call, the selection will be made HERE, before
+    // the chain of continuations, not inside it.
     template<class Queue,class Deps,class ItemList,class Func,class... Args>
     auto _run_parallel( Queue &&queue, Deps &&deps, ItemList &&item_list, Func &&func, Args &&...args ) {
         auto mapped = _map_args( [&]( auto io_category, auto &&arg ) {
-            // une cible de réduction n'est pas « rendue disponible » (c'est un scalaire hôte) :
-            // on la transforme en `ReductionTarget` (op + pointeur hôte), traitée par `_submit_kernel`.
+            // a reduction target is not "made available" (it is a host scalar):
+            // we turn it into a `ReductionTarget` (op + host pointer), handled by `_submit_kernel`.
             if constexpr ( is_red_list<DECAYED_TYPE_OF( io_category )> )
                 return ReductionTarget{ io_category.op, &arg };
             else
@@ -111,11 +111,11 @@ namespace detail::RunParallel {
     }
 }
 
-// `second` = soit un Dependencies (déps explicites via after(...)), soit l'item_list (pas de déps).
+// `second` = either a Dependencies (explicit deps via after(...)), or the item_list (no deps).
 auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest ) {
-    // une liste d'UNE queue vaut la queue (l'ancienne forme à choix de contexte, voir `_run_parallel`)
+    // a list of ONE queue is worth the queue (the old context-choosing form, see `_run_parallel`)
     if constexpr ( ! requires { typename DECAYED_TYPE_OF( queue_list )::DefaultKernelMemorySpace; } ) {
-        static_assert( DECAYED_TYPE_OF( queue_list )::ct_size == 1, "run_parallel : une seule queue" );
+        static_assert( DECAYED_TYPE_OF( queue_list )::ct_size == 1, "run_parallel: a single queue only" );
         return run_parallel( queue_list[ Ct<int,0>() ], FORWARD( second ), FORWARD( rest )... );
     } else if constexpr ( is_dependencies<DECAYED_TYPE_OF( second )> )
         return detail::RunParallel::_run_parallel( FORWARD( queue_list ), FORWARD( second ), FORWARD( rest )... );

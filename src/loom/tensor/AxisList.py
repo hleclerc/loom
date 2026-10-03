@@ -96,9 +96,9 @@ class AxisList( AbstractAxis ):
         #  - each member: logical by inverting its affine on every logical size over the span, capacity
         #    on the buffer sizes there. An unrolled tensor is dense (no padding), so the two agree --
         #    but we keep them distinct so capacity stays a fact about the BUFFER.
-        # capturés WEAKLY -- même raison qu'`AbstractAxis._register_dense` (voir sa docstring) :
-        # un résolveur vit SUR la ShapeVar, donc le capturer fort refermerait l'anneau
-        # `Axis -> coeffs -> ShapeVar -> usages -> résolveur -> Axis`.
+        # captured WEAKLY -- same reason as `AbstractAxis._register_dense` (see its docstring):
+        # a resolver lives ON the ShapeVar, so capturing it strongly would close the ring
+        # `Axis -> coeffs -> ShapeVar -> usages -> resolver -> Axis`.
         loop_ref = weakref.ref( self.loop_axis )
         list_ref = weakref.ref( self )
         for shape_var in self.loop_axis.coeffs:

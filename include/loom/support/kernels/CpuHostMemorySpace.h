@@ -4,10 +4,10 @@
 
 namespace sdot {
 
-/// mémoire hôte paginée (RAM CPU standard), telle que décrite/manipulée depuis l'hôte
+/// paged host memory (standard CPU RAM), as described/handled from the host
 struct CpuHostMemorySpace {
-    static constexpr bool directly_accessible = true;  ///< déréférençable directement depuis l'hôte
-    static constexpr bool kernel_context      = false; ///< zone hôte, pas un tag kernel
+    static constexpr bool directly_accessible = true;  ///< directly dereferenceable from the host
+    static constexpr bool kernel_context      = false; ///< host zone, not a kernel tag
 
        bool operator==( const CpuHostMemorySpace & ) const = default;
     HD void display ( auto &os ) const { os << "CpuHostMemorySpace"; }

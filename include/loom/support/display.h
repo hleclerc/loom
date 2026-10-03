@@ -21,9 +21,9 @@ void display( std::ostream &os, const auto &value ) {
                 display( os << "\n  ", value( i ) );
         }
     } else if constexpr ( requires { for_each_item( value, []( const auto & ) {} ); } ) { // list
-        std::size_t cpt = 0;
+        std::size_t counter = 0;
         for_each_item( value, [&]( const auto &item ) {
-            display( os << ( cpt++ ? ", " : "" ), item );
+            display( os << ( counter++ ? ", " : "" ), item );
         } );
     } else if constexpr ( requires { os << value; } ) { // operator<<
         os << value;

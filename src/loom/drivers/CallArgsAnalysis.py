@@ -72,9 +72,9 @@ class CallArgsAnalysis:
         self.type_names = {}
         self.batch_axes = []
         self.args = {}
-        # LES GROUPES tels qu'on nous les a donnés ( groupe -> { membre C++: chemin } ), gardés
-        # parce que l'ADJOINT en a besoin : il rebâtit les mêmes groupes sur ses propres
-        # arguments ( résidus et gradients ), et il lui faut le chemin de chaque membre.
+        # THE GROUPS as we were given them ( group -> { C++ member: path } ), kept
+        # because the ADJOINT needs them: it rebuilds the same groups over its own
+        # arguments ( residuals and gradients ), and needs the path of each member.
         self.groups = groups
 
         # paths resolve against the objects, so a capacity keyed by path becomes one keyed by
@@ -95,77 +95,76 @@ class CallArgsAnalysis:
                 if axis.name not in self.batch_axes:
                     self.batch_axes.append( axis.name )
 
-        # LE NOM D'UN AXE DE BATCH EST DÉCIDÉ ICI, et il ne sort pas de l'objet `Axis`.
+        # THE NAME OF A BATCH AXIS IS DECIDED HERE, and it does not leave the `Axis` object.
         #
-        # Il traverse jusqu'à la source C++ (`DEFINE_AXIS( batch_0 )`, le type `_batch_0` que porte
-        # chaque tenseur batché), et la clé du cache de compilation est le HASH DE CETTE SOURCE.
-        # Tant que le nom venait de l'axe, il venait d'une piscine d'indices empruntés à la VIE des
-        # objets : deux appels structurellement identiques rendaient deux sources différentes dès
-        # que leurs axes étaient vivants en même temps. Mesuré (`LOOM_JOURNAL=1`) sur une chaîne de
-        # dix pas de `examples/diffusion` : TRENTE noyaux compilés, dont vingt-huit ne différaient
-        # que par `cellule_0` ... `cellule_19`. Ça croissait linéairement avec la longueur de la
-        # chaîne.
+        # It travels all the way to the C++ source (`DEFINE_AXIS( batch_0 )`, the `_batch_0` type carried by
+        # every batched tensor), and the compilation cache key is the HASH OF THAT SOURCE.
+        # While the name came from the axis, it came from a pool of indices borrowed over the LIFETIME of
+        # the objects: two structurally identical calls yielded two different sources as soon as
+        # their axes were alive at the same time. Measured (`LOOM_JOURNAL=1`) on a ten-step chain of
+        # `examples/diffusion`: THIRTY kernels compiled, twenty-eight of which differed only by
+        # `cell_0` ... `cell_19`. It grew linearly with the length of the chain.
         #
-        # Ici, l'ensemble exact des axes de CET appel est connu -- ils viennent tous des
-        # `batch_axes` des arguments, et rien n'est encore abaissé -- donc on les numérote dans
-        # l'ordre où ils se présentent, qui ne dépend que de l'appel. Deux appels identiques
-        # rendent la même source, quelles que soient les durées de vie.
+        # Here, the exact set of axes of THIS call is known -- they all come from the arguments'
+        # `batch_axes`, and nothing has been lowered yet -- so we number them in the order in which they
+        # appear, which depends only on the call. Two identical calls yield the same source, whatever
+        # their lifetimes.
         #
-        # La piscine de `new_batch_axis` reste utile pour autre chose : deux axes VIVANTS EN MÊME
-        # TEMPS doivent porter des noms distincts, sinon la déduplication juste au-dessus les
-        # confondrait. Ce qu'elle ne porte plus, c'est le cache.
+        # The `new_batch_axis` pool remains useful for something else: two axes ALIVE AT THE SAME TIME
+        # must carry distinct names, otherwise the deduplication just above would conflate them. What it
+        # no longer carries is the cache.
         #
-        # Convention : `batch_N` est réservé aux axes de batch d'un appel. Un axe DÉCLARÉ qui
-        # porterait ce nom se confondrait avec eux dans le C++ engendré.
+        # Convention: `batch_N` is reserved for the batch axes of a call. A DECLARED axis that
+        # carried this name would be conflated with them in the generated C++.
         self._canonical_axis = { real: f"batch_{ index }" for index, real in enumerate( self.batch_axes ) }
         self.batch_axes = list( self._canonical_axis.values() )
 
-        # LE DOMAINE DECLARE PAR L'APPEL : `nb_items = n` dit « lance n items », sans qu'aucun
-        # OBJET n'ait a porter l'axe. C'est ce qui enleve l'agregat-pretexte que tout noyau
-        # parallele se fabriquait ( `examples/splats::Rangs` ) : il ne servait plus, depuis que
-        # `flat_index` traverse, qu'a faire exister le batch -- un tenseur alloue et ecrit pour
-        # dire un nombre.
+        # THE DOMAIN DECLARED BY THE CALL: `nb_items = n` says "launch n items", without any
+        # OBJECT having to carry the axis. This removes the pretext aggregate that every parallel
+        # kernel used to fabricate ( `examples/splats::Rangs` ): since `flat_index` goes through, it only
+        # served to make the batch exist -- a tensor allocated and written just to
+        # state a number.
         #
-        # L'etendue est ici HOTE et connue, donc elle ne se lit sur aucun tampon : c'est
-        # `declared_batch_size` que `batch_axis_size` consulte d'abord.
+        # The extent is HOST-side and known here, so it is read from no buffer: it is
+        # `declared_batch_size` that `batch_axis_size` consults first.
         self.declared_batch_size = {}
         if nb_items is not None:
-            nom = f"batch_{ len( self.batch_axes ) }"
-            self.batch_axes.append( nom )
-            self.declared_batch_size[ nom ] = int( nb_items )
+            name = f"batch_{ len( self.batch_axes ) }"
+            self.batch_axes.append( name )
+            self.declared_batch_size[ name ] = int( nb_items )
 
-        # LE NOM C++ ET LE CHEMIN SE SÉPARENT ICI. Sans groupes ils coïncident : un argument est
-        # nommé par son kwarg, et c'est ce même nom que les capacités et les sorties désignent.
-        # Avec groupes, `groups` dit l'un et l'autre -- `{ "inputs": { "temperature":
-        # "temperature_input" } }` : membre C++ à gauche, chemin à droite. C'est ce qui laisse
-        # `loom.mutable` donner DEUX tampons au MÊME nom C++, dans deux groupes différents.
-        noms_cpp = { chemin: membre for g in ( groups or {} ).values() for membre, chemin in g.items() }
+        # THE C++ NAME AND THE PATH PART WAYS HERE. Without groups they coincide: an argument is
+        # named by its kwarg, and that same name is what the capacities and the outputs designate.
+        # With groups, `groups` gives both -- `{ "inputs": { "temperature":
+        # "temperature_input" } }`: C++ member on the left, path on the right. This is what lets
+        # `loom.mutable` give TWO buffers the SAME C++ name, in two different groups.
+        cpp_names = { path: member for g in ( groups or {} ).values() for member, path in g.items() }
 
         for name, inst in args.items():
             # an arg may lower to NOTHING: an `Axis` is a declaration, not data, so `make_CallArg`
             # answers None. Keep it out of the tree -- exactly as `CallArg_Aggregate` does for such
             # a field -- instead of parking a None every `nodes()` walk would then trip over. The
             # axis name still reaches the C++ through any tensor of the call that references it.
-            ca = self.make_CallArg( name, noms_cpp.get( name, name ), inst )
+            ca = self.make_CallArg( name, cpp_names.get( name, name ), inst )
             if ca is not None:
                 self.args[ name ] = ca
 
-        # LE REGROUPEMENT, une fois les feuilles bâties et avant tout ce qui se dérive de l'arbre
-        # (les noms de tampons, les ids d'erreur) : ce sont les GROUPES qui occupent désormais le
-        # premier niveau de `args`, donc de la struct C++, et les arguments descendent d'un cran.
+        # THE GROUPING, once the leaves are built and before anything derived from the tree
+        # (buffer names, error ids): it is the GROUPS that now occupy the
+        # first level of `args`, hence of the C++ struct, and the arguments go down one level.
         if groups is not None:
-            plats = self.args
+            flat_args = self.args
             self.args = {}
-            for groupe, membres in groups.items():
-                enfants = { membre: plats[ chemin ] for membre, chemin in membres.items()
-                            if chemin in plats }
-                if enfants:
-                    self.args[ groupe ] = CallArg_Group( self, groupe,
-                                                         f"{ call_name }_{ groupe }", enfants )
-            orphelins = set( plats ) - { c for m in groups.values() for c in m.values() }
-            if orphelins:
-                raise ValueError( f"CallArgsAnalysis: { ', '.join( sorted( orphelins ) ) } "
-                                  f"n'{ 'est' if len( orphelins ) == 1 else 'sont' } dans aucun groupe" )
+            for group, members in groups.items():
+                children = { member: flat_args[ path ] for member, path in members.items()
+                            if path in flat_args }
+                if children:
+                    self.args[ group ] = CallArg_Group( self, group,
+                                                         f"{ call_name }_{ group }", children )
+            orphans = set( flat_args ) - { c for m in groups.values() for c in m.values() }
+            if orphans:
+                raise ValueError( f"CallArgsAnalysis: { ', '.join( sorted( orphans ) ) } "
+                                  f"{ 'is' if len( orphans ) == 1 else 'are' } in no group" )
 
         # what the kernel writes when something goes wrong -- built last, so it takes the FFI slot
         # after every argument's. It is a buffer of the call, not of an argument: no object of the
@@ -255,9 +254,9 @@ class CallArgsAnalysis:
         """Every axis name spelled in the generated `.cpp`, deduped in first-seen order: each node
         contributes what its TYPE references (a tensor's dimensions, a count's batch axes), so
         every one gets a `DEFINE_AXIS`. Derived by folding the tree -- not accumulated during it."""
-        # un axe DECLARE PAR L'APPEL ( `nb_items` ) n'est porte par aucun noeud -- c'est tout son
-        # interet -- donc il n'arriverait jamais par le pli ci-dessous. Il lui faut pourtant son
-        # `DEFINE_AXIS` : le type `_batch_0` est celui du multi-indice que le corps parcourt.
+        # an axis DECLARED BY THE CALL ( `nb_items` ) is carried by no node -- that is its whole
+        # point -- so it would never arrive through the fold below. It still needs its
+        # `DEFINE_AXIS` though: the `_batch_0` type is that of the multi-index the body walks.
         seen = list( self.declared_batch_size )
         for node in self.nodes():
             for name in node.cpp_axis_names():
@@ -289,8 +288,8 @@ class CallArgsAnalysis:
         # nodes, so they follow the CLONES on their own (each keeps its `ffi_name`/`error_id`), and
         # the batch axis reaches them through the buffers we are about to give it below.
 
-        # les clones appartiennent à `res`, pas à nous : sans ça un noeud cloné irait demander
-        # l'étendue de son NOUVEL axe de batch à une analyse qui ne le connaît pas.
+        # the clones belong to `res`, not to us: without this a cloned node would go and ask
+        # for the extent of its NEW batch axis from an analysis that does not know it.
         for node in res.nodes():
             node._rebind_analysis( res )
 
@@ -303,14 +302,14 @@ class CallArgsAnalysis:
         return res
 
     def cpp_axis_name( self, name ):
-        """Le nom sous lequel un axe est ÉCRIT dans le C++ engendré : le nom canonique d'un axe de
-        batch de cet appel (voir `__init__`), le nom tel quel pour tout autre axe -- un axe déclaré
-        par un agrégat est nommé par la déclaration, qui ne bouge pas d'un appel à l'autre.
+        """The name under which an axis is WRITTEN in the generated C++: the canonical name of a batch
+        axis of this call (see `__init__`), the name as is for any other axis -- an axis declared
+        by an aggregate is named by the declaration, which does not change from one call to the next.
 
-        Appelé partout où un nom d'axe ENTRE dans l'abaissement, c'est-à-dire aux deux seuls
-        endroits qui le lisent sur un objet Python : les dimensions d'un tenseur
-        (`CallArg_Tensor`) et les axes de batch d'un compte (`CallArg_ShapeVar`). Un axe ajouté
-        plus tard par un `vmap` porte déjà un nom stable (`vmap_0`) et traverse inchangé."""
+        Called everywhere an axis name ENTERS the lowering, that is, at the only two
+        places that read it off a Python object: the dimensions of a tensor
+        (`CallArg_Tensor`) and the batch axes of a count (`CallArg_ShapeVar`). An axis added
+        later by a `vmap` already carries a stable name (`vmap_0`) and passes through unchanged."""
         return self._canonical_axis.get( name, name )
 
     def batch_axis_size( self, axis_name ):
@@ -428,23 +427,23 @@ class CallArgsAnalysis:
         # a builtin cannot carry a `make_CallArg`: a bare `int` is a runtime attribute of the call.
         if isinstance( inst, int ):
             return CallArg_Attr( self, path, name, inst )
-        # UNE VALEUR BRUTE EST UNE DONNEE : un tableau du framework, un tableau numpy, une liste,
-        # un flottant. L'usager n'a pas a l'emballer -- `Tensor.as_tensor` lit son kind et sa
-        # forme, le driver tranche la taille, et la suite ne voit qu'un tenseur comme un autre.
-        # C'est ICI et nulle part ailleurs, parce que c'est ici qu'on decide comment chaque
-        # attribut ATTEINT le noyau.
-        from ..tensor.Tensor import Tensor   # local : `loom.tensor` tire `driver`, qui nous tire
+        # A RAW VALUE IS DATA: a framework array, a numpy array, a list,
+        # a float. The user does not have to wrap it -- `Tensor.as_tensor` reads its kind and
+        # shape, the driver settles the size, and what follows sees a tensor like any other.
+        # It is HERE and nowhere else, because this is where we decide how each
+        # attribute REACHES the kernel.
+        from ..tensor.Tensor import Tensor   # local: `loom.tensor` pulls `driver`, which pulls us
         tensor = Tensor.as_tensor( inst )
         if tensor is not None:
-            # ... sauf en SORTIE. Le tenseur qu'on vient de batir est a nous : le resultat lui
-            # serait relie, et l'appelant ne le verrait jamais. Une sortie doit etre un objet de
-            # l'appelant, et le declarer est justement ce que `like` sert a ecrire.
+            # ... except in OUTPUT. The tensor we just built is ours: the result would be
+            # bound to it, and the caller would never see it. An output must be an object of
+            # the caller, and declaring it is precisely what `like` is for.
             for p in self.output_paths + self.scratch_paths:
                 if path == p or path.startswith( p + "." ):
                     raise ValueError(
-                        f"'{ path }' est declare en sortie, mais la valeur passee est brute : le "
-                        f"resultat n'aurait nulle part ou revenir. Passe un tenseur loom, p.ex. "
-                        f"`{ name } = loom.RealTensor.like( <l'entree de meme forme> )`." )
+                        f"'{ path }' is declared as an output, but the value passed is raw: the "
+                        f"result would have nowhere to go back to. Pass a loom tensor, e.g. "
+                        f"`{ name } = loom.RealTensor.like( <the input of the same shape> )`." )
             return tensor.make_CallArg( self, path, name, tensor )
         # default lowering: a plain aggregate, walked field by field.
         return CallArg_Aggregate( self, path, name, inst )

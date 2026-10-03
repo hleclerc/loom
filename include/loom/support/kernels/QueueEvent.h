@@ -6,25 +6,25 @@
 
 namespace sdot {
 
-/// Ce qu'un lancement rend : « synchrone par défaut, asynchrone si on le gère ».
+/// What a launch returns: "synchronous by default, asynchronous if you manage it".
 ///
-/// Tant qu'il n'est pas *consommé* (via `wait()`, `detach()` ou `take()` — p.ex. repris comme
-/// dépendance d'un run suivant), sa destruction fait un `wait()`. On évite ainsi de lire des
-/// résultats pas encore prêts par mégarde, sans imposer un `wait()` à chaque run : si l'appelant
-/// garde le handle et l'enchaîne, aucun `wait()` n'est forcé.
+/// As long as it has not been *consumed* (via `wait()`, `detach()` or `take()` — e.g. taken over as a
+/// dependency of a following run), its destruction does a `wait()`. This avoids reading
+/// results that are not ready yet by mistake, without imposing a `wait()` on every run: if the caller
+/// keeps the handle and chains it, no `wait()` is forced.
 ///
-/// Le device dit ce qu'attendre veut dire : `waiter` est vide sur CPU (le lancement a rendu la
-/// main une fois le travail fait), et ce sera un `cudaEvent` à attendre sur GPU. Le reste --
-/// consommation, finalizers -- est commun.
+/// The device says what waiting means: `waiter` is empty on CPU (the launch returned
+/// once the work was done), and it will be a `cudaEvent` to wait on on GPU. The rest --
+/// consumption, finalizers -- is common.
 ///
-/// `finalizers` est exécuté *après* l'attente (avant de marquer l'event consommé) : il sert p.ex.
-/// à recopier le résultat d'une réduction depuis le device vers la variable hôte.
+/// `finalizers` is run *after* the wait (before marking the event consumed): it serves e.g.
+/// to copy the result of a reduction from the device back to the host variable.
 ///
-/// Move-only : un event = une responsabilité (un seul propriétaire à la fois).
+/// Move-only: one event = one responsibility (a single owner at a time).
 struct QueueEvent {
-    std::function<void()>              waiter;            ///< vide = déjà complet
+    std::function<void()>              waiter;            ///< empty = already complete
     bool                               consumed = false;
-    std::vector<std::function<void()>> finalizers;        ///< exécutés après l'attente
+    std::vector<std::function<void()>> finalizers;        ///< run after the wait
 
     /* */       QueueEvent () = default;
     /* */       QueueEvent ( std::function<void()> waiter ) : waiter( std::move( waiter ) ) {}
@@ -44,11 +44,11 @@ struct QueueEvent {
 
     void        _finish    () { if ( consumed ) return; if ( waiter ) waiter(); for ( auto &f : finalizers ) f(); finalizers.clear(); consumed = true; }
 
-    void        wait       () { _finish(); }               ///< attend explicitement la fin (et exécute les finalizers)
-    void        detach     () { consumed = true; }         ///< « je m'en occupe » : pas de wait à la destruction
+    void        wait       () { _finish(); }               ///< waits explicitly for completion (and runs the finalizers)
+    void        detach     () { consumed = true; }         ///< "I take care of it": no wait on destruction
 
-    /// récupère de quoi attendre (p.ex. comme dépendance d'un run suivant). Les finalizers sont
-    /// emportés avec : ils s'exécuteront à la première attente.
+    /// takes what is needed to wait (e.g. as a dependency of a following run). The finalizers are
+    /// carried along: they will run at the first wait.
     std::function<void()> take() {
         consumed = true;
         return [waiter=std::move( waiter ),finalizers=std::move( finalizers )]() mutable {
@@ -59,8 +59,8 @@ struct QueueEvent {
     }
 };
 
-/// Jeu de dépendances passé juste après `queue_list` pour chaîner les soumissions.
-/// Produit par `after(...)`. Détectable par type via `is_dependencies`.
+/// Set of dependencies passed right after `queue_list` to chain submissions.
+/// Produced by `after(...)`. Detectable by type via `is_dependencies`.
 template<std::size_t N>
 struct Dependencies {
     std::array<std::function<void()>,N> waiters;
@@ -70,7 +70,7 @@ struct Dependencies {
 template<class>             constexpr bool is_dependencies                  = false;
 template<std::size_t N>     constexpr bool is_dependencies<Dependencies<N>> = true;
 
-/// Construit les dépendances à partir de `QueueEvent` (qu'on *consomme* via take()).
+/// Builds the dependencies from `QueueEvent`s (which are *consumed* via take()).
 auto after( auto &&...handles ) {
     return Dependencies<sizeof...( handles )>{ { handles.take()... } };
 }

@@ -1,8 +1,8 @@
-"""Le tenseur RAGGED en CSR ( `loom.CsrTensor` ) : des lignes de longueurs differentes, rangees
-bout a bout.
+"""The RAGGED tensor in CSR ( `loom.CsrTensor` ): rows of different lengths, laid out
+end to end.
 
-Ce qu'il faut verifier tient en une phrase : DANS `csr( i, j )`, LE `i` VA CHERCHER DANS LES
-OFFSETS. Le reste -- la somme prefixe, le total, l'allocation exacte -- en decoule.
+What needs checking fits in one sentence: IN `csr( i, j )`, `i` LOOKS ITSELF UP IN THE
+OFFSETS. The rest -- the prefix sum, the total, the exact allocation -- follows from it.
 """
 import numpy
 
@@ -11,54 +11,54 @@ from loom.compilation.FfiCode import FfiCode
 from errand import test
 
 
-_REMPLIR = FfiCode.per_item( code = """
+_FILL = FfiCode.per_item( code = """
     const SI i = flat_index;
     for ( SI j = 0; j < outputs.csr.row_size( i ); ++j )
         outputs.csr( i, j ) = 10 * i + j;
 """ )
 
 
-if test( "le_i_va_chercher_dans_les_offsets" ):
-    # trois lignes de longueurs 2, 0 et 3 -- dont une VIDE, qui est le cas ou un rembourrage
-    # gaspille le plus et ou une arithmetique d'offsets se trompe le plus facilement.
-    comptes = loom.IntTensor[ 3 ]( [ 2, 0, 3 ] )
-    csr = loom.CsrTensor.from_counts( comptes )
+if test( "the_i_is_looked_up_in_the_offsets" ):
+    # three rows of lengths 2, 0 and 3 -- one of them EMPTY, which is the case where padding
+    # wastes the most and where offset arithmetic is the easiest to get wrong.
+    counts = loom.IntTensor[ 3 ]( [ 2, 0, 3 ] )
+    csr = loom.CsrTensor.from_counts( counts )
 
     assert numpy.asarray( csr.offsets.value ).tolist() == [ 0, 2, 2, 5 ]
-    assert csr.total == 5          # la derniere borne EST le total
+    assert csr.total == 5          # the last bound IS the total
     assert csr.nb_rows_value == 3
 
-    loom.ffi_call( "csr_remplir", _REMPLIR, csr = loom.out( csr, writes = ( "values", ) ), nb_items = 3 )
+    loom.ffi_call( "csr_fill", _FILL, csr = loom.out( csr, writes = ( "values", ) ), nb_items = 3 )
 
-    # ligne 0 -> 0, 1 ; ligne 1 -> rien ; ligne 2 -> 20, 21, 22
+    # row 0 -> 0, 1 ; row 1 -> nothing ; row 2 -> 20, 21, 22
     assert numpy.asarray( csr.values.value ).reshape( -1 ).tolist() == [ 0, 1, 20, 21, 22 ]
-    print( f"3 lignes ( 2, 0, 3 ) -> { csr.total } fentes, exactement le total" )
+    print( f"3 rows ( 2, 0, 3 ) -> { csr.total } slots, exactly the total" )
 
 
-if test( "une_ligne_vide_a_une_taille_nulle" ):
-    # `row_size` est une SOUSTRACTION de deux bornes voisines : une ligne vide donne 0, et il n'y
-    # a pas de tableau de comptes a tenir en accord avec les offsets.
-    tailles = loom.IntTensor[ 4 ]()
-    comptes = loom.IntTensor[ 4 ]( [ 0, 3, 0, 1 ] )
-    csr = loom.CsrTensor.from_counts( comptes )
+if test( "an_empty_row_has_a_zero_size" ):
+    # `row_size` is a SUBTRACTION of two neighbouring bounds: an empty row gives 0, and there is
+    # no counts array to keep consistent with the offsets.
+    sizes = loom.IntTensor[ 4 ]()
+    counts = loom.IntTensor[ 4 ]( [ 0, 3, 0, 1 ] )
+    csr = loom.CsrTensor.from_counts( counts )
 
     loom.ffi_call(
-        "csr_tailles",
-        FfiCode.per_item( code = "outputs.tailles( flat_index ) = inputs.csr.row_size( flat_index );" ),
+        "csr_sizes",
+        FfiCode.per_item( code = "outputs.sizes( flat_index ) = inputs.csr.row_size( flat_index );" ),
         csr = csr,
-        tailles = loom.out( tailles ),
+        sizes = loom.out( sizes ),
         nb_items = 4,
     )
-    assert numpy.asarray( tailles.value ).reshape( -1 ).tolist() == [ 0, 3, 0, 1 ]
+    assert numpy.asarray( sizes.value ).reshape( -1 ).tolist() == [ 0, 3, 0, 1 ]
 
 
-if test( "le_csr_ne_rembourre_rien" ):
-    # LE POINT : `values` est alloue au TOTAL, pas a `lignes x plus_longue_ligne`. Une ligne longue
-    # au milieu de lignes courtes est exactement ce qui fait diverger les deux.
-    comptes = loom.IntTensor[ 5 ]( [ 1, 1, 60, 1, 1 ] )
-    csr = loom.CsrTensor.from_counts( comptes )
+if test( "the_csr_pads_nothing" ):
+    # THE POINT: `values` is allocated at the TOTAL, not at `rows x longest_row`. A long row
+    # in the middle of short rows is exactly what makes the two diverge.
+    counts = loom.IntTensor[ 5 ]( [ 1, 1, 60, 1, 1 ] )
+    csr = loom.CsrTensor.from_counts( counts )
 
-    rembourre = 5 * 60
+    padded = 5 * 60
     assert csr.total == 64
     assert tuple( csr.values.shape ) == ( 64, )
-    print( f"rembourre { rembourre } fentes, csr { csr.total } -- x{ rembourre / csr.total:.1f}" )
+    print( f"padded { padded } slots, csr { csr.total } -- x{ padded / csr.total:.1f}" )

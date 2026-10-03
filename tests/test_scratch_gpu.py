@@ -1,29 +1,28 @@
-"""SPIKE, deuxième moitié -- une taille décidée par la DONNÉE, sur la carte, ET SOUS `jit`.
+"""SPIKE, second half -- a size decided by the DATA, on the card, AND UNDER `jit`.
 
-CE QU'ON CROYAIT. `examples/splats/README.md` documente une frontière : l'hôte peut lire un compte
-qu'un noyau vient d'écrire, mais « eager-only » -- `ShapeArray` refuse un tracer et
-`capacity_overflows()` rend `None` sous `jit`. La conclusion était qu'une taille dépendante des
-données ne passe pas un `jit`.
+WHAT WE BELIEVED. `examples/splats/README.md` documents a boundary: the host can read a count
+that a kernel has just written, but "eager-only" -- `ShapeArray` refuses a tracer and
+`capacity_overflows()` returns `None` under `jit`. The conclusion was that a data-dependent size
+does not get through a `jit`.
 
-CE QUE CE TEST ÉTABLIT. Cette frontière n'est PAS une propriété d'XLA. C'est une propriété de faire
-la relecture EN PYTHON. Déplacée dans le C++ du handler, elle disparaît : le handler tourne à
-l'EXÉCUTION, donc il peut lire un compte device, allouer dessus, et rien de tout cela n'a à exister
-au traçage.
+WHAT THIS TEST ESTABLISHES. That boundary is NOT a property of XLA. It is a property of doing the
+read-back IN PYTHON. Moved into the handler's C++, it disappears: the handler runs at EXECUTION
+time, so it can read a device count, allocate on it, and none of this has to exist at trace time.
 
-La chaîne, entièrement dans un seul appel :
+The chain, entirely within a single call:
 
-  1. un noyau compte, sur la carte ;
-  2. l'hôte -- le handler, qui est du code hôte -- lit ce compte ;
-  3. il alloue EXACTEMENT ça dans le pool d'XLA ( `XLA_FFI_DeviceMemory_Allocate` ) ;
-  4. un noyau compacte dedans, un autre le somme.
+  1. a kernel counts, on the card;
+  2. the host -- the handler, which is host code -- reads that count;
+  3. it allocates EXACTLY that in the XLA pool ( `XLA_FFI_DeviceMemory_Allocate` );
+  4. a kernel compacts into it, another sums it.
 
-Aucune borne n'est prescrite, ni par Python ni par XLA. Mesuré le 2026-09-26 sur une sm_75 : exact
-sur trois tailles en eager, et sur quatre tirages sous `jit` ( 1989 / 2023 / 2040 / 2074 éléments
-alloués pour la même fonction compilée UNE fois ).
+No bound is prescribed, neither by Python nor by XLA. Measured on 2026-09-26 on an sm_75: exact
+on three sizes in eager, and on four draws under `jit` ( 1989 / 2023 / 2040 / 2074 elements
+allocated for the same function compiled ONCE ).
 
-Ce test demande un GPU ( sur CPU, `scratch` passe par `aligned_alloc` et la relecture device n'a
-pas de sens -- voir `test_scratch.py` ), et se saute tout seul sinon. L'environnement `nsdot`
-d'errand est tague cuda mais vide a ce jour ; en attendant, directement :
+This test needs a GPU ( on CPU, `scratch` goes through `aligned_alloc` and the device read-back
+makes no sense -- see `test_scratch.py` ), and skips itself otherwise. The errand `nsdot`
+environment is tagged cuda but empty to date; in the meantime, directly:
 
     job -- env ERRAND_IN_ENV=1 LOOM_DEVICE=cuda PYTHONPATH=<errand>:<loom>/src \
         /data/venvs/sdot/bin/python -m errand test_scratch_gpu
@@ -33,7 +32,7 @@ from pathlib import Path
 import loom
 from loom import Axis, ShapeVar, RealTensor, driver, compilation
 from loom.compilation.FfiCode import FfiCode
-from errand import test
+from errand import test, skip
 
 import numpy
 
@@ -42,33 +41,33 @@ compilation.register_include_root( Path( __file__ ).resolve().parent / "include"
 
 _CODE = """
     void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-        SI n = args.inputs.valeurs.shape( 0 );
+        SI n = args.inputs.values.shape( 0 );
 
-        // 1. un noyau compte, sur la carte. On passe par la forme LIBRE de `run_parallel` : `cpt`
-        //    est un scratch, il ne vient pas de `args`, donc la forme courte ne s'applique pas.
-        auto cpt = args.allocator.template view<int>( 1 );
-        cpt.fill_with( queue, 0 );
-        run_parallel( queue, indices_over( n ), loom_tests::Compter(),
-                      OutList(), cpt, InpList(), args.inputs.valeurs );
+        // 1. a kernel counts, on the card. We go through the FREE form of `run_parallel`: `counter`
+        //    is a scratch, it does not come from `args`, so the short form does not apply.
+        auto counter = args.allocator.template view<int>( 1 );
+        counter.fill_with( queue, 0 );
+        run_parallel( queue, indices_over( n ), loom_tests::Counter(),
+                      OutList(), counter, InpList(), args.inputs.values );
 
-        // 2. l'HOTE lit ce que le noyau vient d'ecrire. `Ptr::value()` ferait ca, mais il est
-        //    marque `HD` alors que son chemin de transfert est HOTE seul -> le compilateur CUDA le
-        //    refuse sous `--Werror cross-execution-space-call`. D'ou le `copy` direct.
-        int m_hote = 0;
-        copy( Ptr<int,CpuHostMemorySpace>( &m_hote ), cpt.data(), 1 );
-        SI m = SI( m_hote );
+        // 2. the HOST reads what the kernel has just written. `Ptr::value()` would do that, but it is
+        //    marked `HD` while its transfer path is HOST only -> the CUDA compiler refuses it
+        //    under `--Werror cross-execution-space-call`. Hence the direct `copy`.
+        int host_m = 0;
+        copy( Ptr<int,CpuHostMemorySpace>( &host_m ), counter.data(), 1 );
+        SI m = SI( host_m );
 
-        // 3. ... et on alloue EXACTEMENT ca
+        // 3. ... and we allocate EXACTLY that
         auto compact = args.allocator.template view<double>( m );
-        cpt.fill_with( queue, 0 );
-        run_parallel( queue, indices_over( n ), loom_tests::Compacter(),
-                      OutList(), compact, OutList(), cpt, InpList(), args.inputs.valeurs );
+        counter.fill_with( queue, 0 );
+        run_parallel( queue, indices_over( n ), loom_tests::Compactor(),
+                      OutList(), compact, OutList(), counter, InpList(), args.inputs.values );
 
-        // 4. de quoi verifier : la somme des positifs, et la taille qui a ete allouee
-        run_parallel( queue, indices_over( m ), loom_tests::Sommer(),
-                      OutList(), args.outputs.somme, InpList(), compact );
-        run_parallel( queue, indices_over( SI( 1 ) ), loom_tests::Poser(),
-                      OutList(), args.outputs.somme, InpList(), double( m ) );
+        // 4. something to check: the sum of the positives, and the size that was allocated
+        run_parallel( queue, indices_over( m ), loom_tests::Summer(),
+                      OutList(), args.outputs.total, InpList(), compact );
+        run_parallel( queue, indices_over( SI( 1 ) ), loom_tests::Setter(),
+                      OutList(), args.outputs.total, InpList(), double( m ) );
     }
 """
 
@@ -78,65 +77,65 @@ def _code():
                             includes = [ "loom_tests/scratch_gpu.h" ] )
 
 
-def _calcul( x ):
+def _compute( x ):
     v = RealTensor[ Axis( ShapeVar( len( x ) ), name = "num_point" ) ]( x )
-    somme = RealTensor[ Axis( ShapeVar( 2 ), name = "num_sortie" ) ]()
-    loom.ffi_call( "test_scratch_gpu", _code(), valeurs = v, somme = loom.out( somme ) )
-    return somme
+    total = RealTensor[ Axis( ShapeVar( 2 ), name = "num_output" ) ]()
+    loom.ffi_call( "test_scratch_gpu", _code(), values = v, total = loom.out( total ) )
+    return total
 
 
-def _attendu( x ):
+def _expected( x ):
     return float( x[ x > 0 ].sum() ), int( ( x > 0 ).sum() )
 
 
-def _sur_gpu():
-    """Un GPU est-il la ? La question porte sur le DEVICE de loom, pas sur la presence d'une carte :
-    sans jaxlib CUDA, loom retombe sur le CPU et ce test n'a plus d'objet."""
+def _on_gpu():
+    """Is there a GPU here? The question is about loom's DEVICE, not about the presence of a card:
+    without CUDA jaxlib, loom falls back to the CPU and this test no longer has a point."""
     try:
         return bool( getattr( driver.device, "is_cuda_gpu", False ) )
     except Exception:
         return False
 
 
-_GPU = _sur_gpu()
-_HORS_GPU = "pas de GPU ici -- sauté ( voir l'en-tête du fichier pour la commande )"
+_GPU = _on_gpu()
+_NO_GPU = "needs a CUDA GPU -- none here ( see the file header for the command )"
 
 
-if test( "taille_decidee_par_la_donnee" ):
+if test( "size_decided_by_the_data" ):
     if not _GPU:
-        print( _HORS_GPU )
+        skip( _NO_GPU )
     else:
-        # trois tailles utiles différentes, pour une source unique et sans borne
-        for graine, n in ( ( 0, 1000 ), ( 1, 5000 ), ( 2, 37 ) ):
-            x = numpy.random.default_rng( graine ).normal( size = n )
-            s, m = _calcul( x ).raw.tolist()
-            att_s, att_m = _attendu( x )
-            assert int( m ) == att_m, ( n, int( m ), att_m )
-            assert abs( s - att_s ) < 1e-9, ( n, s, att_s )
-        print( f"scratch : taille exacte lue sur la carte, sur { driver.device }" )
+        # three different useful sizes, for a single source and with no bound
+        for seed, n in ( ( 0, 1000 ), ( 1, 5000 ), ( 2, 37 ) ):
+            x = numpy.random.default_rng( seed ).normal( size = n )
+            s, m = _compute( x ).raw.tolist()
+            expected_s, expected_m = _expected( x )
+            assert int( m ) == expected_m, ( n, int( m ), expected_m )
+            assert abs( s - expected_s ) < 1e-9, ( n, s, expected_s )
+        print( f"scratch: exact size read on the card, on { driver.device }" )
 
 
-if test( "sous_jit" ):
+if test( "under_jit" ):
     if not _GPU:
-        print( _HORS_GPU )
+        skip( _NO_GPU )
     else:
-        # LE point. La fonction est compilée UNE fois ; la taille allouée change à chaque appel.
+        # THE point. The function is compiled ONCE; the allocated size changes on every call.
         n = 4096
 
-        def calcul( x ):
-            return _calcul( x ).value
+        def compute( x ):
+            return _compute( x ).value
 
-        compile = driver.jit( calcul )
+        compile = driver.jit( compute )
 
-        tailles = []
-        for graine in range( 4 ):
-            x = numpy.random.default_rng( graine ).normal( size = n )
+        sizes = []
+        for seed in range( 4 ):
+            x = numpy.random.default_rng( seed ).normal( size = n )
             r = numpy.asarray( compile( driver.array( x ) ) )
-            att_s, att_m = _attendu( x )
-            assert int( r[ 1 ] ) == att_m, ( graine, int( r[ 1 ] ), att_m )
-            assert abs( float( r[ 0 ] ) - att_s ) < 1e-8, ( graine, float( r[ 0 ] ), att_s )
-            tailles.append( att_m )
+            expected_s, expected_m = _expected( x )
+            assert int( r[ 1 ] ) == expected_m, ( seed, int( r[ 1 ] ), expected_m )
+            assert abs( float( r[ 0 ] ) - expected_s ) < 1e-8, ( seed, float( r[ 0 ] ), expected_s )
+            sizes.append( expected_m )
 
-        # et elles DIFFÈRENT : sinon le test passerait avec une capacité prescrite
-        assert len( set( tailles ) ) > 1, tailles
-        print( f"scratch SOUS JIT : une seule compilation, tailles allouées { tailles }" )
+        # and they DIFFER: otherwise the test would pass with a prescribed capacity
+        assert len( set( sizes ) ) > 1, sizes
+        print( f"scratch UNDER JIT: a single compilation, allocated sizes { sizes }" )

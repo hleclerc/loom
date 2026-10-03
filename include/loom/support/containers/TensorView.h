@@ -43,12 +43,12 @@ public:
 
     using            value_type             = TF;
 
-    using            RawByte                = std::conditional_t<std::is_const_v<TF>,const std::byte,std::byte>; ///< octet const ou non selon la constness de TF (les strides sont en octets)
-    using            BytePtr                = Ptr<RawByte,MemorySpace>; ///< pointeur octet + zone mémoire (ce qu'on stocke)
-    using            DataPtr                = Ptr<TF,MemorySpace>;      ///< pointeur typé renvoyé par data()
+    using            RawByte                = std::conditional_t<std::is_const_v<TF>,const std::byte,std::byte>; ///< byte, const or not depending on the constness of TF (strides are in bytes)
+    using            BytePtr                = Ptr<RawByte,MemorySpace>; ///< byte pointer + memory space (what we store)
+    using            DataPtr                = Ptr<TF,MemorySpace>;      ///< typed pointer returned by data()
     SCInt            ct_rank                = Shape::ct_size;
 
-    /* */            HD TensorView          ( DataPtr data, Shape shape, Strides strides ); ///< pointeur typé ; stocké en interne comme BytePtr (strides en octets)
+    /* */            HD TensorView          ( DataPtr data, Shape shape, Strides strides ); ///< typed pointer; stored internally as a BytePtr (strides in bytes)
     /* */               TensorView          ( const TensorView & ) = default; ///< Eigen-like view semantics: copy-construction shares the data (shallow), while operator= copies the elements (deep). The defaulted copy-ctor also silences -Wdeprecated-copy.
     /* */               TensorView          () = default;
 
@@ -60,7 +60,7 @@ public:
     static constexpr bool surely_null = false;
 
     HD MemorySpace   memory_space           () const { return _data.memory_space; }
-    // (pas de membre display : le display() générique de display.h gère TensorView via shape()/value()/operator[])
+    // (no display member: the generic display() from display.h handles TensorView via shape()/value()/operator[])
 
     //
     HD Strides       strides                () const;
@@ -68,10 +68,10 @@ public:
     HD auto          rank                   () const;
 
     // shape
-    // for_each_index / for_each_item : à migrer (dépendent de cartesian_product/range)
+    // for_each_index / for_each_item : to be migrated (depend on cartesian_product/range)
     HD auto          indices_col_ordering   ( auto index ) const;
     HD auto          items_are_contiguous   () const; ///<
-    HD void          for_each_scalar        ( auto &&func ) const; ///< appelle func( vue_rang_0 ) pour chaque élément (boucle simple récursive)
+    HD void          for_each_scalar        ( auto &&func ) const; ///< calls func( rank_0_view ) for each element (simple recursive loop)
     HD auto          all_indices            () const;
     HD auto          nb_items               () const;
     HD auto          shape                  ( auto d ) const { return _shape[ d ]; }
@@ -99,7 +99,7 @@ public:
     HD TF&           ref                   () const;
 
     // reassign
-    HD void          _zip_apply             ( auto op, const auto &that ) const; ///< op( ref_scalaire, scalaire_de_that ) sur chaque élément (même rang -> élémentaire ; rang 0/scalaire -> broadcast)
+    HD void          _zip_apply             ( auto op, const auto &that ) const; ///< op( scalar_ref, scalar_of_that ) on each element (same rank -> elementwise; rank 0/scalar -> broadcast)
     HD void          copy_elements_from     ( const auto &that );
     HD void          operator-=             ( const auto &that );
     HD void          operator+=             ( const auto &that );
@@ -112,72 +112,72 @@ public:
     // data copy / transfer
        auto          transfer_cost          ( const auto &queue, auto io_category ) const;
 
-    // rend la vue accessible depuis le contexte d'exécution `queue` : si le coût de transfert
-    // est nul on retype simplement le Ptr vers la zone kernel cible, sinon on transfère
-    // (alloc + copy selon io_category). Appelle ensuite cont( vue_kernel ).
+    // makes the view accessible from the execution context `queue`: if the transfer cost
+    // is zero we simply retype the Ptr towards the target kernel space, otherwise we transfer
+    // (alloc + copy according to io_category). Then calls cont( kernel_view ).
        auto          kernel_form            ( auto &&queue, auto io_category ) const;
 
-    /// NOTRE DOMAINE : un item par élément, chaque coordonnée portant le nom de son axe. C'est ce
-    /// qu'on passe à `run_parallel`, et c'est bien défini -- contrairement aux axes d'un AGRÉGAT,
-    /// qui en a souvent qu'on ne parcourt pas ( `Splats` a `splat`, mais aussi `rvb` ).
+    /// OUR DOMAIN: one item per element, each coordinate carrying the name of its axis. This is
+    /// what we pass to `run_parallel`, and it is well defined -- unlike the axes of an AGGREGATE,
+    /// which often has some that we do not iterate over ( `Splats` has `splat`, but also `rgb` ).
     ///
-    /// Il porte les EXTENTS, qui sont des données d'exécution : c'est pour ça que c'est une
-    /// méthode, là où `axes` ci-dessous est une constante de compilation.
+    /// It carries the EXTENTS, which are runtime data: that is why this is a
+    /// method, whereas `axes` below is a compile-time constant.
     HD auto          domain                 () const;
 
-    /// UN SOUS-DOMAINE, par NOM : `image.domain( num_y, num_x )` -- les pixels, pas les canaux.
+    /// A SUB-DOMAIN, by NAME: `image.domain( num_y, num_x )` -- the pixels, not the channels.
     ///
-    /// C'est ce qui manquait pour qu'un corps qui lance lui-même reste tensoriel. `domain()` prend
-    /// TOUS les axes, ce qui n'est le bon parcours que quand le tenseur n'en a que des axes à
-    /// parcourir ; une image `( y, x, rvb )` n'est pas dans ce cas -- un item par canal lui ferait
-    /// recalculer trois fois la même gaussienne. La parade était de se fabriquer un rang plat et de
-    /// le redécouper en `/` et `%`, c'est-à-dire de perdre les axes au moment précis où on itère
-    /// dessus.
+    /// This is what was missing for a body that itself launches to stay tensorial. `domain()` takes
+    /// ALL the axes, which is only the right traversal when the tensor has nothing but axes to
+    /// iterate over; an image `( y, x, rgb )` is not in that case -- one item per channel would
+    /// make it recompute the same gaussian three times. The workaround was to build a flat rank and
+    /// to split it back with `/` and `%`, that is, to lose the axes at the very moment we iterate
+    /// over them.
     ///
-    /// Les extents GARDENT LEUR TYPE ( `size( axis )` rend un `Ct<SI,N>` quand il en est un ), donc
-    /// une étendue connue à la compilation le reste dans le domaine.
+    /// The extents KEEP THEIR TYPE ( `size( axis )` returns a `Ct<SI,N>` when it is one ), so
+    /// an extent known at compile time stays so in the domain.
     template<class A,class... B> requires ( is_axis<A> )
     HD auto domain( A, B... ) const {
         auto shape = tuple( size( A{} ), size( B{} )... );
         return CartesianIndices<DECAYED_TYPE_OF( shape ),Tuple<A,B...>>{ shape };
     }
 
-    /// LE MÊME, DEPUIS UN ENSEMBLE : `image.domain( image.axes - num_channel )`.
+    /// THE SAME, FROM A SET: `image.domain( image.axes - num_channel )`.
     ///
-    /// C'est la forme qu'un corps écrit quand il ne connaît PAS sa dimension : il ne nomme que
-    /// l'axe à retirer, et les autres -- deux en 2D, trois en 3D -- suivent sans être épelés.
+    /// This is the form a body writes when it does NOT know its dimension: it only names the
+    /// axis to remove, and the others -- two in 2D, three in 3D -- follow without being spelled out.
     template<class... A>
     HD auto domain( AxisSet<A...> ) const {
         return domain( A{}... );
     }
 
-    /// NOS AXES, comme un ensemble ( voir `Coords.h` ) : de quoi soustraire et itérer, sans
-    /// extents. Purement des types, donc gratuit -- et le même nom que `coords.axes`.
+    /// OUR AXES, as a set ( see `Coords.h` ): something to subtract from and iterate over, without
+    /// extents. Purely types, hence free -- and the same name as `coords.axes`.
     static constexpr typename detail::AxesOfTuple<_AxisNames>::type axes = {};
 
-    /// notre taille le long d'un axe NOMME ( `args.suivant.size( y )` ).
+    /// our size along a NAMED axis ( `args.next.size( y )` ).
     HD auto          size                   ( auto axis ) const;
 
-       auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< avec dépendances (after(...)) -> QueueEvent
-       auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII : synchrone par défaut, async si géré)
-       void          fill_with              ( TF value );                                 ///< boucle simple côté hôte (gardée par directly_accessible)
-       auto          _fill_with             ( TF value, auto &&run );                     ///< impl partagée : choix item_list/kernel ; `run` = appel run_parallel (avec ou sans déps)
+       auto          fill_with              ( auto &&queue_list, auto &&deps, TF value ); ///< with dependencies (after(...)) -> QueueEvent
+       auto          fill_with              ( auto &&queue_list, TF value );              ///< -> QueueEvent (RAII: synchronous by default, async if managed)
+       void          fill_with              ( TF value );                                 ///< simple host-side loop (guarded by directly_accessible)
+       auto          _fill_with             ( TF value, auto &&run );                     ///< shared impl: item_list/kernel choice; `run` = run_parallel call (with or without deps)
 
     //
     HD auto          unsqueeze              ( auto axis ) const; ///< append a trailing dimension of size 1 (preserves strides)
-    HD auto          squeeze                ( auto axis, auto index ) const; ///< axis = position (Ct) ou nom d'axe, + valeur
-    HD auto          squeeze                ( auto axis_index ) const;       ///< axis_index = (nom = valeur)
+    HD auto          squeeze                ( auto axis, auto index ) const; ///< axis = position (Ct) or axis name, + value
+    HD auto          squeeze                ( auto axis_index ) const;       ///< axis_index = (name = value)
     HD auto          row                    ( auto index ) const;
 
-    Strides          _strides;              ///< strides en octets
+    Strides          _strides;              ///< strides in bytes
     Shape            _shape;                ///<
-    BytePtr          _data;                 ///< pointeur octet + zone mémoire, agrégés
+    BytePtr          _data;                 ///< byte pointer + memory space, aggregated
 };
 
-// Vue sur des données dont on connaît l'adresse. La zone mémoire est un paramètre de TYPE (elle
-// fait partie du type de la vue, comme de celui du Ptr) : par défaut la RAM hôte, mais le kernel
-// généré d'un `driver.call` sur GPU la construit sur `CudaGlobalMemorySpace`, puisque c'est là
-// que XLA lui remet ses buffers.
+// View on data whose address we know. The memory space is a TYPE parameter (it is
+// part of the view's type, as of the Ptr's): host RAM by default, but the kernel
+// generated by a `driver.call` on GPU builds it on `CudaGlobalMemorySpace`, since that is where
+// XLA hands it its buffers.
 template<class MemorySpace = CpuHostMemorySpace>
 HD auto tensor_view( auto *ptr, auto &&shape, auto &&axis_names, auto &&strides ) {
     using TF = DECAYED_TYPE_OF( *ptr );

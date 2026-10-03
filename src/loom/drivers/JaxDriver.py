@@ -69,16 +69,16 @@ class JaxDriver:
         #
         device.driver_version = device.driver_version_for_jax( jax.devices )
 
-        # LE DEVICE DE LOOM EST LE DEVICE, pour tout ce qui ne dit pas le contraire. Sans cette
-        # ligne, `LOOM_DEVICE=cpu` ne déplaçait que les tampons DES APPELS : un `jnp.array` fabriqué
-        # à côté restait sur le défaut de jax, qui est la carte dès qu'il y en a une -- et la
-        # première addition entre les deux échoue sur `Received incompatible devices for jitted
-        # computation ... on platform CPU and ... on platform GPU`. Le choix du device appartient à
-        # l'appelant, pas à la moitié de ses tenseurs.
+        # LOOM'S DEVICE IS THE DEVICE, for everything that does not say otherwise. Without this
+        # line, `LOOM_DEVICE=cpu` only moved the buffers OF THE CALLS: a `jnp.array` built
+        # on the side stayed on jax's default, which is the GPU as soon as there is one -- and the
+        # first addition between the two fails with `Received incompatible devices for jitted
+        # computation ... on platform CPU and ... on platform GPU`. The choice of device belongs to
+        # the caller, not to half of its tensors.
         #
-        # C'est une config GLOBALE de jax, posée par une bibliothèque : assumé, et c'est déjà ce que
-        # fait `jax_enable_x64` juste au-dessus. Un tenseur qui nomme son device explicitement n'est
-        # pas concerné ( `jax_default_device` ne vaut que pour le défaut ).
+        # This is a GLOBAL jax config, set by a library: accepted, and it is already what
+        # `jax_enable_x64` does just above. A tensor that names its device explicitly is not
+        # affected ( `jax_default_device` only applies to the default ).
         jax.config.update( "jax_default_device", device.driver_version )
 
     def driver_dtype_version( self, kind, size ):
@@ -268,13 +268,13 @@ class JaxDriver:
         return jax.lax.scan( lambda carry, x: ( body( carry, x ), None ), init, xs )[ 0 ]
 
     def random( self, shape, dtype = None, seed = None ):
-        """Un tirage uniforme. `seed = None` prend le suivant d'un COMPTEUR de process, de sorte
-        que deux tirages consécutifs diffèrent ; un `seed` explicite le court-circuite.
+        """A uniform draw. `seed = None` takes the next value of a process-wide COUNTER, so
+        that two consecutive draws differ; an explicit `seed` bypasses it.
 
-        Pourquoi le compteur ne suffit pas : il avance à chaque tirage du process, donc ce qu'un
-        test tire dépend de COMBIEN de tirages les tests d'avant ont faits. Un test peut alors
-        passer seul et échouer dans la suite (ou l'inverse) sans que rien n'ait changé chez lui --
-        et c'est arrivé, voir `check_grad`. Un appelant qui veut être reproductible passe son seed.
+        Why the counter is not enough: it advances at every draw of the process, so what a
+        test draws depends on HOW MANY draws the previous tests made. A test can then
+        pass alone and fail in the suite (or the reverse) without anything having changed in it --
+        and this has happened, see `check_grad`. A caller who wants to be reproducible passes its seed.
         """
         if seed is None:
             seed = getattr( self, "_rng_seed", 0 )
@@ -315,14 +315,14 @@ class JaxDriver:
     def prod( self, a, axis = None ):
         return jnp.prod( a, axis = axis )
 
-    # un SCAN, et non une reduction : la forme est conservee, `axis` en designe un seul et n'est
-    # jamais `None` ( voir `Tensor.cumsum` ). C'est le backend qui le fait, donc c'est sa
-    # primitive de scan -- optimisee, derivable, et qui traverse `jit` / `vmap` comme le reste.
+    # a SCAN, and not a reduction: the shape is kept, `axis` designates a single one and is
+    # never `None` ( see `Tensor.cumsum` ). The backend does it, so it is its
+    # scan primitive -- optimized, differentiable, and which goes through `jit` / `vmap` like the rest.
     def cumsum( self, a, axis ):
         return jnp.cumsum( a, axis = axis )
 
-    # bout a bout le long d'un axe. Ni une reduction ni un scan : ce qui en sort est plus GRAND
-    # que ce qui y entre, donc c'est le seul verbe dont la forme n'est pas celle de l'entree.
+    # end to end along an axis. Neither a reduction nor a scan: what comes out is BIGGER
+    # than what goes in, so it is the only verb whose shape is not that of the input.
     def concatenate( self, arrays, axis = 0 ):
         return jnp.concatenate( list( arrays ), axis = axis )
 
@@ -356,45 +356,45 @@ class JaxDriver:
 
 
     def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, **args ):
-        """Lance un ou deux `FfiCode` sur les valeurs passées en kwargs.
+        """Runs one or two `FfiCode`s on the values passed as kwargs.
 
-        C'EST `loom.ffi_call` : il n'y a pas d'autre forme d'appel. Le vocabulaire des arguments
-        -- `loom.out`, `loom.mutable`, `loom.scratch`, `loom.unbound` -- et la raison de chaque
-        choix sont dans `loom/calls.py`, qui les définit et les traduit (`lower_args`).
+        THIS IS `loom.ffi_call`: there is no other form of call. The vocabulary of the arguments
+        -- `loom.out`, `loom.mutable`, `loom.scratch`, `loom.unbound` -- and the reason for each
+        choice are in `loom/calls.py`, which defines them and translates them (`lower_args`).
 
             temperature = loom.ffi_call(
-                "diffusion_pas",             # le nom de l'appel : obligatoire, donc en premier
-                avant, arriere,              # le second est l'ADJOINT ( optionnel )
+                "diffusion_step",            # the call's name: mandatory, hence first
+                forward, backward,           # the second is the ADJOINT ( optional )
                 temperature = loom.mutable( temperature ),
                 coef = coef,
             )
 
-        Un appel prend l'ALLER, et -- si la chose doit être dérivable -- le RETOUR, tous deux
-        positionnels et dans cet ordre. Ce sont deux noyaux à part entière : le retour tourne sur
-        d'autres tampons et peut vouloir sa propre géométrie de lancement (voir `FfiCode`). C'est
-        `name` qui les identifie tous les deux -- il nomme les foncteurs (`<name>_kernel` et
-        `<name>_bwd_kernel`), préfixe la cible compilée et groupe le journal des compilations.
+        A call takes the FORWARD, and -- if the thing must be differentiable -- the BACKWARD, both
+        positional and in that order. They are two full-fledged kernels: the backward runs on
+        other buffers and may want its own launch geometry (see `FfiCode`). It is
+        `name` that identifies both -- it names the functors (`<name>_kernel` and
+        `<name>_bwd_kernel`), prefixes the compiled target and groups the compilation journal.
 
-        Les entrées et les sorties sont DISJOINTES, comme dans XLA : ce qui ressemble à une mise à
-        jour en place est un rebinding côté Python, que `loom.mutable` écrit pour nous.
+        Inputs and outputs are DISJOINT, as in XLA: what looks like an in-place
+        update is a rebinding on the Python side, which `loom.mutable` writes for us.
 
-        `nb_items = n` dit COMBIEN D'ITEMS lancer, sans qu'aucun objet n'ait à porter l'axe : le
-        corps reçoit son rang dans `flat_index` (voir `FfiCode.per_item`). Sans lui, un appel
-        lance un seul item -- ou autant que les axes de batch de ses arguments en font.
+        `nb_items = n` says HOW MANY ITEMS to launch, without any object having to carry the axis: the
+        body receives its rank in `flat_index` (see `FfiCode.per_item`). Without it, a call
+        launches a single item -- or as many as the batch axes of its arguments make.
 
-        Trois noms restent réservés ici, et ce sont des réglages de l'appel, pas des données :
-        `nb_items`, `batch_alignment` (l'alignement de la dimension de lot) et
+        Three names remain reserved here, and they are settings of the call, not data:
+        `nb_items`, `batch_alignment` (the alignment of the batch dimension) and
         `has_dynamic_capacity`.
 
-        Une capacité peut se révéler trop petite -- seul le kernel sait combien d'items il produit.
-        Il le dit (il enregistre le compte qui n'a pas tenu, voir
-        `support/containers/ErrorBuffer.h`), et on RELANCE avec la place qu'il demande : ce qu'une
-        passe ratée a écrit est jeté, les sorties étant de toute façon des tampons neufs. La
-        nouvelle capacité est `max( ce qui est demandé, deux fois ce qu'on avait )` -- une capacité
-        dépassée une fois tend à l'être encore, donc on fait de la place plutôt que de compter.
+        A capacity can turn out too small -- only the kernel knows how many items it produces.
+        It says so (it records the count that did not fit, see
+        `support/containers/ErrorBuffer.h`), and we RERUN with the room it asks for: what a
+        failed pass wrote is thrown away, the outputs being brand new buffers anyway. The
+        new capacity is `max( what is asked, twice what we had )` -- a capacity
+        exceeded once tends to be exceeded again, so we make room rather than count.
         """
         from ..calls import lower_args, returned
-        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, rendus, output_exceptions = lower_args( args )
+        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, returns, output_exceptions = lower_args( args )
 
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
@@ -424,18 +424,18 @@ class JaxDriver:
                 # caller knows whether a count is prescribed or produced.
                 if has_dynamic_capacity:
                     jax.debug.callback( _raise_on_error, ca.errors.raw )
-                return returned( rendus )
+                return returned( returns )
 
             if not overflows:
-                return returned( rendus )
+                return returned( returns )
 
-            # `SDOT_DEBUG_CAPACITY=1` : ce que le kernel a VRAIMENT demandé, tour par tour. Une
-            # capacité qui double sans fin est le symptôme d'un `wanted` qui n'arrive pas (buffer
-            # d'erreurs mal remis à zéro, lecture non synchronisée) plutôt que d'une cellule qui
-            # grandirait -- et seul ce journal fait la différence entre les deux.
+            # `SDOT_DEBUG_CAPACITY=1`: what the kernel REALLY asked for, round by round. A
+            # capacity that doubles endlessly is the symptom of a `wanted` that never arrives (error
+            # buffer badly reset, unsynchronized read) rather than of a cell that
+            # would keep growing -- and only this log tells the two apart.
             if env.flag( "DEBUG_CAPACITY" ):
                 print( f"[capacity] { code.name }: " + ", ".join(
-                    f"{ path } voulu={ wanted } capacite={ capacity }" for path, wanted, capacity in overflows ),
+                    f"{ path } wanted={ wanted } capacity={ capacity }" for path, wanted, capacity in overflows ),
                     flush = True )
 
             for path, wanted, capacity in overflows:
@@ -850,7 +850,7 @@ class JaxDriver:
 
     #         my_ffi_op.defvjp( my_ffi_op_fwd, my_ffi_op_bwd, symbolic_zeros = True )
 
-    #         # --- appel ---
+    #         # --- call ---
     #         outputs = my_ffi_op( tuple( fai.differentiable_ffi_inputs ) )
 
     #     # ret assembly

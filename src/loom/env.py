@@ -1,72 +1,72 @@
-"""Les variables d'environnement de loom, en UN endroit.
+"""loom's environment variables, in ONE place.
 
-= Le préfixe est `LOOM_`
+= The prefix is `LOOM_`
 
-Il l'était pour les quelques réglages récents (`LOOM_ZERO_OUTPUTS`, `LOOM_JOURNAL`) et il ne
-l'était pas pour tous les autres, qui portaient `SDOT_` -- le nom du paquet qui a fait naître loom.
-Un étranger installait loom et recevait sdot : un cache dans `~/.cache/sdot`, un `SDOT_BUILD_DIR`,
-des messages d'erreur qui disent « sdot: ». C'est la première friction relevée par
-`loom/examples/diffusion`, et la seule qui se règle par un renommage.
+It was so for the few recent settings (`LOOM_ZERO_OUTPUTS`, `LOOM_JOURNAL`) and it was not
+so for all the others, which carried `SDOT_` -- the name of the package that gave birth to loom.
+An outsider would install loom and receive sdot: a cache in `~/.cache/sdot`, a `SDOT_BUILD_DIR`,
+error messages that say "sdot:". It is the first friction noted by
+`loom/examples/diffusion`, and the only one that is fixed by a rename.
 
-Ce qui reste légitimement à `SDOT_` : ce que sdot lit pour lui-même (`SDOT_KTYPE`, le type du noyau
-de ses cellules ; `SDOT_CATALOGUE_DIR`, où est SON catalogue). La règle est celle de toujours ici :
-le préfixe dit à qui appartient le réglage.
+What legitimately stays at `SDOT_`: what sdot reads for itself (`SDOT_KTYPE`, the kernel type
+of its cells; `SDOT_CATALOGUE_DIR`, where ITS catalogue is). The rule is the usual one here:
+the prefix says who the setting belongs to.
 
-= L'ancien nom est encore lu, une fois, en le disant
+= The old name is still read, once, saying so
 
-Ces noms vivent dans des scripts, des conteneurs, des `Makefile` privés et des shells qu'on ne
-versionne pas : les casser d'un coup ne rendrait service à personne. `SDOT_X` est donc encore lu
-quand `LOOM_X` est absent, avec un avertissement émis UNE SEULE FOIS par variable -- assez pour
-qu'on le voie, pas assez pour polluer une suite de tests.
+These names live in scripts, containers, private `Makefile`s and shells that are not
+versioned: breaking them all at once would help nobody. `SDOT_X` is therefore still read
+when `LOOM_X` is absent, with a warning emitted ONLY ONCE per variable -- enough
+to be seen, not enough to pollute a test suite.
 
-= Et un seul endroit qui sait lire un interrupteur
+= And a single place that knows how to read a switch
 
-`flag()` porte la convention, qui était recopiée telle quelle dans six fichiers :
-absent -> le défaut ; `0`, `false`, `no`, `off` ou vide -> faux ; tout le reste -> vrai.
+`flag()` carries the convention, which used to be copied verbatim into six files:
+absent -> the default; `0`, `false`, `no`, `off` or empty -> false; anything else -> true.
 """
 import os
 import sys
 
-PREFIXE = "LOOM_"
-ANCIEN_PREFIXE = "SDOT_"
+PREFIX = "LOOM_"
+OLD_PREFIX = "SDOT_"
 
-_prevenus = set()
+_warned = set()
 
 
-def _lu( nom ):
-    """La valeur de `LOOM_<nom>`, à défaut celle de `SDOT_<nom>` (en le disant une fois), sinon
+def _read( name ):
+    """The value of `LOOM_<name>`, failing that that of `SDOT_<name>` (saying so once), otherwise
     `None`."""
-    valeur = os.environ.get( PREFIXE + nom )
-    if valeur is not None:
-        return valeur
-    valeur = os.environ.get( ANCIEN_PREFIXE + nom )
-    if valeur is not None and nom not in _prevenus:
-        _prevenus.add( nom )
-        print( f"loom : { ANCIEN_PREFIXE }{ nom } est l'ancien nom de { PREFIXE }{ nom } "
-               f"-- encore lu, à renommer", file = sys.stderr )
-    return valeur
+    value = os.environ.get( PREFIX + name )
+    if value is not None:
+        return value
+    value = os.environ.get( OLD_PREFIX + name )
+    if value is not None and name not in _warned:
+        _warned.add( name )
+        print( f"loom: { OLD_PREFIX }{ name } is the old name of { PREFIX }{ name } "
+               f"-- still read, please rename", file = sys.stderr )
+    return value
 
 
-def var( nom, defaut = None ):
-    """Le réglage `nom`, ou `defaut` s'il n'est pas posé."""
-    valeur = _lu( nom )
-    return defaut if valeur is None else valeur
+def var( name, default = None ):
+    """The setting `name`, or `default` if it is not set."""
+    value = _read( name )
+    return default if value is None else value
 
 
-def flag( nom, defaut = False ):
-    """Le réglage `nom` lu comme un interrupteur (voir la docstring du module)."""
-    valeur = _lu( nom )
-    if valeur is None:
-        return defaut
-    return valeur.strip().lower() not in ( "", "0", "false", "no", "off" )
+def flag( name, default = False ):
+    """The setting `name` read as a switch (see the module docstring)."""
+    value = _read( name )
+    if value is None:
+        return default
+    return value.strip().lower() not in ( "", "0", "false", "no", "off" )
 
 
-def est_pose( nom ) -> bool:
-    """Si le réglage est posé, sous l'un ou l'autre préfixe."""
-    return _lu( nom ) is not None
+def is_set( name ) -> bool:
+    """Whether the setting is set, under either prefix."""
+    return _read( name ) is not None
 
 
-def pose( nom, valeur ):
-    """Poser le réglage, pour nous et pour les sous-processus (ce que fait `loom-kernels` avant
-    de lancer un relevé ou une compilation de catalogue)."""
-    os.environ[ PREFIXE + nom ] = str( valeur )
+def set_var( name, value ):
+    """Set the setting, for ourselves and for subprocesses (what `loom-kernels` does before
+    launching a recording or a catalogue compilation)."""
+    os.environ[ PREFIX + name ] = str( value )

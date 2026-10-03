@@ -1,52 +1,52 @@
 #pragma once
 
-// les membres + les methodes engendrees ( `operator()`, `kernel_form`, ... ) sous forme de macros
-// que cette struct depose, ecrites dans l'arbre d'inclusion par `CallArg_Aggregate`.
+// the members + the generated methods ( `operator()`, `kernel_form`, ... ) as macros
+// that this struct drops in, written into the include tree by `CallArg_Aggregate`.
 #include <sdot/generated/aggregates/CsrTensor.h>
 #include <loom/support/common_macros.h>
 
 namespace sdot {
 
-/// UN TENSEUR RAGGED EN CSR : `offsets` dit ou chaque ligne commence dans `values`, et `values`
-/// est la liste plate de tout le contenu.
+/// A RAGGED TENSOR AS CSR: `offsets` says where each row starts in `values`, and `values`
+/// is the flat list of all the content.
 ///
-///     offsets  [ 0, 2, 2, 5 ]        quatre bornes pour trois lignes
+///     offsets  [ 0, 2, 2, 5 ]        four bounds for three rows
 ///     values   [ a, b, c, d, e ]
-///     => ligne 0 = { a, b }, ligne 1 = {}, ligne 2 = { c, d, e }
+///     => row 0 = { a, b }, row 1 = {}, row 2 = { c, d, e }
 ///
-/// CE QU'IL ECHANGE CONTRE LE REMBOURRE. Un ragged rembourre coute `lignes x plus_longue_ligne` ;
-/// un CSR coute exactement l'utile. Mesure sur `examples/splats` : le rembourre y coute de x2.38 a
-/// x5.08 la memoire du CSR. Le prix est une PASSE de plus a la construction -- compter, puis
-/// remplir, les offsets etant la somme prefixe des comptes ( `loom.cumsum( ..., exclusive = True )` )
-/// -- et une lecture HOTE du total, qui dimensionne `values`.
+/// WHAT IT TRADES AGAINST PADDING. A padded ragged costs `rows x longest_row`;
+/// a CSR costs exactly what is useful. Measured on `examples/splats`: the padded form costs from x2.38 to
+/// x5.08 the memory of the CSR. The price is one more PASS at construction -- count, then
+/// fill, the offsets being the prefix sum of the counts ( `loom.cumsum( ..., exclusive = True )` )
+/// -- and a HOST read of the total, which sizes `values`.
 ///
-/// `offsets` porte `nb_rows + 1` bornes et non `nb_rows` comptes : la taille d'une ligne est alors
-/// une SOUSTRACTION de deux voisins, sans tableau de plus, et la derniere borne est le total.
+/// `offsets` carries `nb_rows + 1` bounds and not `nb_rows` counts: the size of a row is then
+/// a SUBTRACTION of two neighbors, with no extra array, and the last bound is the total.
 SDOT_TEMPLATE_DECL_FOR_CsrTensor
 struct CsrTensor {
     SDOT_ATTRIBUTES_OF_CsrTensor
 
     using TF = DECAYED_TYPE_OF( values )::TF;
 
-    /// ou la ligne `row` commence dans `values`
+    /// where row `row` starts in `values`
     HD SI row_begin( SI row ) const { return SI( offsets( num_bound = row ) ); }
 
-    /// combien d'elements la ligne `row` porte
+    /// how many elements row `row` carries
     HD SI row_size( SI row ) const { return SI( offsets( num_bound = row + 1 ) ) - row_begin( row ); }
 
-    /// combien de lignes -- la derniere borne n'en est pas une
+    /// how many rows -- the last bound is not one
     HD SI nb_rows_of() const { return offsets.size( num_bound ) - 1; }
 
-    /// `a( i, j )` : LE `i` VA CHERCHER DANS LES OFFSETS, le `j` indexe dans la ligne. C'est la
-    /// seule chose qu'un usager ait a savoir du CSR, et elle se lit comme un tableau a deux
-    /// indices.
+    /// `a( i, j )`: THE `i` IS LOOKED UP IN THE OFFSETS, the `j` indexes within the row. This is the
+    /// only thing a user needs to know about the CSR, and it reads like a two-index
+    /// array.
     ///
-    /// Non template et exactement deux `SI` : l'`operator()` variadique engendre ( celui qui
-    /// indexe TOUT l'agregat, `csr( batch_index )` ) est un modele, donc cette surcharge-ci gagne
-    /// pour deux entiers et lui laisse le reste.
+    /// Non-template and exactly two `SI`: the generated variadic `operator()` ( the one that
+    /// indexes the WHOLE aggregate, `csr( batch_index )` ) is a template, so this overload wins
+    /// for two integers and leaves it the rest.
     HD decltype( auto ) operator()( SI row, SI slot ) const { return values( num_slot = row_begin( row ) + slot ); }
 
-    /// le meme, sous un nom, pour un appelant qui prefere le dire
+    /// the same, under a name, for a caller who prefers to spell it out
     HD decltype( auto ) at( SI row, SI slot ) const { return operator()( row, slot ); }
 };
 

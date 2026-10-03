@@ -5,46 +5,46 @@
 
 namespace sdot {
 
-/// CE QUE LE NOYAU PEUT SAVOIR DE LA MACHINE, sous une forme qui ne parle d'aucune machine.
+/// WHAT THE KERNEL CAN KNOW ABOUT THE MACHINE, in a form that mentions no particular machine.
 ///
-/// C'est ce qui manquait pour ecrire un noyau portable : la geometrie de lancement etait soit codee
-/// en dur ( `const int block = 128` dans `CudaQueue.h` ), soit devinee en Python, soit recopiee de
-/// tutoriel en tutoriel. Un noyau qui veut choisir sa taille de groupe ou son budget de memoire
-/// partagee doit pouvoir la DEMANDER.
+/// This is what was missing to write a portable kernel: the launch geometry was either hard-coded
+/// ( `const int block = 128` in `CudaQueue.h` ), or guessed in Python, or copied from
+/// tutorial to tutorial. A kernel that wants to choose its group size or its shared memory
+/// budget must be able to ASK for it.
 ///
-/// Les quatre champs sont volontairement peu nombreux, et chacun a un sens sur CPU comme sur GPU :
-/// un noyau ecrit une fois lit les memes noms partout. Ce sont des CONSEILS et des budgets, pas des
-/// lois -- `run_parallel` n'en lit aucun tout seul, c'est le noyau qui decide.
+/// The four fields are deliberately few, and each has a meaning on CPU as on GPU:
+/// a kernel written once reads the same names everywhere. They are HINTS and budgets, not
+/// laws -- `run_parallel` reads none of them by itself, it is the kernel that decides.
 ///
-/// Obtenu par `queue.machine()`. Les interrogations du driver sont faites UNE fois et gardees.
+/// Obtained through `queue.machine()`. The driver queries are made ONCE and kept.
 struct Machine {
-    /// combien de work-items peuvent progresser en meme temps.
-    /// CPU : la taille du pool de fils. CUDA : SMs x fils par SM.
-    /// A quoi ca sert : dimensionner un scratch PAR FIL sur les travailleurs concurrents et non sur
-    /// les items, donc un gros batch ne fait pas exploser la memoire.
+    /// how many work-items can progress at the same time.
+    /// CPU: the size of the thread pool. CUDA: SMs x threads per SM.
+    /// What it is for: sizing a PER-THREAD scratch on the concurrent workers and not on
+    /// the items, so a big batch does not blow up memory.
     SI  nb_workers;
 
-    /// combien de voies avancent en verrou ( un warp ).
-    /// CPU : 1, il n'y a pas de voies. CUDA : `warpSize`, 32 en pratique.
-    /// A quoi ca sert : un algorithme coopératif ( scan, histogramme ) se decoupe dessus.
+    /// how many lanes advance in lockstep ( a warp ).
+    /// CPU: 1, there are no lanes. CUDA: `warpSize`, 32 in practice.
+    /// What it is for: a cooperative algorithm ( scan, histogram ) splits itself on it.
     SI  sub_group_width;
 
-    /// budget de memoire partagee par groupe, en octets -- ce que `local_mem_elems` doit respecter.
-    /// CUDA : le maximum par bloc, lu sur le driver. CPU : une valeur NOTIONNELLE ( il n'y a pas de
-    /// memoire partagee materielle, `CpuQueue` prend un `std::vector` sur le tas ), choisie pour
-    /// qu'un noyau portable dimensionne quelque chose de sense plutot que de diviser par zero.
+    /// shared memory budget per group, in bytes -- what `local_mem_elems` must respect.
+    /// CUDA: the maximum per block, read from the driver. CPU: a NOTIONAL value ( there is no
+    /// hardware shared memory, `CpuQueue` takes a `std::vector` on the heap ), chosen so
+    /// that a portable kernel sizes something sensible rather than dividing by zero.
     SI  local_mem_bytes;
 
-    /// une taille de groupe qui marche, quand le noyau n'a pas de raison d'en preferer une autre.
-    /// CPU : 1. CUDA : la largeur de warp.
+    /// a group size that works, when the kernel has no reason to prefer another.
+    /// CPU: 1. CUDA: the warp width.
     SI  suggested_group;
 
-    /// un POD trivialement copiable : sa forme noyau est lui-meme, donc il traverse jusque dans un
-    /// kernel ( voir `make_avaiable.h` ). Utile pour un corps qui adapte son decoupage sur place.
+    /// a trivially copyable POD: its kernel form is itself, so it goes all the way into a
+    /// kernel ( see `make_avaiable.h` ). Useful for a body that adapts its splitting on the spot.
     HD Machine kernel_form( auto &&, auto ) const { return *this; }
 };
 
-/// la valeur notionnelle du budget de memoire partagee sur une machine qui n'en a pas.
+/// the notional value of the shared memory budget on a machine that has none.
 static constexpr SI cpu_notional_local_mem_bytes = 64 * 1024;
 
 } // namespace sdot

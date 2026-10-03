@@ -86,28 +86,28 @@ class Tensor( Attribute ):
 
     @staticmethod
     def as_tensor( value, *, bind = True ):
-        """LE TENSEUR QU'UNE VALEUR BRUTE DESIGNE -- ou `None` si ce n'est pas une donnee.
+        """THE TENSOR A RAW VALUE STANDS FOR -- or `None` if it is not data.
 
-        C'est la conversion que l'usager n'a plus a ecrire : un tableau du framework, un tableau
-        numpy, une liste, un scalaire python entrent tels quels dans `loom.ffi_call`, et
-        `loom.RealTensor.like( u )` prend `u` sous sa forme brute.
+        This is the conversion the user no longer has to write: a framework array, a numpy
+        array, a list, a python scalar go as-is into `loom.ffi_call`, and
+        `loom.RealTensor.like( u )` takes `u` in its raw form.
 
-        DEUX DECISIONS, et elles ne se prennent pas au meme endroit :
+        TWO DECISIONS, and they are not taken in the same place:
 
-          * le KIND ( reel / entier / booleen ) est un FAIT sur la valeur -- on le lit
-            (`_natural_dtype`), et il choisit la classe ;
-          * la TAILLE est une POLITIQUE ( `driver.ftype`, `driver.itype` ) -- on ne la lit PAS,
-            sinon un `numpy.float64` epinglerait la fp64 sur un driver regle en fp32. C'est
-            exactement ce que `RealTensor( u )` faisait deja : `cls( value )` ne declare aucune
-            taille, donc le driver tranche, et `set` convertit.
+          * the KIND ( real / integer / boolean ) is a FACT about the value -- it is read
+            (`_natural_dtype`), and it picks the class;
+          * the SIZE is a POLICY ( `driver.ftype`, `driver.itype` ) -- it is NOT read,
+            otherwise a `numpy.float64` would pin fp64 on a driver set to fp32. This is
+            exactly what `RealTensor( u )` already did: `cls( value )` declares no
+            size, so the driver decides, and `set` converts.
 
-        Les axes sont DEDUITS de la forme, donc anonymes et sans identite ( voir `__init__` ) :
-        on nous a donne un tableau, pas un sens. C'est sans consequence pour le noyau, ou un axe
-        anonyme est nomme par sa POSITION ( `a0`, `a1` -- voir `cpp_dim_names` ) : deux valeurs
-        brutes de meme rang tombent sur les memes axes C++, donc sur la meme grille.
+        The axes are DEDUCED from the shape, hence anonymous and without identity ( see `__init__` ):
+        we were handed an array, not a meaning. This is harmless for the kernel, where an anonymous
+        axis is named by its POSITION ( `a0`, `a1` -- see `cpp_dim_names` ): two raw values
+        of the same rank land on the same C++ axes, hence on the same grid.
 
-        `bind = False` n'en garde que la DECLARATION ( axes, dtype, device ) : c'est ce dont
-        `like` a besoin, et lire une forme ne doit pas couter un transfert de la valeur.
+        `bind = False` keeps only the DECLARATION ( axes, dtype, device ): that is what
+        `like` needs, and reading a shape must not cost a transfer of the value.
         """
         if isinstance( value, Tensor ):
             return value
@@ -118,8 +118,8 @@ class Tensor( Attribute ):
         if bind:
             return cls( value )
         res = cls( axes = _dense_shape_of( value ) )
-        for axe in res.axes:
-            axe.inferred = True    # meme provenance qu'un axe deduit : une forme lue, rien de plus
+        for axis in res.axes:
+            axis.inferred = True    # same provenance as a deduced axis: a shape that was read, nothing more
         return res
 
     @classmethod
@@ -141,37 +141,37 @@ class Tensor( Attribute ):
         self.device = Device.factory( template_kwargs.get( "device", None ) )
         self.dtype = _declared_dtype( type( self ), template_kwargs )
 
-        # D'OU VIENNENT LES AXES, dans l'ordre :
+        # WHERE THE AXES COME FROM, in order:
         #
-        #   `RealTensor[ num_vertex, dim ]( ... )`  les crochets -- la forme des DECLARATIONS, dans
-        #                                           un agrégat ( `RealTensor[ "num_vertex", "dim" ]` )
-        #   `RealTensor( axes = t.axes )`           nommés, hors déclaration, où les crochets se
-        #                                           lisent mal
-        #   `RealTensor( u )`                       AUCUN des deux : on les déduit de la forme de la
-        #                                           valeur, en axes anonymes ( ils reçoivent des noms
-        #                                           distincts à l'abaissement, `a0` / `a1` )
+        #   `RealTensor[ num_vertex, dim ]( ... )`  the brackets -- the form of DECLARATIONS, inside
+        #                                           an aggregate ( `RealTensor[ "num_vertex", "dim" ]` )
+        #   `RealTensor( axes = t.axes )`           named, outside a declaration, where the brackets
+        #                                           read poorly
+        #   `RealTensor( u )`                       NEITHER of the two: they are deduced from the shape
+        #                                           of the value, as anonymous axes ( they get
+        #                                           distinct names at lowering, `a0` / `a1` )
         #
-        # Le dernier cas est ce qui permet d'écrire un exemple sans prononcer le mot « axe ». Il ne
-        # change rien au rang 0 ( `RealTensor( 17 )` n'a toujours aucun axe ), et il ne touche pas
-        # `wrap()`, qui reste SANS axes -- c'est son contrat pour un résultat qui n'en a pas
+        # The last case is what lets an example be written without ever saying the word "axis". It
+        # changes nothing at rank 0 ( `RealTensor( 17 )` still has no axis ), and it does not touch
+        # `wrap()`, which stays WITHOUT axes -- that is its contract for a result that has none
         # (`matmul`).
         declared = template_args if template_args else ( axes if axes is not None else () )
-        deduits = not declared and value is not None
-        if deduits:
+        deduced = not declared and value is not None
+        if deduced:
             declared = _dense_shape_of( value )
         self.axes = self._read_axes( declared, scope )
 
-        # UN AXE DEDUIT NE REVENDIQUE AUCUNE IDENTITE. On ne nous a pas dit ce que ces dimensions
-        # SIGNIFIENT ; on a juste lu une forme. Le marquer est necessaire : `_binary` aligne les
-        # opérandes par IDENTITE D'AXE, donc sans ça `IntTensor( [1,2,3] ) + IntTensor( [10,20,30] )`
-        # verrait deux axes distincts et rendrait un 3x3 au lieu d'un élémentaire -- un résultat
-        # FAUX, en silence. Marqués, ils retombent sur le broadcast POSITIONNEL, qui est ce que la
-        # docstring de `_binary` promet depuis toujours pour un `Tensor( array )` nu.
+        # A DEDUCED AXIS CLAIMS NO IDENTITY. We were not told what these dimensions
+        # MEAN; we just read a shape. Marking it is necessary: `_binary` aligns the
+        # operands by AXIS IDENTITY, so without it `IntTensor( [1,2,3] ) + IntTensor( [10,20,30] )`
+        # would see two distinct axes and return a 3x3 instead of an elementwise result -- a
+        # WRONG result, silently. Marked, they fall back on POSITIONAL broadcast, which is what the
+        # docstring of `_binary` has always promised for a bare `Tensor( array )`.
         #
-        # Le chemin NOYAU, lui, s'en sert normalement : `ffi_call` a besoin d'un axe par dimension,
-        # et `Tensor.like` repartage LES MEMES objets, donc deux tenseurs restent sur la meme grille.
-        for axe in self.axes:
-            axe.inferred = deduits
+        # The KERNEL path, for its part, uses it normally: `ffi_call` needs one axis per dimension,
+        # and `Tensor.like` re-shares THE SAME objects, so two tensors stay on the same grid.
+        for axis in self.axes:
+            axis.inferred = deduced
 
         # HOW our value is held (see `storage.py`): one object per way a value can be backed --
         # nothing, a real buffer (possibly with an explicit physical layout), a symbolic zero, a
@@ -193,8 +193,8 @@ class Tensor( Attribute ):
         goes INTO it then decides its kind: a real cotangent buffer (`set_raw`) makes it a
         `TensorView`, a symbolic-zero cotangent a `ZeroTensor`, nothing at all a `NoneTensor`.
 
-        `other` peut etre une valeur BRUTE ( `loom.RealTensor.like( u )`, `u` etant le tableau du
-        framework ) : on n'en lit que la forme et le kind, jamais la donnee."""
+        `other` may be a RAW value ( `loom.RealTensor.like( u )`, `u` being the framework
+        array ): only its shape and kind are read, never the data."""
         other = Tensor.as_tensor( other, bind = False )
         if other is None:
             raise TypeError( "Tensor.like: expected a tensor or a value with a shape" )
@@ -236,33 +236,33 @@ class Tensor( Attribute ):
         res.storage = Fill( driver.array( scalar, dtype = res.dtype, device = res.device ), reference_shape )
         return res
 
-    # ---- les fabriques : un tenseur bâti DEPUIS SES AXES, sans forme à répéter ------------------
-    # `RealTensor[ x, y ].zeros()`, `IntTensor[ cellule ].iota()`, ... Elles sont atteintes par
-    # `Parametrized.__getattr__`, qui leur passe les `template_args` de la déclaration -- donc la
-    # forme vient des axes, comme pour n'importe quel tenseur bâti sur eux.
+    # ---- the factories: a tensor built FROM ITS AXES, with no shape to repeat ----------------------
+    # `RealTensor[ x, y ].zeros()`, `IntTensor[ cell ].iota()`, ... They are reached through
+    # `Parametrized.__getattr__`, which passes them the declaration's `template_args` -- so the
+    # shape comes from the axes, as for any tensor built on them.
     #
-    # C'est ICI qu'on construit une valeur, et pas via `driver.array( ..., dtype = driver.itype )` :
-    # la CLASSE est la déclaration de type, donc le dtype n'est jamais deviné depuis un littéral
-    # Python (`driver.array( [ 0, 1, 2 ] )` rend des flottants -- voir `loom/examples/diffusion`).
-    # `driver` est la couche basse ; ce qu'on met en avant, ce sont ces classes.
+    # This is WHERE a value is built, and not via `driver.array( ..., dtype = driver.itype )`:
+    # the CLASS is the type declaration, so the dtype is never guessed from a Python literal
+    # (`driver.array( [ 0, 1, 2 ] )` returns floats -- see `loom/examples/diffusion`).
+    # `driver` is the low layer; what we put forward are these classes.
 
     @classmethod
     def _built_on( cls, template_args, template_kwargs, scope ):
-        """Le tenseur vide et sa forme -- le préambule commun à toutes les fabriques."""
+        """The empty tensor and its shape -- the preamble common to all the factories."""
         res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
         return res, res.shape
 
     def _adopt( self, raw ):
-        """Prendre `raw` comme valeur, à la forme dense qu'on vient de lui donner."""
+        """Take `raw` as the value, with the dense shape we just gave it."""
         self.storage = Storage.of( self._as_declared( raw ),
                                    ReferenceShape.from_dense_shape( list( raw.shape ) ) )
         return self
 
     def _axis_position( self, axis ):
-        """La position de `axis` parmi nos axes -- un objet `Axis` déclaré, ou déjà une position.
+        """The position of `axis` among our axes -- a declared `Axis` object, or already a position.
 
-        `None` n'est légitime que pour un tenseur de rang 1 : ailleurs, « le long de quel axe ? »
-        n'a pas de réponse par défaut, et la deviner produirait silencieusement un autre tenseur.
+        `None` is only legitimate for a rank 1 tensor: elsewhere, "along which axis?"
+        has no default answer, and guessing it would silently produce another tensor.
         """
         if axis is None:
             if self.rank != 1:
@@ -288,14 +288,14 @@ class Tensor( Attribute ):
 
     @classmethod
     def iota( cls, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
-        """Les indices : `0, 1, 2, ...`.
+        """The indices: `0, 1, 2, ...`.
 
-        Sans axe, c'est le RANG PLAT (ordre C) -- « qui suis-je ? » pour un work-item, ce que tout
-        noyau batché finit par demander, et ce que chacun bricolait jusqu'ici avec un `np.arange`
-        hôte (donc un aller-retour vers l'hôte, ce qu'on s'interdit sur GPU).
+        Without an axis, this is the FLAT RANK (C order) -- "who am I?" for a work-item, which every
+        batched kernel ends up asking, and which everyone used to hack together with a host
+        `np.arange` (hence a round trip to the host, which is forbidden on GPU).
 
-        Avec un axe, c'est la COORDONNÉE le long de cet axe, diffusée sur les autres --
-        `IntTensor[ y, x ].iota( x )` est la grille des abscisses.
+        With an axis, it is the COORDINATE along that axis, broadcast over the others --
+        `IntTensor[ y, x ].iota( x )` is the grid of abscissas.
         """
         res, shape = cls._built_on( template_args, template_kwargs, scope )
         if axis is None and res.rank > 1:
@@ -308,8 +308,8 @@ class Tensor( Attribute ):
 
     @classmethod
     def linspace( cls, start, stop, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
-        """`start` à `stop` inclus, régulièrement espacés le long de `axis` (le seul axe, par
-        défaut) et diffusés sur les autres : `RealTensor[ y, x ].linspace( 0, 1, x )`."""
+        """`start` to `stop` inclusive, evenly spaced along `axis` (the only axis, by
+        default) and broadcast over the others: `RealTensor[ y, x ].linspace( 0, 1, x )`."""
         res, shape = cls._built_on( template_args, template_kwargs, scope )
         pos = res._axis_position( axis )
         return res._adopt( res._spread( driver.linspace( start, stop, shape[ pos ], dtype = res.dtype ),
@@ -317,57 +317,57 @@ class Tensor( Attribute ):
 
     @classmethod
     def expr( cls, body, *, template_args = (), template_kwargs = {}, scope = None, **params ) -> "Tensor":
-        """Rempli par une EXPRESSION C++ DES COORDONNEES, compilee et executee SUR LE DEVICE.
+        """Filled by a C++ EXPRESSION OF THE COORDINATES, compiled and run ON THE DEVICE.
 
             u = RealTensor[ n, n ].expr( "exp( - ( sq( i_axis_0 - c ) + sq( i_axis_1 - c ) ) / 8 )",
                                          c = ( n - 1 ) / 2 )
 
-        `zeros`, `ones`, `iota`, `linspace`, `random` sont les cas particuliers qu'on rencontre
-        assez souvent pour les nommer ; ceci est le cas GENERAL. Ce qu'il remplace est un
-        remplissage ecrit en boucles Python -- donc du temps Python, et un transfert vers le
-        device pour une donnee que le device pouvait fabriquer lui-meme.
+        `zeros`, `ones`, `iota`, `linspace`, `random` are the special cases met often
+        enough to be named; this is the GENERAL case. What it replaces is a fill
+        written as Python loops -- hence Python time, and a transfer to the
+        device for data the device could build itself.
 
-        CE QUE L'EXPRESSION A SOUS LA MAIN, et la convention tient en une ligne : en C++ un nom
-        d'axe nomme L'AXE, pas l'indice, donc ce qui s'en derive le nomme aussi.
+        WHAT THE EXPRESSION HAS AT HAND, and the convention fits in one line: in C++ an axis
+        name names THE AXIS, not the index, so whatever is derived from it names it too.
 
-            i_<axe>    l'indice le long de cet axe        ( `i_y`, `i_axis_0` )
-            n_<axe>    son etendue                        ( `n_y`, `n_axis_0` )
-            <nom>      chaque parametre passe en kwarg    ( scalaire si rang 0, sinon la vue )
-            TF, SI     le reel et l'entier de l'appel
+            i_<axis>   the index along that axis          ( `i_y`, `i_axis_0` )
+            n_<axis>   its extent                         ( `n_y`, `n_axis_0` )
+            <name>     each parameter passed as a kwarg   ( scalar if rank 0, otherwise the view )
+            TF, SI     the call's real and integer types
 
-        Un axe anonyme s'appelle `axis_0`, `axis_1`, ... ( voir `cpp_dim_names` ) : on remplit
-        donc une grille sans avoir a declarer, ni meme a nommer, le moindre axe.
+        An anonymous axis is called `axis_0`, `axis_1`, ... ( see `cpp_dim_names` ): so one fills
+        a grid without having to declare, or even name, a single axis.
 
-        Les coordonnees sont prises PAR NOM ( `coords[ axe ]` ) et non par position, donc un axe
-        de batch ajoute devant ne decale rien.
+        The coordinates are taken BY NAME ( `coords[ axis ]` ) and not by position, so a batch
+        axis added in front shifts nothing.
         """
         from ..compilation.FfiCode import FfiCode
         from ..calls import ffi_call, out
 
         res = cls( template_args = template_args, template_kwargs = template_kwargs, scope = scope )
 
-        # les locales : un indice et une etendue par axe, puis un parametre par kwarg. Un rang 0
-        # descend en SCALAIRE ( c'est ce qu'on veut ecrire dans une expression ) ; au-dela, la vue
-        # elle-meme, que l'expression indexera comme elle l'entend.
-        locales = []
-        for index, axe in enumerate( res.axes ):
-            for nom in axe.cpp_dim_names( index ):
-                locales.append( f"const SI i_{ nom } = coords[ { nom } ];" )
-                locales.append( f"const SI n_{ nom } = args.outputs.res.size( { nom } );" )
-        for nom, valeur in params.items():
-            t = Tensor.as_tensor( valeur, bind = False )
+        # the locals: one index and one extent per axis, then one parameter per kwarg. A rank 0
+        # is lowered as a SCALAR ( which is what one wants to write in an expression ); beyond that,
+        # the view itself, which the expression will index as it sees fit.
+        local_decls = []
+        for index, axis in enumerate( res.axes ):
+            for name in axis.cpp_dim_names( index ):
+                local_decls.append( f"const SI i_{ name } = coords[ { name } ];" )
+                local_decls.append( f"const SI n_{ name } = args.outputs.res.size( { name } );" )
+        for name, val in params.items():
+            t = Tensor.as_tensor( val, bind = False )
             if t is None:
-                raise TypeError( f"Tensor.expr: le parametre '{ nom }' n'est pas une donnee" )
+                raise TypeError( f"Tensor.expr: parameter '{ name }' is not data" )
             if t.rank == 0:
-                scalaire = "TF" if t.dtype.floating_point else ( "bool" if t.dtype.boolean else "SI" )
-                locales.append( f"const { scalaire } { nom } = args.inputs.{ nom };" )
+                scalar_type = "TF" if t.dtype.floating_point else ( "bool" if t.dtype.boolean else "SI" )
+                local_decls.append( f"const { scalar_type } { name } = args.inputs.{ name };" )
             else:
-                locales.append( f"const auto &{ nom } = args.inputs.{ nom };" )
+                local_decls.append( f"const auto &{ name } = args.inputs.{ name };" )
 
         code = ( "namespace {\n"
                  "    struct LoomExpr {\n"
                  "        HD void operator()( auto coords, auto &&args, auto batch_axes ) const {\n"
-                 + "".join( f"            { l }\n" for l in locales ) +
+                 + "".join( f"            { l }\n" for l in local_decls ) +
                  f"            args.outputs.res( coords ) = ( { body } );\n"
                  "        }\n"
                  "    };\n\n"
@@ -381,8 +381,8 @@ class Tensor( Attribute ):
 
     @classmethod
     def random( cls, seed = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
-        """Un tirage uniforme sur `[ 0, 1 [`. `seed = None` prend le suivant d'un compteur de
-        process -- passer un seed est ce qui rend un test reproductible (voir `driver.random`)."""
+        """A uniform draw on `[ 0, 1 [`. `seed = None` takes the next one of a process-wide
+        counter -- passing a seed is what makes a test reproducible (see `driver.random`)."""
         res, shape = cls._built_on( template_args, template_kwargs, scope )
         if not res.dtype.floating_point:
             raise TypeError( f"{ type( res ).__name__ }.random: a uniform draw is a REAL value -- "
@@ -390,7 +390,7 @@ class Tensor( Attribute ):
         return res._adopt( driver.random( shape, dtype = res.dtype, seed = seed ) )
 
     def _spread( self, vector, pos, shape ):
-        """`vector` (1D, le long de l'axe `pos`) diffusé sur toute `shape`."""
+        """`vector` (1D, along axis `pos`) broadcast over the whole `shape`."""
         if len( shape ) == 1:
             return vector
         view = driver.reshape( vector, [ extent if d == pos else 1 for d, extent in enumerate( shape ) ] )
@@ -443,16 +443,16 @@ class Tensor( Attribute ):
     def is_defined( self ) -> bool:
         return self.storage.holds_value
 
-    # Combien d'octets separer entre deux items du LOT dans le tampon physique -- `0`, donc rien,
-    # tant qu'un tenseur ne le demande pas. Le demander vaut pour un tenseur que plusieurs
-    # work-items ecrivent EN MEME TEMPS : sans separation, deux items voisins partagent une ligne
-    # de cache et leurs ecritures s'invalident d'un coeur a l'autre (faux partage). Le mettre a la
-    # taille d'une ligne (64) donne a chaque item la sienne.
+    # How many bytes to put between two items of the BATCH in the physical buffer -- `0`, so nothing,
+    # as long as a tensor does not ask for it. Asking for it is worth it for a tensor that several
+    # work-items write AT THE SAME TIME: without spacing, two neighbouring items share a cache line
+    # and their writes invalidate each other from one core to the other (false sharing). Setting it
+    # to the size of a line (64) gives each item its own.
     #
-    # Un reglage PAR TENSEUR et non une politique d'appareil, parce que ca se paie en memoire et
-    # que ca ne rapporte que sur les rares tenseurs concernes : mesure sur le PowerDiagram de
-    # `sdot`, ca vaut -21 % de `xsnp_hitm` et -1.4 % de temps a huit threads. Voir
-    # `PhysicalLayout.of`, qui borne en plus la depense.
+    # A per-TENSOR setting and not a device policy, because it costs memory and
+    # only pays off on the few tensors concerned: measured on the PowerDiagram of
+    # `sdot`, it is worth -21 % of `xsnp_hitm` and -1.4 % of time at eight threads. See
+    # `PhysicalLayout.of`, which additionally caps the expense.
     item_alignment_bytes = 0
 
     def set( self, value ):
@@ -630,39 +630,38 @@ class Tensor( Attribute ):
 
     @property
     def value( self ):
-        """LA VALEUR : la région LOGIQUE, rembourrage de capacité retiré -- un tableau du backend.
+        """THE VALUE: the LOGICAL region, capacity padding removed -- a backend array.
 
-        `raw` est le TAMPON, dimensionné à la CAPACITÉ ( rembourrage compris ), parce que c'est ce
-        dans quoi un noyau écrit : l'alignement de batch vaut 128 octets sur CUDA, donc un lot de 3
-        occupe seize fentes en fp64. `value` le recadre sur la `shape` logique, et c'est ce qu'on
-        veut lire ( `c.vertex_positions.value`, et non `c.vertex_positions.raw[ :n ]` ).
+        `raw` is the BUFFER, sized to the CAPACITY ( padding included ), because that is what
+        a kernel writes into: the batch alignment is 128 bytes on CUDA, so a batch of 3
+        occupies sixteen slots in fp64. `value` crops it to the logical `shape`, and that is what
+        one wants to read ( `c.vertex_positions.value`, and not `c.vertex_positions.raw[ :n ]` ).
 
-        `value` ET PAS `tensor` : « le tenseur d'un tenseur » ne disait rien, et ne distinguait pas
-        les deux. Ce que la paire oppose est le TAMPON et la VALEUR -- et `value` est déjà le mot de
-        la maison, `c.nb_dims.value` pour un `ShapeVar`, `ecran.largeur.value` dans sdot. ( Pas
-        `driver_tensor` : `raw` est un tableau du driver tout autant, donc ce nom-là ne porterait
-        pas la distinction qui compte. )
+        `value` AND NOT `tensor`: "the tensor of a tensor" said nothing, and did not tell
+        the two apart. What the pair contrasts is the BUFFER and the VALUE -- and `value` is already the
+        house word, `c.nb_dims.value` for a `ShapeVar`, `screen.width.value` in sdot. ( Not
+        `driver_tensor`: `raw` is a driver array just as much, so that name would not carry
+        the distinction that matters. )
 
-        Sensé pour un tenseur DENSE : un ragged n'a pas de boîte unique à extraire, donc ceci rend
-        sa boîte englobante ( rembourrage intérieur gardé ). Demande une `shape` statiquement
-        connue, donc vaut à l'exécution seulement -- un compte écrit par un noyau est une valeur
-        device sous une trace, où Python ne peut pas trancher dessus ( `shape` y lève ). Un zéro
-        symbolique n'a pas de tampon à regarder -> `None`.
+        Meaningful for a DENSE tensor: a ragged one has no single box to extract, so this returns
+        its bounding box ( inner padding kept ). It requires a statically known `shape`, so it holds
+        at run time only -- a count written by a kernel is a device value under a trace, where Python
+        cannot decide on it ( `shape` raises there ). A symbolic zero has no buffer to look at -> `None`.
 
-        La façon dont le recadrage se fait dépend de COMMENT la valeur est portée ( une tranche,
-        une collecte à travers une disposition non contiguë, ... ), donc c'est le stockage qui
-        répond -- cette propriété n'est que le nom que tout le reste lit.
+        How the cropping is done depends on HOW the value is carried ( a slice,
+        a gather through a non-contiguous layout, ... ), so it is the storage that
+        answers -- this property is only the name everything else reads.
 
-        ELLE MASQUE `Attribute.value`, et c'est voulu : là-haut, `value` rend `self.get()`, ce qui
-        pour un tenseur était LUI-MÊME -- une identité sans usage. Ici elle rend ce qu'un `ShapeVar`
-        rend déjà : le contenu logique. L'ÉCRITURE, elle, reste celle d'`Attribute` ( `set` ), et il
-        faut la redéclarer : redéfinir le getter seul aurait supprimé le setter hérité, en
-        silence."""
+        IT HIDES `Attribute.value`, and that is intended: up there, `value` returns `self.get()`, which
+        for a tensor was ITSELF -- an identity with no use. Here it returns what a `ShapeVar`
+        already returns: the logical content. WRITING, for its part, stays `Attribute`'s ( `set` ), and
+        it must be redeclared: redefining the getter alone would have silently removed the inherited
+        setter."""
         return self.storage.view( self )
 
     @value.setter
     def value( self, v ):
-        """`t.value = x` EST `t.set( x )` -- ce que faisait déjà `Attribute.value`."""
+        """`t.value = x` IS `t.set( x )` -- what `Attribute.value` already did."""
         self.set( v )
 
     # ------------------------------------------------------------------ derived tensors
@@ -817,7 +816,7 @@ class Tensor( Attribute ):
         axes = self._dim_axes()
         if len( axes ) != self.rank:
             return None
-        # des axes DEDUITS d'une forme ne disent rien : on aligne positionnellement ( voir `__init__` )
+        # axes DEDUCED from a shape say nothing: align positionally ( see `__init__` )
         if any( getattr( a, "inferred", False ) for a in axes ):
             return None
         for i, a in enumerate( axes ):
@@ -855,7 +854,14 @@ class Tensor( Attribute ):
                         continue
                     _refuse_mismatched_window( ax, order )
                     order.append( ax )
-        raw = op( *[ _aligned_to( t.value, l, order ) for t, l in zip( operands, layouts ) ] )
+        try:
+            raw = op( *[ _aligned_to( t.value, l, order ) for t, l in zip( operands, layouts ) ] )
+        except ( ValueError, RuntimeError ) as e:
+            # numpy says `ValueError` and torch `RuntimeError` where jax says `TypeError` for shapes
+            # that do not combine: one error type whatever the driver
+            if "broadcast" in str( e ) or "must match the size" in str( e ):
+                raise TypeError( str( e ) ) from e
+            raise
         return self._wrap_axes( raw, order )
 
     def where( self, a, b ):
@@ -993,23 +999,23 @@ class Tensor( Attribute ):
         return self._wrap_axes( op( data, axis = pos ), survivors )
 
     def cumsum( self, axis = None, *, exclusive = False ):
-        """La somme PREFIXE le long de `axis` -- un SCAN, donc la forme est conservee : ce n'est pas
-        une reduction, et `axis` ne peut pas etre `None` ( un scan a une direction ).
+        """The PREFIX sum along `axis` -- a SCAN, so the shape is kept: this is not
+        a reduction, and `axis` cannot be `None` ( a scan has a direction ).
 
-            comptes.cumsum()                      1, 3, 6, 10   ( inclusive, comme numpy )
-            comptes.cumsum( exclusive = True )    0, 1, 3, 6    ( ce qu'un CSR appelle `offsets` )
+            counts.cumsum()                       1, 3, 6, 10   ( inclusive, like numpy )
+            counts.cumsum( exclusive = True )     0, 1, 3, 6    ( what a CSR calls `offsets` )
 
-        LA FORME EXCLUSIVE EST `inclusive - soi`, et c'est pourquoi elle ne coute rien et ne
-        suppose aucun axe : decaler d'un cran demanderait de savoir LEQUEL decaler et de fabriquer
-        le zero de tete a la bonne forme, l'identite le donne gratuitement.
+        THE EXCLUSIVE FORM IS `inclusive - self`, which is why it costs nothing and assumes no
+        axis: shifting by one would require knowing WHICH axis to shift and building the leading
+        zero in the right shape, whereas the identity gives it for free.
 
-        Sur le device, par la primitive de scan du backend : derivable, et elle traverse `jit`,
-        `grad` et `vmap` comme les autres verbes. Un `numpy.cumsum` cote hote, lui, rapatrie la
-        donnee pour la renvoyer -- ce qu'on s'interdit sur GPU.
+        On the device, through the backend's scan primitive: differentiable, and it goes through
+        `jit`, `grad` and `vmap` like the other verbs. A host-side `numpy.cumsum`, for its part,
+        brings the data back only to send it again -- which is forbidden on GPU.
 
-        Un tenseur RAGGED a des trous dans sa boite englobante ; ils sont remplis de 0 avant le
-        scan ( l'identite de la somme ), comme `_reduce` le fait pour une reduction. Sans ca le
-        rembourrage entrerait dans les sommes partielles qui le SUIVENT.
+        A RAGGED tensor has holes in its bounding box; they are filled with 0 before the
+        scan ( the identity of the sum ), as `_reduce` does for a reduction. Without that the
+        padding would enter the partial sums that FOLLOW it.
         """
         pos = self._axis_position( axis )
         data = self.value
@@ -1017,7 +1023,7 @@ class Tensor( Attribute ):
         if holes is not None:
             data = driver.where( holes, 0, data )
         res = self._wrap_axes( driver.cumsum( data, axis = pos ), self._dim_axes() )
-        # les axes sont les MEMES objets, donc la soustraction s'aligne par identite, pas par forme
+        # the axes are the SAME objects, so the subtraction aligns by identity, not by shape
         return res - self if exclusive else res
 
     def sum ( self, axis = None ): return self._reduce( driver.sum,  axis, 0 )
@@ -1313,15 +1319,15 @@ def _assemble( value, caps, dtype, device ):
 
 
 def _dense_shape_of( value ):
-    """La forme d'une valeur brute, pour en deduire des axes anonymes. Rend `()` pour un scalaire,
-    donc un rang 0 reste un rang 0.
+    """The shape of a raw value, to deduce anonymous axes from it. Returns `()` for a scalar,
+    so a rank 0 stays a rank 0.
 
-    `numpy.shape` couvre les listes imbriquees, les tableaux numpy, et tout ce qui porte `.shape`
-    ( un tableau du driver, un tracer `jit`/`vmap` )."""
+    `numpy.shape` covers nested lists, numpy arrays, and anything carrying `.shape`
+    ( a driver array, a `jit`/`vmap` tracer )."""
     if isinstance( value, Tensor ):
         return tuple( value.shape )
-    forme = getattr( value, "shape", None )
-    if forme is not None:
-        return tuple( int( d ) for d in forme )
+    shape_attr = getattr( value, "shape", None )
+    if shape_attr is not None:
+        return tuple( int( d ) for d in shape_attr )
     import numpy
     return tuple( int( d ) for d in numpy.shape( value ) )

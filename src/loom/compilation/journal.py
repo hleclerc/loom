@@ -1,53 +1,53 @@
-"""COMBIEN de noyaux ce process a compilés, et POURQUOI chacun était neuf.
+"""HOW MANY kernels this process compiled, and WHY each one was new.
 
-Un corps de noyau ne donne pas un binaire : il en donne un PAR SOURCE ENGENDRÉE, et la source
-dépend de l'appel -- les extents figés dans le type, les axes de batch, et surtout, au backward,
-quels arguments sont perturbés (un `NoneTensor` plutôt qu'un tampon) et quelles cotangentes sont
-des zéros symboliques (un `ZeroTensor`). C'est voulu : le `if constexpr` du corps fait alors
-tomber des termes entiers, et un tampon qui n'existe pas n'est pas alloué.
+A kernel body does not yield one binary: it yields one PER GENERATED SOURCE, and the source
+depends on the call -- the extents frozen in the type, the batch axes, and above all, in the backward pass,
+which arguments are perturbed (a `NoneTensor` rather than a buffer) and which cotangents are
+symbolic zeros (a `ZeroTensor`). This is intended: the body's `if constexpr` then drops
+whole terms, and a buffer that does not exist is not allocated.
 
-Mais ça se paie, en secondes de compilation, et RIEN NE LE DISAIT. Le seul moyen de s'apercevoir
-qu'un test de deux dérivées avait fabriqué dix noyaux était de compter des lignes de `ninja` dans
-un log. D'où ce journal : l'instrument vient avant le bouton -- on ne règle pas une spécialisation
-qu'on ne mesure pas, et le bon réglage n'est sûrement pas le même pour de la géométrie et pour une
-boucle d'entraînement.
+But it costs seconds of compilation, and NOTHING SAID SO. The only way to notice
+that a two-derivative test had produced ten kernels was to count `ninja` lines in
+a log. Hence this journal: the instrument comes before the knob -- you do not tune a specialization
+you do not measure, and the right setting is surely not the same for geometry and for a
+training loop.
 
-    LOOM_JOURNAL=1        imprime le rapport à la fin du process
+    LOOM_JOURNAL=1        prints the report at the end of the process
 
     from loom.compilation.journal import report, stats
-    print( report() )     à la main, quand on veut
+    print( report() )     by hand, whenever you want
 
-Le rapport groupe par NOM de code, et pour un nom qui a plusieurs variantes, il dit ce qui change
-d'une variante à la première -- pas « 10 noyaux », mais « `grad_for_cell.data` : none -> out ».
+The report groups by code NAME, and for a name that has several variants, it says what changes
+from one variant to the first -- not "10 kernels", but "`grad_for_cell.data`: none -> out".
 """
 import atexit
 import os
 
 
-# une entrée par noyau DISTINCT (par cible), dans l'ordre où ils sont apparus
+# one entry per DISTINCT kernel (per target), in the order they appeared
 _kernels = []
-# combien de fois une cible déjà connue a resservi -- le dénominateur qui dit si le cache marche
+# how many times an already known target was served again -- the denominator that tells whether the cache works
 _reuses = 0
 
 
 def record( target, code_name, signature, outcome, seconds = 0.0 ):
-    """Un noyau distinct de plus. `outcome` : `"compiled"`, `"catalogue"`.
+    """One more distinct kernel. `outcome`: `"compiled"`, `"catalogue"`.
 
-    `signature` est ce qui décrit l'APPEL (pas la source) : un dict lisible, dont la différence
-    avec celle d'une autre variante est la réponse à « pourquoi celle-ci est-elle neuve ? »."""
+    `signature` is what describes the CALL (not the source): a readable dict, whose difference
+    from another variant's is the answer to "why is this one new?"."""
     _kernels.append( dict( target = target, code_name = code_name or "?",
                            signature = dict( signature or {} ), outcome = outcome,
                            seconds = float( seconds ) ) )
 
 
 def record_reuse():
-    """Une cible déjà chargée, resservie telle quelle."""
+    """A target already loaded, served again as is."""
     global _reuses
     _reuses += 1
 
 
 def stats():
-    """`( noyaux distincts, compilés, pris au catalogue, réutilisations, secondes )`."""
+    """`( distinct kernels, compiled, taken from the catalogue, reuses, seconds )`."""
     return dict(
         kernels    = len( _kernels ),
         compiled   = sum( 1 for k in _kernels if k[ "outcome" ] == "compiled" ),
@@ -58,7 +58,7 @@ def stats():
 
 
 def _differences( reference, other ):
-    """Les clés où deux signatures diffèrent, en `clé : avant -> après`."""
+    """The keys where two signatures differ, as `key: before -> after`."""
     res = []
     for key in sorted( set( reference ) | set( other ) ):
         before, after = reference.get( key, "-" ), other.get( key, "-" )
@@ -68,14 +68,14 @@ def _differences( reference, other ):
 
 
 def report():
-    """Le rapport, en texte. Vide s'il n'y a rien eu à compiler."""
+    """The report, as text. Empty if there was nothing to compile."""
     if not _kernels:
-        return "loom : aucun noyau compilé."
+        return "loom: no kernel compiled."
 
     st = stats()
-    lines = [ f"loom : { st[ 'kernels' ] } noyau(x) distinct(s) "
-              f"({ st[ 'compiled' ] } compilé(s) en { st[ 'seconds' ]:.1f} s, "
-              f"{ st[ 'catalogue' ] } au catalogue), { st[ 'reuses' ] } réutilisation(s)." ]
+    lines = [ f"loom: { st[ 'kernels' ] } distinct kernel(s) "
+              f"({ st[ 'compiled' ] } compiled in { st[ 'seconds' ]:.1f} s, "
+              f"{ st[ 'catalogue' ] } from the catalogue), { st[ 'reuses' ] } reuse(s)." ]
 
     by_name = {}
     for k in _kernels:
@@ -83,16 +83,16 @@ def report():
 
     for name, variants in sorted( by_name.items(), key = lambda kv: -len( kv[ 1 ] ) ):
         total = sum( v[ "seconds" ] for v in variants )
-        lines.append( f"\n  { name } : { len( variants ) } variante(s), { total:.1f} s" )
+        lines.append( f"\n  { name } : { len( variants ) } variant(s), { total:.1f} s" )
         if len( variants ) == 1:
             continue
-        # ce qui sépare chaque variante de la PREMIÈRE : la réponse à « pourquoi neuve ? »
+        # what separates each variant from the FIRST: the answer to "why new?"
         reference = variants[ 0 ][ "signature" ]
         for index, v in enumerate( variants[ 1 : ], start = 1 ):
             diffs = _differences( reference, v[ "signature" ] )
             lines.append( f"    [{ index }] " + ( "; ".join( diffs ) if diffs
-                                                  else "rien de visible ici (une source qui diffère "
-                                                       "autrement : corps, includes, compilateur)" ) )
+                                                  else "nothing visible here (a source that differs "
+                                                       "otherwise: body, includes, compiler)" ) )
     return "\n".join( lines )
 
 

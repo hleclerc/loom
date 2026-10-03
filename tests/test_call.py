@@ -2,6 +2,7 @@ import loom
 from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, RealTensor, IntTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
+from loom.testing import need
 
 # An `@aggregate` instance is built BEFORE the call and passed as a plain kwarg. Inputs and
 # outputs are DISJOINT (as in XLA): a kernel never writes what it reads, so there is no
@@ -77,7 +78,7 @@ if test( "basic" ):
         outputs.cell.vertex_positions( batch_index, dim = 0, num_vertex = 0 ) = 1;
         outputs.cell.vertex_positions( batch_index, dim = 1, num_vertex = 0 ) = 2;
         """ ),
-        # la capacite en sommets => `vertex_positions` est alloue en 8x2
+        # the capacity in vertices => `vertex_positions` is allocated as 8x2
         cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
     )
 
@@ -212,7 +213,7 @@ if test( "two_instances" ):
 
 
     flat = Cell3( nb_dims = 2 )
-    volu = Cell3( nb_dims = 3 )
+    volume = Cell3( nb_dims = 3 )
 
     loom.ffi_call(
         "two_instances",
@@ -225,22 +226,22 @@ if test( "two_instances" ):
         f.vertex_positions( num_vertex = 0, dim = 0 ) = 1;
         f.vertex_positions( num_vertex = 0, dim = 1 ) = 2;
         
-        outputs.volu.nb_vertices( batch_index ).set( 1 );
+        outputs.volume.nb_vertices( batch_index ).set( 1 );
         // see `partial_init`'s comment above: write every dim, not just the nonzero one.
-        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
-        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
-        outputs.volu.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
+        outputs.volume.vertex_positions( batch_index, num_vertex = 0, dim = 0 ) = 0;
+        outputs.volume.vertex_positions( batch_index, num_vertex = 0, dim = 1 ) = 0;
+        outputs.volume.vertex_positions( batch_index, num_vertex = 0, dim = 2 ) = 3;
         """ ),
         flat = loom.out( flat, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 8 } ),
-        volu = loom.out( volu, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
+        volume = loom.out( volume, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
     )
 
     # one class, two instantiations: the compile-time `nb_dims` differ, and so do the capacities.
-    assert flat.nb_vertices.value == 1 and volu.nb_vertices.value == 1
+    assert flat.nb_vertices.value == 1 and volume.nb_vertices.value == 1
     assert flat.vertex_positions.capacity == ( 8, 2 )
-    assert volu.vertex_positions.capacity == ( 4, 3 )
+    assert volume.vertex_positions.capacity == ( 4, 3 )
     assert flat.vertex_positions.raw.tolist()[ 0 ] == [ 1, 2 ]
-    assert volu.vertex_positions.raw.tolist()[ 0 ] == [ 0, 0, 3 ]
+    assert volume.vertex_positions.raw.tolist()[ 0 ] == [ 0, 0, 3 ]
 
 
 if test( "nested" ):
@@ -284,7 +285,7 @@ if test( "nested" ):
         p.right.vertex_positions( num_vertex = 0, dim = 1 ) = 0;
         p.right.vertex_positions( num_vertex = 0, dim = 2 ) = 2;
         """ ),
-        # nommer l'agregat couvre tout ce qu'il y a dessous
+        # naming the aggregate covers everything below it
         pair = loom.out( pair, capacities = { "left.nb_vertices": 8, "right.nb_vertices": 4 } ),
     )
 
@@ -293,6 +294,7 @@ if test( "nested" ):
     assert pair.right.vertex_positions.raw.tolist()[ 0 ] == [ 0, 0, 2 ]
 
 if test( "vmap" ):
+    need( "vmap" )
     # a `vmap` maps the call over a new axis, and the KERNEL is what runs it: the batched call is
     # one launch of one (re)compiled kernel over N items, not N calls. The body does not change --
     # `batch_index` was already there, empty. Nothing here is Jax-specific: `driver.vmap` is what
@@ -309,7 +311,7 @@ if test( "vmap" ):
 
 
 
-    noyau = FfiCode.per_item( code = """
+    kernel = FfiCode.per_item( code = """
     auto c = outputs.cell( batch_index );
     c.nb_vertices.set( 1 );
     c.vertex_positions( num_vertex = 0, dim = 0 ) = inputs.scale( batch_index, dim = 0 );
@@ -324,7 +326,7 @@ if test( "vmap" ):
 
         loom.ffi_call(
             "test_call_vmap",
-            noyau,
+            kernel,
             cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
             scale = scale,
         )
@@ -361,7 +363,7 @@ if test( "capacity_overflow" ):
 
 
 
-    noyau = FfiCode.per_item( code = """
+    kernel = FfiCode.per_item( code = """
     auto c = outputs.cell( batch_index );
     
     // the count may not fit -- and then what one READS BACK is the capacity, never more,
@@ -374,7 +376,7 @@ if test( "capacity_overflow" ):
         cell = Cell6( nb_dims = 2, nb_wanted = nb_wanted )
         loom.ffi_call(
             "test_call_overflow",
-            noyau,
+            kernel,
             cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": capacity } ),
         )
         return cell
@@ -389,11 +391,11 @@ if test( "capacity_overflow" ):
     cell = cell_of( 3, 2 )
     assert cell.nb_vertices.value == 3
     assert cell.vertex_positions.capacity == ( 4, 2 )
-    # les 3 que le kernel a ECRITS, et rien de plus : la 4e case est allouee mais jamais ecrite,
-    # et un tampon de sortie est FRAIS, pas remis a zero (seul un output PARTAGE d'un appel batche
-    # est semé, cf. `CallArg_Tensor.cpp_seed_member`). L'affirmer valait 0 marchait tant que
-    # l'allocateur rendait des pages deja nulles -- donc au gre de ce qui avait tourne avant :
-    # ici on lit 1e-323, ailleurs 6.5e-310.
+    # the 3 that the kernel WROTE, and nothing more: the 4th slot is allocated but never written,
+    # and an output buffer is FRESH, not zeroed (only a SHARED output of a batched call
+    # is seeded, cf. `CallArg_Tensor.cpp_seed_member`). Asserting it was 0 worked as long as
+    # the allocator handed back already-zero pages -- i.e. depending on what had run before:
+    # here we read 1e-323, elsewhere 6.5e-310.
     assert [ row[ 0 ] for row in cell.vertex_positions.raw.tolist() ][ :3 ] == [ 0, 1, 2 ]
 
     # 5 into a buffer of 1 -> `max( 5, 2 * 1 ) = 5`: this time it is the count that decides.
@@ -404,6 +406,7 @@ if test( "capacity_overflow" ):
 
 
 if test( "der" ):
+    need( "grad" )
     # a differentiable call: `code` computes the output, `backward` the input gradients. The
     # backward is generated as an ORDINARY kernel call -- its inputs are the forward inputs and
     # outputs plus the output cotangents (`grad_for_out`), its output the input cotangent
@@ -414,10 +417,10 @@ if test( "der" ):
     # is a compile-time true), and a non-perturbed input gradient to a `NoneTensor`
     # (`grad_for_inp.is_valid` a compile-time false) -- either lets the body drop a term at
     # compile time rather than move or multiply a buffer of zeros.
-    avant = FfiCode.per_item( code = """
+    forward = FfiCode.per_item( code = """
             outputs.out = 2 * inputs.inp + 100;
         """ )
-    arriere = FfiCode.per_item( """
+    backward = FfiCode.per_item( """
             if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
                 grad_of_inputs.inp = 2 * grad_of_outputs.out;
         """ )
@@ -427,8 +430,8 @@ if test( "der" ):
         out = RealTensor()
         loom.ffi_call(
             "test_call_der",
-            avant,
-            arriere,
+            forward,
+            backward,
             out = loom.out( out ),
             inp = inp,
         )
@@ -443,14 +446,15 @@ if test( "der" ):
 
 
 if test( "der_symbolic_zero" ):
+    need( "grad" )
     # two outputs, and a loss that uses only one of them: the cotangent of the UNUSED output is a
     # symbolic zero, so `grad_for_out_b` reaches the backward kernel as a `ZeroTensor` -- read as
     # 0, no buffer. The body multiplies by it and the term simply vanishes.
-    avant = FfiCode.per_item( code = """
+    forward = FfiCode.per_item( code = """
             outputs.out_a = 2 * inputs.inp;
             outputs.out_b = 3 * inputs.inp;
         """ )
-    arriere = FfiCode.per_item( """
+    backward = FfiCode.per_item( """
             grad_of_inputs.inp = 2 * grad_of_outputs.out_a + 3 * grad_of_outputs.out_b;
         """ )
     def only_a( x ):
@@ -460,8 +464,8 @@ if test( "der_symbolic_zero" ):
         out_b = RealTensor()
         loom.ffi_call(
             "test_call_der_sz",
-            avant,
-            arriere,
+            forward,
+            backward,
             out_a = loom.out( out_a ),
             out_b = loom.out( out_b ),
             inp = inp,
@@ -474,14 +478,15 @@ if test( "der_symbolic_zero" ):
 
 
 if test( "der_non_perturbed" ):
+    need( "grad" )
     # two float inputs, but only one is a function of the differentiated variable: the other is a
     # constant, so Jax does not perturb it. Its gradient is never requested, so `grad_for_bias`
     # reaches the backward kernel as a `NoneTensor` -- `is_valid` is a compile-time false, and
     # the body simply does not compute it (nor is a buffer allocated for it).
-    avant = FfiCode.per_item( code = """
+    forward = FfiCode.per_item( code = """
             outputs.out = inputs.inp + inputs.bias;
         """ )
-    arriere = FfiCode.per_item( """
+    backward = FfiCode.per_item( """
             // the perturbation is a COMPILE-TIME fact here: `grad_of_inputs.inp` is a real
             // gradient buffer, `grad_of_inputs.bias` a `NoneTensor` (inputs.bias is never perturbed).
             static_assert( grad_of_inputs.inp .is_valid );
@@ -502,8 +507,8 @@ if test( "der_non_perturbed" ):
         out = RealTensor()
         loom.ffi_call(
             "test_call_der_np",
-            avant,
-            arriere,
+            forward,
+            backward,
             out = loom.out( out ),
             inp = inp,
             bias = bias,
@@ -518,17 +523,18 @@ if test( "der_non_perturbed" ):
 
 
 if test( "der_shape_var" ):
+    need( "grad" )
     # a differentiable tensor whose shape is driven by a `ShapeVar`: the gradient of an input is
     # allocated at the input's capacity, read back from its buffer through the axis they share.
     n = ShapeVar()
     ax = Axis( n )
     ax.name = "n"   # a standalone axis: stamp the name the generated C++ uses (`DEFINE_AXIS( n )`)
 
-    avant = FfiCode.per_item( code = """
+    forward = FfiCode.per_item( code = """
             outputs.out( n = 0 ) = 2 * inputs.vec( n = 0 );
             outputs.out( n = 1 ) = 3 * inputs.vec( n = 1 );
         """ )
-    arriere = FfiCode.per_item( """
+    backward = FfiCode.per_item( """
             if ( grad_of_inputs.vec.is_valid && ! grad_of_outputs.out.surely_null ) {
                 grad_of_inputs.vec( n = 0 ) = 2 * grad_of_outputs.out( n = 0 );
                 grad_of_inputs.vec( n = 1 ) = 3 * grad_of_outputs.out( n = 1 );
@@ -540,8 +546,8 @@ if test( "der_shape_var" ):
         out = RealTensor[ ax ]()
         loom.ffi_call(
             "test_call_der_sv",
-            avant,
-            arriere,
+            forward,
+            backward,
             out = loom.out( out ),
             vec = vec,
         )
@@ -555,6 +561,7 @@ if test( "der_shape_var" ):
 
 
 if test( "der_aggregate" ):
+    need( "grad" )
     # differentiating through an AGGREGATE argument: the backward gets a `grad_for_cell` of the
     # same class, mirrored member by member -- `grad_for_cell.data` is the gradient of the input
     # `cell.data`, allocated at its capacity (the shared `nn` resolves it). The residual `cell`
@@ -565,10 +572,10 @@ if test( "der_aggregate" ):
         nn   : CtShapeVar
 
 
-    avant = FfiCode.per_item( code = """
+    forward = FfiCode.per_item( code = """
             outputs.out = 2 * inputs.cell.data( n = 0 ) + 3 * inputs.cell.data( n = 1 );
         """ )
-    arriere = FfiCode.per_item( """
+    backward = FfiCode.per_item( """
             if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.cell.data.is_valid ) {
                 grad_of_inputs.cell.data( n = 0 ) = 2 * grad_of_outputs.out;
                 grad_of_inputs.cell.data( n = 1 ) = 3 * grad_of_outputs.out;
@@ -580,8 +587,8 @@ if test( "der_aggregate" ):
         out = RealTensor()          # a bare scalar output
         loom.ffi_call(
             "test_call_der_agg",
-            avant,
-            arriere,
+            forward,
+            backward,
             out = loom.out( out ),
             cell = cell,
         )
@@ -616,7 +623,7 @@ if test( "batch_alignment_forced" ):
         nb_dims          : CtShapeVar
 
 
-    noyau = FfiCode.per_item( code = """
+    kernel = FfiCode.per_item( code = """
     auto c = outputs.cell( batch_index );
     c.nb_vertices.set( 1 );
     c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
@@ -627,7 +634,7 @@ if test( "batch_alignment_forced" ):
         cell.scale = driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] )
         loom.ffi_call(
             "test_call_batch_align",
-            noyau,
+            kernel,
             cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": 4 } ),
             batch_alignment = alignment,
         )
@@ -658,7 +665,7 @@ if test( "physical_axis_reorder" ):
     from loom.tensor import Storage
     from loom import Axis, ShapeVar, Tensor
 
-    noyau = FfiCode.per_item( code = """
+    kernel = FfiCode.per_item( code = """
     outputs.out( batch_index, row = 0, col = 0 ) = inputs.m( batch_index, row = 0, col = 0 );
     outputs.out( batch_index, row = 0, col = 1 ) = inputs.m( batch_index, row = 0, col = 1 );
     outputs.out( batch_index, row = 1, col = 0 ) = inputs.m( batch_index, row = 1, col = 0 );
@@ -679,7 +686,7 @@ if test( "physical_axis_reorder" ):
     out = RealTensor[ row, col ]()
     loom.ffi_call(
         "test_call_phys_reorder",
-        noyau,
+        kernel,
         m = m,
         out = loom.out( out ),
     )
@@ -745,7 +752,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
         nb_out    : ShapeVar     # written by the kernel -> a buffer: it is the result
         nb_wanted : ShapeVar     # prescribed, only read   -> crosses by value
 
-    noyau = FfiCode.per_item( code = """
+    kernel = FfiCode.per_item( code = """
     auto c = outputs.cnt( batch_index );
     
     static_assert( std::is_same_v< std::decay_t< decltype( c.nb_wanted.view ) >, ScalarValue<SI> >,
@@ -760,7 +767,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     cnt = Counter( nb_wanted = 3 )
     loom.ffi_call(
         "test_call_scalar_count",
-        noyau,
+        kernel,
         cnt = loom.out( cnt, writes = ( "nb_out", "out" ), capacities = { "nb_out": 8 } ),
     )
 
@@ -768,21 +775,21 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     assert numpy.asarray( cnt.out.value ).tolist() == [ 0.0, 10.0, 20.0 ]
 
 
-if test( "une_sortie_nue_est_semee" ):
-    # UN TAMPON DE SORTIE PART SEME, y compris quand le tenseur est passe NU.
+if test( "a_bare_output_is_seeded" ):
+    # AN OUTPUT BUFFER GETS SEEDED, even when the tensor is passed BARE.
     #
-    # `JaxFfi._render_call` demande un `cpp_seed_root` a chaque argument racine qui en a un, et
-    # seuls les AGREGATS en avaient : une sortie tensorielle nue -- le cas le plus simple -- n'etait
-    # jamais semee, alors que `LOOM_ZERO_OUTPUTS` promet le contraire.
+    # `JaxFfi._render_call` asks each root argument that has one for a `cpp_seed_root`, and
+    # only AGGREGATES had one: a bare tensor output -- the simplest case -- was
+    # never seeded, even though `LOOM_ZERO_OUTPUTS` promises the opposite.
     #
-    # On le teste sous `poison` et pas sous le zero par defaut : un tampon fraichement alloue vaut
-    # souvent zero par chance, donc le defaut ne distingue pas « seme » de « chanceux ». Le poison,
-    # lui, ne peut venir que du semis -- et c'est aussi ce qui le rend utile : une ecriture oubliee
-    # devient un NaN qui se propage, au lieu d'un zero credible qui passe les tests.
+    # We test it under `poison` and not under the default zero: a freshly allocated buffer is
+    # often zero by luck, so the default does not tell "seeded" from "lucky". The poison,
+    # on the other hand, can only come from the seeding -- and that is also what makes it useful: a forgotten
+    # write becomes a NaN that propagates, instead of a credible zero that passes the tests.
     import math, os
     import numpy
 
-    ancien = os.environ.get( "LOOM_ZERO_OUTPUTS" )
+    previous = os.environ.get( "LOOM_ZERO_OUTPUTS" )
     os.environ[ "LOOM_ZERO_OUTPUTS" ] = "poison"
     try:
         n = ShapeVar( 8 )
@@ -800,249 +807,249 @@ if test( "une_sortie_nue_est_semee" ):
         assert vals[ 0 ] == 1
         assert all( math.isnan( v ) for v in vals[ 1 : ] ), vals
     finally:
-        if ancien is None:
+        if previous is None:
             del os.environ[ "LOOM_ZERO_OUTPUTS" ]
         else:
-            os.environ[ "LOOM_ZERO_OUTPUTS" ] = ancien
+            os.environ[ "LOOM_ZERO_OUTPUTS" ] = previous
 
 
-if test( "un_axe_de_batch_vivant_ne_renomme_pas_le_noyau" ):
-    # LE NOM D'UN AXE DE BATCH NE DOIT PAS ATTEINDRE LA SOURCE.
+if test( "a_live_batch_axis_does_not_rename_the_kernel" ):
+    # THE NAME OF A BATCH AXIS MUST NOT REACH THE SOURCE.
     #
-    # `CallArgsAnalysis` renomme les axes de batch d'un appel en `batch_0`, `batch_1`, ... dans
-    # l'ordre ou ils s'y presentent. Sans ca, le nom venait de l'objet `Axis`, donc d'une piscine
-    # d'indices empruntes a la VIE des objets : deux appels structurellement identiques rendaient
-    # deux sources differentes des que leurs axes etaient vivants EN MEME TEMPS -- ce que fait
-    # toute chaine d'appels que l'adjoint doit remonter. Mesure avant correction sur une chaine de
-    # dix pas : 30 noyaux compiles au lieu de 3.
+    # `CallArgsAnalysis` renames the batch axes of a call to `batch_0`, `batch_1`, ... in
+    # the order in which they appear there. Without that, the name came from the `Axis` object, hence from a pool
+    # of indices borrowed for the LIFETIME of objects: two structurally identical calls yielded
+    # two different sources as soon as their axes were alive AT THE SAME TIME -- which is what
+    # every call chain that the adjoint has to walk back does. Measured before the fix on a chain of
+    # ten steps: 30 kernels compiled instead of 3.
     #
-    # D'ou la forme du test : on RETIENT le premier axe pendant le deuxieme appel. C'est
-    # exactement la situation qui produisait un nom neuf.
+    # Hence the shape of the test: we HOLD the first axis during the second call. That is
+    # exactly the situation that used to produce a fresh name.
     from loom.compilation import journal
     from loom.tensor import new_batch_axis
 
-    class Sortie( Aggregate ):
+    class Output( Aggregate ):
         val : RealTensor
 
 
-    noyau = FfiCode.per_item( code = "outputs.res.val( batch_index ) = 1;" )
-    def un_appel():
-        axe = new_batch_axis( 3, prefix = "essai" )
-        res = Sortie( batch_axes = [ axe ] )
+    kernel = FfiCode.per_item( code = "outputs.res.val( batch_index ) = 1;" )
+    def make_call():
+        axis = new_batch_axis( 3, prefix = "trial" )
+        res = Output( batch_axes = [ axis ] )
         loom.ffi_call(
-            "test_axe_canonique",
-            noyau,
+            "test_canonical_axis",
+            kernel,
             res = loom.out( res ),
         )
-        return axe, res
+        return axis, res
 
-    vivants = [ un_appel() ]                       # l'axe reste vivant : c'est le point
-    avant = journal.stats()
-    vivants.append( un_appel() )
-    apres = journal.stats()
+    alive = [ make_call() ]                       # the axis stays alive: that is the point
+    before = journal.stats()
+    alive.append( make_call() )
+    after = journal.stats()
 
-    assert apres[ "kernels" ] == avant[ "kernels" ], \
-        f"le deuxieme appel a fabrique un noyau de plus ({ avant[ 'kernels' ] } -> { apres[ 'kernels' ] })"
-    assert apres[ "reuses" ] > avant[ "reuses" ], "le deuxieme appel n'a pas resservi la cible du premier"
-    # `.value` ET PAS `.raw` : `raw` est le tampon, dimensionne a la CAPACITE. L'alignement de
-    # batch vaut 128 octets sur CUDA, donc un lot de 3 occupe SEIZE fentes en fp64 -- et cette
-    # assertion comparait les 16 a une liste de 3. C'etait le dernier echec de l'arbre, et
-    # c'etait ce piege-la.
-    assert [ float( v ) for v in vivants[ 1 ][ 1 ].val.value ] == [ 1.0, 1.0, 1.0 ]
+    assert after[ "kernels" ] == before[ "kernels" ], \
+        f"the second call built one more kernel ({ before[ 'kernels' ] } -> { after[ 'kernels' ] })"
+    assert after[ "reuses" ] > before[ "reuses" ], "the second call did not reuse the first one's target"
+    # `.value` AND NOT `.raw`: `raw` is the buffer, sized to the CAPACITY. The batch
+    # alignment is 128 bytes on CUDA, so a batch of 3 occupies SIXTEEN slots in fp64 -- and this
+    # assertion used to compare the 16 to a list of 3. It was the last failure in the tree, and
+    # it was that very trap.
+    assert [ float( v ) for v in alive[ 1 ][ 1 ].val.value ] == [ 1.0, 1.0, 1.0 ]
 
 
-if test( "une_valeur_brute_entre_telle_quelle" ):
-    # CE QU'ON N'ECRIT PLUS. Un tableau numpy, un tableau du framework, un flottant python
-    # traversent SANS emballage : `Tensor.as_tensor` lit leur kind ( un fait ) et laisse la
-    # taille au driver ( une politique ) -- exactement ce que `RealTensor( u )` faisait a la
-    # main. Les axes sont deduits de la forme, donc anonymes, donc nommes par leur POSITION
-    # dans le C++ : deux valeurs de meme rang tombent sur la meme grille.
+if test( "a_raw_value_goes_in_as_it_is" ):
+    # WHAT WE NO LONGER WRITE. A numpy array, a framework array, a python float
+    # go through WITHOUT wrapping: `Tensor.as_tensor` reads their kind ( a fact ) and leaves the
+    # size to the driver ( a policy ) -- exactly what `RealTensor( u )` used to do by
+    # hand. The axes are deduced from the shape, hence anonymous, hence named by their POSITION
+    # in the C++: two values of the same rank land on the same grid.
     import numpy
 
-    noyau = FfiCode( code = """
+    kernel = FfiCode( code = """
         namespace {
-            struct Ajoute {
+            struct AddShift {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
-                    const TF d = args.inputs.decalage;
-                    args.outputs.sortie( coords ) = args.inputs.entree( coords ) + d;
+                    const TF d = args.inputs.shift;
+                    args.outputs.output_value( coords ) = args.inputs.input_value( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.outputs.sortie.domain(), args, batch_axes );
+                queue.run_parallel( AddShift(), args.outputs.output_value.domain(), args, batch_axes );
             }
         }
     """ )
 
-    entree = numpy.arange( 6.0 ).reshape( 2, 3 )    # ni tenseur loom, ni tableau du framework
-    sortie = RealTensor.like( entree )              # `like` lit la forme d'une valeur brute
+    input_value = numpy.arange( 6.0 ).reshape( 2, 3 )    # neither a loom tensor nor a framework array
+    output_value = RealTensor.like( input_value )              # `like` reads the shape of a raw value
 
     loom.ffi_call(
-        "test_valeur_brute",
-        noyau,
-        entree = entree,
-        decalage = 10.0,
-        sortie = loom.out( sortie ),
+        "test_raw_value",
+        kernel,
+        input_value = input_value,
+        shift = 10.0,
+        output_value = loom.out( output_value ),
     )
 
-    assert numpy.asarray( sortie.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+    assert numpy.asarray( output_value.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
 
-    # ... SAUF en sortie : le tenseur serait bati par l'appel, donc le resultat n'aurait nulle
-    # part ou revenir. C'est dit, au lieu d'etre ecrit dans le vide.
+    # ... EXCEPT as an output: the tensor would be built by the call, so the result would have nowhere
+    # to go back to. It is said out loud, instead of being written into the void.
     try:
         loom.ffi_call(
-            "test_valeur_brute",
-            noyau,
-            entree = entree,
-            decalage = 10.0,
-            sortie = loom.out( numpy.zeros( ( 2, 3 ) ) ),
+            "test_raw_value",
+            kernel,
+            input_value = input_value,
+            shift = 10.0,
+            output_value = loom.out( numpy.zeros( ( 2, 3 ) ) ),
         )
-        assert False, "une sortie brute aurait du etre refusee"
+        assert False, "a raw output should have been rejected"
     except ValueError as e:
-        assert "brute" in str( e ), e
+        assert "raw" in str( e ), e
 
 
-if test( "le_role_se_dit_sur_la_valeur" ):
-    # LE VOCABULAIRE D'ARGUMENTS DE `ffi_call`. Le role est porte par la valeur, pas par une
-    # liste de chemins a cote -- donc il ne peut pas designer autre chose qu'elle, et les noms
-    # que `driver.call` reservait sont rendus au noyau.
+if test( "the_role_is_said_on_the_value" ):
+    # THE ARGUMENT VOCABULARY OF `ffi_call`. The role is carried by the value, not by a
+    # list of paths on the side -- so it cannot designate anything other than it, and the names
+    # that `driver.call` used to reserve are handed back to the kernel.
     import numpy
     import loom
 
-    # `output_attributes` EST ICI UN ARGUMENT DU NOYAU, et il vit a `args.inputs.output_attributes`.
-    # C'est le test : ce nom etait vole par `driver.call`, et l'ecrire y aurait declare une liste de
-    # sorties vide. Sous les groupes le premier niveau ne contient que les groupes, donc plus rien
-    # ne peut etre vole.
-    ajoute = FfiCode( code = """
+    # `output_attributes` IS HERE A KERNEL ARGUMENT, and it lives at `args.inputs.output_attributes`.
+    # That is the test: this name used to be stolen by `driver.call`, and writing it there would have declared an empty list of
+    # outputs. Under groups the first level only contains the groups, so nothing
+    # can be stolen anymore.
+    add_shift = FfiCode( code = """
         namespace {
-            struct Ajoute {
+            struct AddShift {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
                     const TF d = args.inputs.output_attributes;
-                    args.outputs.sortie( coords ) = args.inputs.entree( coords ) + d;
+                    args.outputs.output_value( coords ) = args.inputs.input_value( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.outputs.sortie.domain(), args, batch_axes );
+                queue.run_parallel( AddShift(), args.outputs.output_value.domain(), args, batch_axes );
             }
         }
     """ )
 
-    entree = numpy.arange( 6.0 ).reshape( 2, 3 )
-    attendu = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+    input_value = numpy.arange( 6.0 ).reshape( 2, 3 )
+    expected = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
 
-    sortie = RealTensor.like( entree )
-    rendu = loom.ffi_call( "test_role_out", ajoute,
-                           entree = entree,
+    output_value = RealTensor.like( input_value )
+    returned = loom.ffi_call( "test_role_out", add_shift,
+                           input_value = input_value,
                            output_attributes = 10.0,
-                           sortie = loom.out( sortie ) )
+                           output_value = loom.out( output_value ) )
 
-    # `loom.out` REND L'OBJET QU'ON A DONNE -- il etait deja le notre, le resultat y a ete
-    # reecrit. C'est ce qui permet `return loom.ffi_call( ... )` au lieu de batir, appeler, rendre.
-    assert rendu is sortie
-    assert numpy.asarray( sortie.raw ).tolist() == attendu
+    # `loom.out` RETURNS THE OBJECT THAT WAS GIVEN -- it was already ours, the result was
+    # written back into it. That is what allows `return loom.ffi_call( ... )` instead of build, call, return.
+    assert returned is output_value
+    assert numpy.asarray( output_value.raw ).tolist() == expected
 
 
-if test( "un_argument_mutable_rend_sa_nouvelle_valeur" ):
-    # UN NOM, DEUX TAMPONS. Les entrees et les sorties d'un appel sont disjointes, donc une mise
-    # a jour en place est deux tampons plus un rebinding : c'est ce que `loom.mutable` ecrit.
+if test( "a_mutable_argument_returns_its_new_value" ):
+    # ONE NAME, TWO BUFFERS. The inputs and the outputs of a call are disjoint, so an in-place
+    # update is two buffers plus a rebinding: that is what `loom.mutable` writes.
     import numpy
     import loom
 
-    ajoute = FfiCode( code = """
+    add_shift = FfiCode( code = """
         namespace {
-            struct Ajoute {
+            struct AddShift {
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
-                    const TF d = args.inputs.decalage;
+                    const TF d = args.inputs.shift;
                     args.outputs.v( coords ) = args.inputs.v( coords ) + d;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( Ajoute(), args.outputs.v.domain(), args, batch_axes );
+                queue.run_parallel( AddShift(), args.outputs.v.domain(), args, batch_axes );
             }
         }
     """ )
 
-    entree = numpy.arange( 6.0 ).reshape( 2, 3 )
-    attendu = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+    input_value = numpy.arange( 6.0 ).reshape( 2, 3 )
+    expected = [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
 
-    # CE QUI REVIENT EST DE LA MEME ESPECE QUE CE QU'ON A DONNE. Un tableau brut...
-    brut = loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( entree ), decalage = 10.0 )
-    assert not isinstance( brut, Tensor )
-    assert numpy.asarray( brut ).tolist() == attendu
+    # WHAT COMES BACK IS OF THE SAME KIND AS WHAT WAS GIVEN. A raw array...
+    raw = loom.ffi_call( "test_role_mut", add_shift, v = loom.mutable( input_value ), shift = 10.0 )
+    assert not isinstance( raw, Tensor )
+    assert numpy.asarray( raw ).tolist() == expected
 
-    # ... un tenseur loom.
-    tenseur = loom.ffi_call( "test_role_mut", ajoute,
-                             v = loom.mutable( RealTensor( entree ) ), decalage = 10.0 )
-    assert isinstance( tenseur, Tensor )
-    assert numpy.asarray( tenseur.raw ).tolist() == attendu
+    # ... a loom tensor.
+    tensor = loom.ffi_call( "test_role_mut", add_shift,
+                             v = loom.mutable( RealTensor( input_value ) ), shift = 10.0 )
+    assert isinstance( tensor, Tensor )
+    assert numpy.asarray( tensor.raw ).tolist() == expected
 
-    # une chaine : c'est ce que `mutable` achete, et le resultat doit etre celui des pas repetes
-    v = entree
+    # a chain: that is what `mutable` buys, and the result must be that of the repeated steps
+    v = input_value
     for _ in range( 3 ):
-        v = loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( v ), decalage = 10.0 )
+        v = loom.ffi_call( "test_role_mut", add_shift, v = loom.mutable( v ), shift = 10.0 )
     assert numpy.asarray( v ).tolist() == [ [ 30, 31, 32 ], [ 33, 34, 35 ] ]
 
-    # LES NOMS DERIVES ENTRENT DANS LE MEME NAMESPACE : une collision ferait lire au noyau le
-    # mauvais tampon, en silence. Elle est refusee.
+    # THE DERIVED NAMES GO INTO THE SAME NAMESPACE: a collision would make the kernel read the
+    # wrong buffer, silently. It is rejected.
     try:
-        loom.ffi_call( "test_role_mut", ajoute, v = loom.mutable( entree ),
-                       v_input = entree, decalage = 10.0 )
-        assert False, "la collision sur 'v_input' aurait du etre refusee"
+        loom.ffi_call( "test_role_mut", add_shift, v = loom.mutable( input_value ),
+                       v_input = input_value, shift = 10.0 )
+        assert False, "the collision on 'v_input' should have been rejected"
     except ValueError as e:
         assert "v_input" in str( e ), e
 
 
-if test( "writes_et_reads_disent_la_meme_chose_par_ses_deux_bouts" ):
-    # LA LISTE EST EXCLUSIVE, et se dit par le bout qu'on veut : `writes` nomme ce que le noyau
-    # ECRIT, `reads` ce qu'il LAISSE. Le reste suit, et les deux formes doivent donner le meme
-    # appel -- on donne simplement la plus courte.
+if test( "writes_and_reads_say_the_same_thing_from_both_ends" ):
+    # THE LIST IS EXCLUSIVE, and can be stated from whichever end you want: `writes` names what the kernel
+    # WRITES, `reads` what it LEAVES. The rest follows, and the two forms must give the same
+    # call -- we simply give the shortest.
     import numpy
 
-    class Grille( Aggregate ):
-        valeurs  : RealTensor[ "num_case" ]
-        compte   : ShapeVar      # ce que le noyau ecrit
-        taille   : ShapeVar      # une DECLARATION : le noyau la lit, et elle dimensionne
-        num_case : Axis[ "taille" ]
+    class Grid( Aggregate ):
+        values  : RealTensor[ "num_cell" ]
+        count   : ShapeVar      # what the kernel writes
+        size   : ShapeVar      # a DECLARATION: the kernel reads it, and it sizes
+        num_cell : Axis[ "size" ]
 
-    # `g` est UN argument, donc il vit dans UN groupe -- celui de son marqueur. La decoupe
-    # `writes` / `reads` ne change pas ou il vit, elle change la POLITIQUE io de chaque membre :
-    # `taille` se lit sous `outputs.g`, et c'est bien une entree ( rien ne l'a remise a zero ).
-    noyau = FfiCode.per_item( code = """
-        const SI n = SI( outputs.g.taille );
-        outputs.g.compte.set( n );
+    # `g` is ONE argument, so it lives in ONE group -- that of its marker. The `writes` / `reads`
+    # split does not change where it lives, it changes the io POLICY of each member:
+    # `size` is read under `outputs.g`, and it is indeed an input ( nothing zeroed it ).
+    kernel = FfiCode.per_item( code = """
+        const SI n = SI( outputs.g.size );
+        outputs.g.count.set( n );
         for ( SI i = 0; i < n; ++i )
-            outputs.g.valeurs( num_case = i ) = 10 + i;
+            outputs.g.values( num_cell = i ) = 10 + i;
     """ )
 
-    def remplie( **role ):
-        return loom.ffi_call( "test_writes_reads", noyau,
-                              g = loom.out( Grille( taille = 4 ), **role ) )
+    def filled( **role ):
+        return loom.ffi_call( "test_writes_reads", kernel,
+                              g = loom.out( Grid( size = 4 ), **role ) )
 
-    par_ecrit = remplie( writes = ( "valeurs", "compte" ) )
-    par_lu    = remplie( reads = ( "taille", ) )
+    via_writes = filled( writes = ( "values", "count" ) )
+    via_reads    = filled( reads = ( "size", ) )
 
-    for g in ( par_ecrit, par_lu ):
-        # `loom.out` rend l'objet : il n'y a pas eu a le batir sur une ligne a part
-        assert isinstance( g, Grille )
-        assert numpy.asarray( g.valeurs.value ).tolist() == [ 10.0, 11.0, 12.0, 13.0 ]
-        assert int( g.compte ) == 4
-        # et `taille` n'a PAS ete remise a zero : c'est tout l'enjeu de la decoupe
-        assert int( g.taille ) == 4
+    for g in ( via_writes, via_reads ):
+        # `loom.out` returns the object: there was no need to build it on a separate line
+        assert isinstance( g, Grid )
+        assert numpy.asarray( g.values.value ).tolist() == [ 10.0, 11.0, 12.0, 13.0 ]
+        assert int( g.count ) == 4
+        # and `size` was NOT zeroed: that is the whole point of the split
+        assert int( g.size ) == 4
 
-    # les deux bouts a la fois pourraient se contredire : refuse
+    # both ends at once could contradict each other: rejected
     try:
-        remplie( writes = ( "valeurs", ), reads = ( "taille", ) )
-        assert False, "writes et reads ensemble doivent etre refuses"
+        filled( writes = ( "values", ), reads = ( "size", ) )
+        assert False, "writes and reads together must be rejected"
     except ValueError:
         pass
 
-    # une faute de frappe ne passe pas en silence, dans un sens comme dans l'autre
-    for faux in ( dict( writes = ( "valeurz", ) ), dict( reads = ( "taile", ) ) ):
+    # a typo does not go through silently, in either direction
+    for wrong in ( dict( writes = ( "valuez", ) ), dict( reads = ( "siz", ) ) ):
         try:
-            remplie( **faux )
-            assert False, f"un nom qui ne designe rien doit etre refuse ( { faux } )"
+            filled( **wrong )
+            assert False, f"a name that designates nothing must be rejected ( { wrong } )"
         except ValueError:
             pass
-    print( "writes et reads : meme appel, et les deux listes sont verifiees" )
+    print( "writes and reads: same call, and both lists are checked" )

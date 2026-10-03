@@ -1,5 +1,12 @@
 import numpy
 
+def numpy_dtype_of( value ):
+    """The `numpy.dtype` of a framework dtype: numpy's own, a jax one, or a `torch.dtype` (which
+    numpy cannot read, but whose name -- `torch.float64` -- is numpy's once the module is cut)."""
+    if type( value ).__module__ == "torch":
+        return numpy.dtype( str( value ).split( "." )[ -1 ] )
+    return numpy.dtype( value )
+
 # The KINDS a `Dtype` can have. Semantic, per-field, machine-independent -- unlike the size.
 REAL = "real"       # floating point
 SINT = "sint"       # signed integer
@@ -54,6 +61,10 @@ class Dtype:
         if isinstance( value, numpy.dtype ) or ( isinstance( value, type ) and issubclass( value, numpy.generic ) ):
             return Dtype.from_numpy( value )
 
+        # a `torch.dtype` (`torch.float32`, a tensor's `.dtype`)
+        if type( value ).__module__ == "torch":
+            return Dtype.from_numpy( numpy_dtype_of( value ) )
+
         # -------------- str --------------
         sv = str( value ).lower()
 
@@ -87,7 +98,7 @@ class Dtype:
     def from_numpy( value ) -> 'Dtype':
         """The `Dtype` a numpy (or numpy-readable) dtype denotes -- how a real BUFFER answers what
         it actually is. Sizes are CONCRETE here: this describes storage, not a declaration."""
-        dt = numpy.dtype( value )
+        dt = numpy_dtype_of( value )
         if dt.kind == "b":
             return Dtype.bo()
         if dt.kind == "f":
@@ -168,6 +179,12 @@ class Dtype:
         return { REAL: "FP", SINT: "SI", UINT: "PI" }[ self.kind ] + str( self.size )
 
     @property
+    def numpy_dtype( self ):
+        """The `numpy.dtype` of the driver's spelling of this type (what a host buffer holds, a
+        torch CPU tensor's included)."""
+        return numpy_dtype_of( self.driver_version )
+
+    @property
     def driver_version( self ):
         if self._driver_version:
             return self._driver_version
@@ -177,13 +194,13 @@ class Dtype:
     def resolved( self ) -> 'Dtype':
         """This dtype with its size FILLED IN from the driver -- what it will really be on the
         machine. A declaration left open (`size is None`) only becomes concrete here."""
-        return Dtype.from_numpy( numpy.dtype( self.driver_version ) )
+        return Dtype.from_numpy( self.numpy_dtype )
 
     def same_as( self, other ) -> bool:
         """Whether both denote the same MACHINE type, sizes resolved through the driver -- so a
         declared `fp` (size left open) matches a concrete FP64 when that is what the driver runs.
         This is what a check against a real buffer must use, not `__eq__`."""
-        return numpy.dtype( self.driver_version ) == numpy.dtype( Dtype.factory( other ).driver_version )
+        return self.numpy_dtype == Dtype.factory( other ).numpy_dtype
 
     def __eq__( self, value, / ) -> bool:
         if not isinstance( value, Dtype ):

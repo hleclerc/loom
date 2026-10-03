@@ -88,8 +88,8 @@ class CallArg:
         return f"{ self.cpp_io_list() }, { self.name }"
 
     def cpp_io_expr( self ):
-        """Notre politique d'io comme UNE expression C++ ( un tag pour nous, une variable de
-        politique par membre pour un agrégat ). C'est ce qu'un membre de `<nom>_args` porte."""
+        """Our io policy as ONE C++ expression ( a tag for us, one policy variable per
+        member for an aggregate ). It is what a member of `<name>_args` carries."""
         return self.cpp_io_list()
 
     def cpp_io_list( self ):

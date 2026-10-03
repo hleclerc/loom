@@ -5,8 +5,8 @@ __pycache__/
 *.egg-info/
 .venv/
 
-# sorties de compilation ( loom écrit tout ce qu'il engendre sous `build/`, voir
-# `compilation/build.py` : un graphe commun et un répertoire par noyau )
+# compilation outputs ( loom writes everything it generates under `build/`, see
+# `compilation/build.py`: a common graph and one directory per kernel )
 build/
 *.o
 *.a
@@ -15,10 +15,10 @@ build/
 *.dylib
 compile_commands.json
 
-# le runner ( errand )
+# the runner ( errand )
 .errand/
 runs/
 
-# divers
+# misc
 tmp/
 .cache/

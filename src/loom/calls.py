@@ -1,77 +1,75 @@
-"""LE point d'entree public : executer un noyau C++/CUDA, et le VOCABULAIRE de ses arguments.
+"""THE public entry point: run a C++/CUDA kernel, and the VOCABULARY of its arguments.
 
-`driver` est la couche BASSE -- il porte le framework ( Jax/Torch ), le device, les types resolus,
-et il n'a pas a apparaitre dans le code d'un usager. `ffi_call` est le meme appel, sous le nom de
-ce qu'il fait, et avec une autre facon de dire les entrees et les sorties.
+`driver` is the LOW layer -- it carries the framework ( Jax/Torch ), the device, the resolved types,
+and it has no business showing up in a user's code. `ffi_call` is the same call, under the name of
+what it does, and with another way of saying the inputs and the outputs.
 
-CE QUI CHANGE PAR RAPPORT A `driver.call`, et pourquoi :
+WHAT CHANGES COMPARED TO `driver.call`, and why:
 
-  * `name` est le PREMIER argument. Il est obligatoire -- il nomme les foncteurs, prefixe la
-    cible compilee et groupe le journal des compilations -- donc il n'a rien a faire au milieu
-    des donnees.
+  * `name` is the FIRST argument. It is mandatory -- it names the functors, prefixes the compiled
+    target and groups the compilation journal -- so it has no business in the middle of the data.
 
-  * LE ROLE SE DIT SUR LA VALEUR, pas dans une liste a cote. `driver.call` porte quatre listes
-    de chemins ( `output_attributes`, les deux `exceptions`, `scratch_attributes` ) qu'il faut
-    tenir en accord A LA MAIN avec les noms des kwargs -- et dont une faute de frappe ne se
-    voyait qu'au moment ou un attribut introuvable etait signale. Ici le role est PORTE par
-    l'argument : `suivant = loom.out( suivant )` ne peut plus designer autre chose que lui-meme.
+  * THE ROLE IS SAID ON THE VALUE, not in a list on the side. `driver.call` carries four lists of
+    paths ( `output_attributes`, the two `exceptions`, `scratch_attributes` ) that have to be kept
+    in agreement BY HAND with the kwarg names -- and a typo in which only showed up at the moment
+    an attribute not found was reported. Here the role is CARRIED by the argument:
+    `next = loom.out( next )` can no longer designate anything but itself.
 
-  * CE FAISANT, le namespace du noyau lui est rendu -- ENTIEREMENT. `driver.call` reservait HUIT
-    noms ( `name`, `output_attributes`, `output_exceptions`, `input_exceptions`,
-    `output_capacities`, `batch_alignment`, `has_dynamic_capacity`, `scratch_attributes` ) : un
-    noyau qui voulait un argument appele `name` ne le pouvait pas, et `output_attribute` au
-    singulier ne levait rien -- il devenait un argument du noyau. Les arguments vivant desormais
-    DANS UN GROUPE, le premier niveau de `args` ne contient plus que les groupes : un argument
-    appele `name`, `output_attributes` ou meme `inputs` vit a `args.inputs.<son nom>` et ne peut
-    plus rien heurter.
+  * IN DOING SO, the kernel's namespace is given back to it -- ENTIRELY. `driver.call` reserved
+    EIGHT names ( `name`, `output_attributes`, `output_exceptions`, `input_exceptions`,
+    `output_capacities`, `batch_alignment`, `has_dynamic_capacity`, `scratch_attributes` ): a
+    kernel that wanted an argument called `name` could not have it, and `output_attribute` in the
+    singular raised nothing -- it became an argument of the kernel. The arguments now living IN A
+    GROUP, the first level of `args` only contains the groups: an argument called `name`,
+    `output_attributes` or even `inputs` lives at `args.inputs.<its name>` and can no longer
+    collide with anything.
 
-LES GROUPES, c'est-a-dire ce que le C++ voit :
+THE GROUPS, that is to say what C++ sees:
 
-    args.inputs.<nom>         les entrees -- y compris un scalaire ou un entier nu
-    args.outputs.<nom>        ce que le noyau ecrit
-    args.scratch.<nom>        les tampons de travail
-    args.grad_of_inputs       ( adjoint ) la cotangente a ECRIRE
-    args.grad_of_outputs      ( adjoint ) la cotangente qui ENTRE
-    args.machine, args.errors l'appel, pas l'usager
+    args.inputs.<name>        the inputs -- including a bare scalar or integer
+    args.outputs.<name>       what the kernel writes
+    args.scratch.<name>       the work buffers
+    args.grad_of_inputs       ( adjoint ) the cotangent to WRITE
+    args.grad_of_outputs      ( adjoint ) the cotangent coming IN
+    args.machine, args.errors the call, not the user
 
-LE NOM D'UN GROUPE DESIGNE TOUJOURS LE ROLE A L'ALLER. C'est ce qui enleve le noeud de
-`grad_inputs` / `grad_outputs`, ou « inputs » pouvait aussi se lire comme le role du RETOUR --
-les deux lectures echangeant alors le sens. Le retour LIT `grad_of_outputs` et ECRIT
-`grad_of_inputs`, parce qu'une cotangente de sortie est ce qu'on recoit et une cotangente
-d'entree ce qu'on derive. Le miroir est le contenu ; il n'y a rien de plus a retenir.
+A GROUP'S NAME ALWAYS DESIGNATES THE ROLE ON THE WAY FORWARD. That is what removes the knot of
+`grad_inputs` / `grad_outputs`, where "inputs" could also be read as the role of the RETURN --
+the two readings then swapping the meaning. The return READS `grad_of_outputs` and WRITES
+`grad_of_inputs`, because an output cotangent is what we receive and an input cotangent what we
+derive. The mirror is the content; there is nothing more to remember.
 
-LE VOCABULAIRE :
+THE VOCABULARY:
 
-    loom.out( x )                             x est ECRIT par le noyau
-    loom.out( cell, writes = ( "nb_vertices", ) )   ... ceux-la, et eux seuls
-    loom.out( cell, reads  = ( "weights", ) )       ... tout sauf ceux-la ( le meme, par l'autre
-                                                    bout -- on donne la liste la plus courte )
-    loom.mutable( x )                         x est LU puis RE-ECRIT ( voir `mutable` )
-    loom.scratch( x )                         un tampon de travail : alloue et ecrit a l'aller,
-                                              pas rendu a l'adjoint comme residu
-    loom.unbound( cell, "cut_offsets" )       ce que ce noyau n'a pas a toucher, meme si c'est
-                                              rempli
+    loom.out( x )                             x is WRITTEN by the kernel
+    loom.out( cell, writes = ( "nb_vertices", ) )   ... these, and only these
+    loom.out( cell, reads  = ( "weights", ) )       ... everything but these ( the same, from the
+                                                    other end -- give the shortest list )
+    loom.mutable( x )                         x is READ then RE-WRITTEN ( see `mutable` )
+    loom.scratch( x )                         a work buffer: allocated and written on the way
+                                              forward, not handed to the adjoint as a residual
+    loom.unbound( cell, "cut_offsets" )       what this kernel has no business touching, even if
+                                              it is filled
 
-Un argument sans marqueur est une ENTREE, et une valeur brute y entre telle quelle : un tableau
-du framework, un tableau numpy, une liste, un flottant ( voir `Tensor.as_tensor` -- loom en lit
-le type d'element, qui est un fait, et laisse la taille du scalaire au driver, qui est une
-politique ).
+An argument without a marker is an INPUT, and a raw value goes in as is: a framework array, a numpy
+array, a list, a float ( see `Tensor.as_tensor` -- loom reads its element type, which is a fact,
+and leaves the scalar's size to the driver, which is a policy ).
 
-CE QUE L'APPEL REND : tout ce qu'il a ECRIT -- `out` comme `mutable` -- dans l'ordre des kwargs
-( voir `returned` ). Un appel qui n'ecrit rien rend `None`.
+WHAT THE CALL RETURNS: everything it WROTE -- `out` as well as `mutable` -- in the order of the
+kwargs ( see `returned` ). A call that writes nothing returns `None`.
 """
 
-# LES ROLES. Des chaines et pas un enum : ces quatre valeurs ne sortent jamais de ce fichier.
+# THE ROLES. Strings and not an enum: these four values never leave this file.
 _OUT, _MUTABLE, _SCRATCH, _UNBOUND = "out", "mutable", "scratch", "unbound"
 
 
 class Arg:
-    """Un argument PLUS le role qu'il tient dans l'appel.
+    """An argument PLUS the role it holds in the call.
 
-    Bati par `loom.out` & co, jamais directement. `members` restreint le role a des sous-chemins
-    de l'objet -- ce qu'un agregat demande : une `Cell` dont le noyau n'ecrit que `nb_vertices`
-    et `vertex_positions`. Vide, le role vaut pour tout l'objet. `excluded` dit la MEME chose par
-    l'autre bout : l'objet entier tient le role, sauf ces sous-chemins ( voir `out` ).
+    Built by `loom.out` & co, never directly. `members` restricts the role to sub-paths of the
+    object -- what an aggregate asks for: a `Cell` of which the kernel only writes `nb_vertices`
+    and `vertex_positions`. Empty, the role holds for the whole object. `excluded` says the SAME
+    thing from the other end: the whole object holds the role, except these sub-paths ( see `out` ).
     """
 
     __slots__ = ( "kind", "value", "members", "excluded", "capacities" )
@@ -79,9 +77,9 @@ class Arg:
     def __init__( self, kind, value, members = (), excluded = (), capacities = {} ) -> None:
         if members and excluded:
             raise ValueError(
-                "loom.out / loom.scratch : `writes` et `reads` disent la MEME chose par ses deux "
-                "bouts -- ce que le noyau ecrit, ou ce qu'il laisse. En donner les deux, c'est "
-                "ouvrir la porte a ce qu'ils se contredisent : n'en donne qu'un." )
+                "loom.out / loom.scratch: `writes` and `reads` say the SAME thing from both "
+                "ends -- what the kernel writes, or what it leaves alone. Giving both opens the "
+                "door to them contradicting each other: give only one." )
         self.kind = kind
         self.value = value
         self.members = tuple( members )
@@ -89,225 +87,224 @@ class Arg:
         self.capacities = dict( capacities )
 
     def paths( self, name ):
-        """Les chemins que ce role designe, vus de l'appel : l'argument, ou ses membres."""
+        """The paths this role designates, seen from the call: the argument, or its members."""
         return [ f"{ name }.{ m }" for m in self.members ] if self.members else [ name ]
 
     def excluded_paths( self, name ):
-        """Les chemins DECOUPES de ce role : ils gardent celui qu'ils auraient eu sans la
-        declaration, c'est-a-dire ENTREE pour ce qui porte une valeur."""
+        """The paths CARVED OUT of this role: they keep the one they would have had without the
+        declaration, that is to say INPUT for whatever carries a value."""
         return [ f"{ name }.{ m }" for m in self.excluded ]
 
     def capacity_paths( self, name ):
-        """Les capacites, re-clefees sur le chemin complet ( `nb_vertices` -> `cell.nb_vertices` )."""
+        """The capacities, re-keyed on the full path ( `nb_vertices` -> `cell.nb_vertices` )."""
         return { f"{ name }.{ p }": c for p, c in self.capacities.items() }
 
 
 def out( value, *, writes = (), reads = (), capacities = {} ):
-    """`value` est ECRIT par le noyau : un tampon neuf, rendu a l'objet une fois l'appel fini.
+    """`value` is WRITTEN by the kernel: a fresh buffer, handed back to the object once the call is done.
 
-    ET RENDU PAR L'APPEL, donc `return loom.ffi_call( ... )` suffit -- plus besoin de batir
-    l'objet, d'appeler, puis de le rendre sur une troisieme ligne ( voir `returned` ).
+    AND RETURNED BY THE CALL, so `return loom.ffi_call( ... )` is enough -- no more building the
+    object, calling, then returning it on a third line ( see `returned` ).
 
-    UN AGREGAT DONT LE NOYAU N'ECRIT QU'UNE PARTIE se dit par l'un des deux bouts, au choix, et
-    c'est le plus court qui gagne :
+    AN AGGREGATE OF WHICH THE KERNEL ONLY WRITES A PART is said from either end, as you like, and
+    the shortest wins:
 
-        loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ) )   ceux-la, et eux seuls
-        loom.out( cell, reads  = ( "weights", ) )                          tout sauf ceux-la
+        loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ) )   these, and only these
+        loom.out( cell, reads  = ( "weights", ) )                          everything but these
 
-    LES DEUX LISTES SONT EXCLUSIVES, et non des indications : ce qui n'est pas ecrit est observe
-    comme n'importe quelle entree. Une faute de frappe ne passe pas -- un nom qui ne designe rien,
-    ou un `reads` qui n'exclut rien, est refuse.
+    THE TWO LISTS ARE EXCLUSIVE, and not hints: what is not written is observed like any input. A
+    typo does not get through -- a name that designates nothing, or a `reads` that excludes
+    nothing, is refused.
 
-    `reads` est en general la liste qui ne pourrit pas : elle nomme ce que le noyau ne doit PAS
-    ecraser, donc elle ne bouge pas quand on ajoute une sortie a l'agregat.
+    `reads` is generally the list that does not rot: it names what the kernel must NOT overwrite,
+    so it does not move when an output is added to the aggregate.
 
-    `capacities` dit COMBIEN allouer, quand seul l'appelant le sait ( `loom.out( cell, capacities
-    = { "nb_vertices": 8 } )` ) ; une capacite deja materialisee dans un tampon n'a pas a etre
-    repetee, elle s'y lit."""
+    `capacities` says HOW MUCH to allocate, when only the caller knows ( `loom.out( cell, capacities
+    = { "nb_vertices": 8 } )` ); a capacity already materialized in a buffer does not have to be
+    repeated, it is read from there."""
     return Arg( _OUT, value, writes, reads, capacities )
 
 
 def mutable( value, *, capacities = {} ):
-    """`value` est LU puis RE-ECRIT -- et `ffi_call` rend la nouvelle valeur.
+    """`value` is READ then RE-WRITTEN -- and `ffi_call` returns the new value.
 
-    LES ENTREES ET LES SORTIES D'UN APPEL SONT DISJOINTES, comme dans XLA : un noyau n'ecrit
-    jamais ce qu'il lit. Une mise a jour en place est donc DEUX tampons plus un rebinding cote
-    python -- ce que ce marqueur ecrit a notre place. Le C++ voit les deux, sous des noms
-    derives :
+    THE INPUTS AND OUTPUTS OF A CALL ARE DISJOINT, as in XLA: a kernel never writes what it reads.
+    An in-place update is therefore TWO buffers plus a rebinding on the python side -- which this
+    marker writes in our place. C++ sees both, under derived names:
 
         temperature = loom.mutable( temperature )
-            -> args.inputs.temperature      ce qui entre
-            -> args.outputs.temperature     ce qui sort
-            ( et pour l'adjoint : `args.grad_of_outputs.temperature` en entre,
-              `args.grad_of_inputs.temperature` en sort )
+            -> args.inputs.temperature      what goes in
+            -> args.outputs.temperature     what comes out
+            ( and for the adjoint: `args.grad_of_outputs.temperature` going in,
+              `args.grad_of_inputs.temperature` coming out )
 
-    Le tampon de sortie est bati « comme » l'entree ( voir `_empty_like` ). Une CAPACITE ne
-    decrit jamais qu'une ALLOCATION, et seule la sortie est allouee : `nb_vertices` y designe
-    donc le cote sortie, sans ambiguite a lever.
+    The output buffer is built "like" the input ( see `_empty_like` ). A CAPACITY only ever
+    describes an ALLOCATION, and only the output is allocated: `nb_vertices` therefore designates
+    the output side there, with no ambiguity to lift.
 
-    Ce qui revient est de la meme espece que ce qu'on a donne : un tableau du framework si on a
-    passe un tableau, un tenseur loom si on a passe un tenseur."""
+    What comes back is of the same kind as what was given: a framework array if an array was
+    passed, a loom tensor if a tensor was passed."""
     return Arg( _MUTABLE, value, (), capacities )
 
 
 def scratch( value, *, writes = (), reads = (), capacities = {} ):
-    """Un tampon de TRAVAIL : alloue et ecrit a l'aller comme une sortie, mais pas rendu a
-    l'adjoint comme residu -- ce qu'il portait a l'aller est du transitoire par fil, que le retour
-    re-alloue et re-derive lui-meme. Il n'est pas rendu par l'appel non plus : un transitoire
-    n'est pas un resultat.
+    """A WORK buffer: allocated and written on the way forward like an output, but not handed to
+    the adjoint as a residual -- what it carried on the way forward is per-thread transient, which
+    the return re-allocates and re-derives itself. It is not returned by the call either: a
+    transient is not a result.
 
-    `writes` / `reads` comme pour `out`."""
+    `writes` / `reads` as for `out`."""
     return Arg( _SCRATCH, value, writes, reads, capacities )
 
 
 def unbound( value, *members ):
-    """Ce que CE noyau n'a pas a toucher, meme si l'attribut est rempli : rien ne traverse la FFI,
-    et -- n'etant pas un tampon -- rien ne devient une primale derivable, donc l'adjoint n'a pas
-    de cotangente a lui trouver. Pour les membres qu'un agregat porte et dont ce noyau n'a que
-    faire.
+    """What THIS kernel has no business touching, even if the attribute is filled: nothing crosses
+    the FFI, and -- not being a buffer -- nothing becomes a differentiable primal, so the adjoint
+    has no cotangent to find for it. For the members an aggregate carries and that this kernel has
+    no use for.
 
-    La liste est POSITIONNELLE ici, et c'est coherent : elle nomme ce qui n'est pas lie, donc elle
-    dit directement le role. `out`, lui, devait dire LEQUEL des deux roles sa liste designait --
-    d'ou `writes` / `reads`."""
+    The list is POSITIONAL here, and that is consistent: it names what is not bound, so it says
+    the role directly. `out`, on the other hand, had to say WHICH of the two roles its list
+    designated -- hence `writes` / `reads`."""
     return Arg( _UNBOUND, value, members )
 
 
 def lower_args( args ):
-    """LE VOCABULAIRE, traduit en ce que l'abaissement attend.
+    """THE VOCABULARY, translated into what the lowering expects.
 
-    Rend `( donnees, sorties, scratchs, non_lies, capacites, groupes, rendus, exceptions )` :
+    Returns `( data, outputs, scratches, unbound, capacities, groups, returns, exceptions )`:
 
-        donnees     { chemin: objet }        ce qui traverse
-        groupes     { groupe: { membre: chemin } }   le premier niveau de `args` cote C++
-        rendus      [ ( objet, ce qu'on nous a donne | None ) ]   ce que l'appel REND
-        exceptions  [ chemin ]               les sous-chemins DECOUPES d'une sortie ( `reads` )
+        data     { path: object }        what crosses
+        groups     { group: { member: path } }   the first level of `args` on the C++ side
+        returns      [ ( object, what we were given | None ) ]   what the call RETURNS
+        exceptions  [ path ]                the sub-paths CARVED OUT of an output ( `reads` )
 
-    Le CHEMIN et le NOM C++ se separent ici, et c'est ce qui rend `mutable` possible : deux
-    tampons portent le MEME nom C++ dans deux groupes, sous deux chemins distincts -- un chemin
-    etant ce que les capacites et les sorties designent.
+    The PATH and the C++ NAME are separated here, and that is what makes `mutable` possible: two
+    buffers carry the SAME C++ name in two groups, under two distinct paths -- a path being what
+    the capacities and the outputs designate.
 
-    Vit ici, avec les marqueurs, et non dans le driver : c'est le meme sujet.
+    Lives here, with the markers, and not in the driver: it is the same subject.
     """
-    donnees, sorties, scratchs, non_lies = {}, [], [], []
-    capacites = {}
-    rendus, exceptions = [], []
-    groupes = { "inputs": {}, "outputs": {}, "scratch": {} }
+    data, outputs, scratches, unbound = {}, [], [], []
+    capacities = {}
+    returns, exceptions = [], []
+    groups = { "inputs": {}, "outputs": {}, "scratch": {} }
 
-    for cle, valeur in args.items():
-        if not isinstance( valeur, Arg ):
-            donnees[ cle ] = valeur
-            groupes[ "inputs" ][ cle ] = cle
+    for key, arg in args.items():
+        if not isinstance( arg, Arg ):
+            data[ key ] = arg
+            groups[ "inputs" ][ key ] = key
             continue
 
-        if valeur.kind == _MUTABLE:
-            entree, sortie = f"{ cle }_input", f"{ cle }_output"
-            # les deux tampons portent le nom C++ `cle`, mais chacun son CHEMIN -- et un chemin est
-            # ce que les capacites et les sorties designent. Deux chemins egaux les confondraient,
-            # en silence : on refuse.
-            for derive in ( entree, sortie ):
-                if derive in args:
+        if arg.kind == _MUTABLE:
+            input_path, output_path = f"{ key }_input", f"{ key }_output"
+            # the two buffers carry the C++ name `key`, but each its own PATH -- and a path is
+            # what the capacities and the outputs designate. Two equal paths would merge them,
+            # silently: we refuse.
+            for derived in ( input_path, output_path ):
+                if derived in args:
                     raise ValueError(
-                        f"'{ cle } = loom.mutable( ... )' engendre le chemin '{ derive }', qui est "
-                        f"deja un argument de cet appel. Renomme l'un des deux." )
-            objet = _empty_like( valeur.value, cle )
-            donnees[ entree ] = valeur.value
-            donnees[ sortie ] = objet
-            groupes[ "inputs" ][ cle ] = entree
-            groupes[ "outputs" ][ cle ] = sortie
-            sorties.append( sortie )
-            capacites.update( valeur.capacity_paths( sortie ) )
-            rendus.append( ( objet, valeur.value ) )
+                        f"'{ key } = loom.mutable( ... )' generates the path '{ derived }', which is "
+                        f"already an argument of this call. Rename one of the two." )
+            obj = _empty_like( arg.value, key )
+            data[ input_path ] = arg.value
+            data[ output_path ] = obj
+            groups[ "inputs" ][ key ] = input_path
+            groups[ "outputs" ][ key ] = output_path
+            outputs.append( output_path )
+            capacities.update( arg.capacity_paths( output_path ) )
+            returns.append( ( obj, arg.value ) )
             continue
 
-        donnees[ cle ] = valeur.value
-        capacites.update( valeur.capacity_paths( cle ) )
-        chemins = valeur.paths( cle )
-        if valeur.kind == _UNBOUND:
-            # il ne traverse pas, mais il reste UN ARGUMENT : le noyau le voit ( non lie ), donc
-            # il vit du cote ou il serait lu.
-            non_lies += chemins
-            groupes[ "inputs" ][ cle ] = cle
-        elif valeur.kind == _SCRATCH:
-            # un scratch est alloue et ecrit comme une sortie ; ce qui le distingue est ce que
-            # l'ADJOINT en recoit, c'est-a-dire rien -- pas l'endroit ou il vit.
-            sorties += chemins
-            scratchs += chemins
-            exceptions += valeur.excluded_paths( cle )
-            groupes[ "scratch" ][ cle ] = cle
+        data[ key ] = arg.value
+        capacities.update( arg.capacity_paths( key ) )
+        paths = arg.paths( key )
+        if arg.kind == _UNBOUND:
+            # it does not cross, but it remains AN ARGUMENT: the kernel sees it ( unbound ), so
+            # it lives on the side where it would be read.
+            unbound += paths
+            groups[ "inputs" ][ key ] = key
+        elif arg.kind == _SCRATCH:
+            # a scratch is allocated and written like an output; what sets it apart is what the
+            # ADJOINT gets from it, that is to say nothing -- not the place where it lives.
+            outputs += paths
+            scratches += paths
+            exceptions += arg.excluded_paths( key )
+            groups[ "scratch" ][ key ] = key
         else:
-            sorties += chemins
-            exceptions += valeur.excluded_paths( cle )
-            groupes[ "outputs" ][ cle ] = cle
-            rendus.append( ( valeur.value, None ) )
+            outputs += paths
+            exceptions += arg.excluded_paths( key )
+            groups[ "outputs" ][ key ] = key
+            returns.append( ( arg.value, None ) )
 
-    return ( donnees, sorties, scratchs, non_lies, capacites,
-             { g: m for g, m in groupes.items() if m }, rendus, exceptions )
+    return ( data, outputs, scratches, unbound, capacities,
+             { g: m for g, m in groups.items() if m }, returns, exceptions )
 
 
-def returned( rendus ):
-    """Ce qu'un appel REND : ses arguments ECRITS, dans l'ordre ou ils ont ete donnes ( la valeur
-    seule s'il n'y en a qu'un, un tuple sinon ), et `None` s'il n'y en a aucun.
+def returned( returns ):
+    """What a call RETURNS: its WRITTEN arguments, in the order they were given ( the value alone
+    if there is only one, a tuple otherwise ), and `None` if there are none.
 
-    `out` ET `mutable`, et c'est ce qui permet d'ecrire `return loom.ffi_call( ... )` au lieu de
-    batir l'objet, d'appeler, puis de le rendre sur une troisieme ligne.
+    `out` AND `mutable`, and that is what makes it possible to write `return loom.ffi_call( ... )`
+    instead of building the object, calling, then returning it on a third line.
 
-    Ce qui revient n'est pas le meme objet dans les deux cas, et ca ne peut pas l'etre : un `out`
-    rend CELUI QU'ON A DONNE -- il etait deja le notre, le resultat y a ete reecrit -- la ou un
-    `mutable` rend le NOUVEAU tampon ( les entrees et les sorties d'un appel sont disjointes ),
-    de la meme espece que ce qu'on avait donne ( voir `_same_kind` ).
+    What comes back is not the same object in both cases, and it cannot be: an `out` returns THE ONE
+    WE WERE GIVEN -- it was already ours, the result was rewritten into it -- where a `mutable`
+    returns the NEW buffer ( the inputs and outputs of a call are disjoint ), of the same kind as
+    what had been given ( see `_same_kind` ).
 
-    `scratch` ne rend rien, et c'est sa definition : un transitoire n'est pas un resultat."""
-    if not rendus:
+    `scratch` returns nothing, and that is its definition: a transient is not a result."""
+    if not returns:
         return None
-    res = [ objet if donne is None else _same_kind( objet, donne ) for objet, donne in rendus ]
+    res = [ obj if given is None else _same_kind( obj, given ) for obj, given in returns ]
     return res[ 0 ] if len( res ) == 1 else tuple( res )
 
 
 def ffi_call( name, *kernels, **kwargs ):
-    """Lance `kernels` sur les valeurs passees en kwargs.
+    """Runs `kernels` on the values passed as kwargs.
 
-    C'EST `driver.call`, sous le nom de ce qu'il fait : il n'y a qu'une forme d'appel, et `driver`
-    reste la couche basse que l'usager n'a pas a nommer.
+    IT IS `driver.call`, under the name of what it does: there is only one form of call, and
+    `driver` remains the low layer that the user has no need to name.
 
-    CE QUI EST RENDU : les arguments ECRITS -- `loom.out` comme `loom.mutable` -- dans l'ordre ou
-    ils ont ete donnes ( voir `returned` ). D'ou la forme courte :
+    WHAT IS RETURNED: the WRITTEN arguments -- `loom.out` as well as `loom.mutable` -- in the order
+    they were given ( see `returned` ). Hence the short form:
 
-        return loom.ffi_call( "mon_appel", noyau, entree = entree,
-                              sortie = loom.out( RealTensor[ n ]() ) )
+        return loom.ffi_call( "my_call", kernel, input = input,
+                              output = loom.out( RealTensor[ n ]() ) )
     """
     from .drivers.driver import driver
     return driver.call( name, *kernels, **kwargs )
 
 
 def _empty_like( value, name ):
-    """Le jumeau VIDE de `value` -- le tampon de sortie d'un `mutable`.
+    """The EMPTY twin of `value` -- the output buffer of a `mutable`.
 
-    Deux protocoles, dans cet ordre : `_empty_like_me()`, qu'un objet compose definit lui-meme
-    ( une `Cell` a besoin de sa dimension, de son batch et de son type de noyau, que loom ne peut
-    pas deviner ) ; sinon `Tensor.like`, qui couvre un tenseur loom comme une valeur brute."""
-    faire = getattr( value, "_empty_like_me", None )
-    if faire is not None:
-        return faire()
+    Two protocols, in this order: `_empty_like_me()`, which a composite object defines itself
+    ( a `Cell` needs its dimension, its batch and its kernel type, which loom cannot guess );
+    otherwise `Tensor.like`, which covers a loom tensor as well as a raw value."""
+    make = getattr( value, "_empty_like_me", None )
+    if make is not None:
+        return make()
 
     from .tensor.Tensor import Tensor
     try:
         return Tensor.like( value )
     except TypeError as e:
         raise TypeError(
-            f"'{ name } = loom.mutable( ... )' : loom ne sait pas batir le tampon de sortie d'un "
-            f"{ type( value ).__name__ }. Un tenseur, ou une valeur ayant une forme, passe par "
-            f"`Tensor.like` ; un objet compose doit definir `_empty_like_me()`." ) from e
+            f"'{ name } = loom.mutable( ... )' : loom does not know how to build the output buffer of a "
+            f"{ type( value ).__name__ }. A tensor, or a value that has a shape, goes through "
+            f"`Tensor.like`; a composite object must define `_empty_like_me()`." ) from e
 
 
-def _same_kind( objet, donne ):
-    """Ce qu'un `mutable` rend : la meme espece que ce qu'on nous a donne. Un tableau brut est
-    entre, un tableau brut ressort ; un tenseur loom est entre, le tenseur ressort.
+def _same_kind( obj, given ):
+    """What a `mutable` returns: the same kind as what we were given. A raw array went in, a raw
+    array comes out; a loom tensor went in, the tensor comes out.
 
-    `.value` ET PAS `.raw`. `raw` est le TAMPON, dimensionne a la CAPACITE -- rembourrage compris,
-    parce que c'est ce dans quoi un noyau ecrit ( l'alignement de batch vaut 128 octets sur CUDA,
-    donc un lot de 3 occupe 16 fentes en fp64 ). Le rendre serait rendre le rembourrage avec, en
-    silence, et la valeur logique est ce qu'on veut. `value` recadre sur la forme."""
+    `.value` AND NOT `.raw`. `raw` is the BUFFER, sized to the CAPACITY -- padding included,
+    because that is what a kernel writes into ( the batch alignment is 128 bytes on CUDA, so a
+    batch of 3 takes up 16 slots in fp64 ). Returning it would mean returning the padding too,
+    silently, and the logical value is what we want. `value` crops to the shape."""
     from .tensor.Tensor import Tensor
-    if isinstance( donne, Tensor ) or not isinstance( objet, Tensor ):
-        return objet
-    return objet.value
+    if isinstance( given, Tensor ) or not isinstance( obj, Tensor ):
+        return obj
+    return obj.value

@@ -2,7 +2,6 @@
 
 #include <loom/support/common_macros.h> // HD
 
-// #include "hipSYCL/compiler/llvm-to-backend/LLVMToBackend.hpp"
 #include "Matrix.h"
 #include <utility>
 #include <cmath>

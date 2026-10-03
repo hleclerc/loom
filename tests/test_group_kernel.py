@@ -1,15 +1,15 @@
-"""La facilité « kernel de GROUPE » (`FfiCode.per_item( group_size = ... )`), pour elle-même.
+"""The "GROUP kernel" facility (`FfiCode.per_item( group_size = ... )`), for its own sake.
 
-Elle n'était exercée que par `OtPlan1d`, à travers un tri radix coopératif et un balayage de
-transport optimal : quand elle casse, le symptôme est un coût de transport faux de 3 %, ce qui
-n'oriente vers rien. Ces tests-ci vérifient le CONTRAT, en trois assertions séparables :
+It used to be exercised only by `OtPlan1d`, through a cooperative radix sort and an optimal
+transport sweep: when it breaks, the symptom is a wrong transport cost of 3%, which
+points to nothing. These tests check the CONTRACT, in three separable assertions:
 
-    1. chaque voie du groupe s'exécute (`local_index` couvre bien `0..local_size-1`) ;
-    2. `local_scratch` est PARTAGÉ par le groupe -- ce qu'une voie y écrit, une autre le lit ;
-    3. `group_barrier` ordonne ces écritures avant ces lectures.
+    1. every lane of the group runs (`local_index` does cover `0..local_size-1`);
+    2. `local_scratch` is SHARED by the group -- what one lane writes there, another reads;
+    3. `group_barrier` orders those writes before those reads.
 
-Un backend qui rend `local_scratch` privé par voie, ou qui n'exécute qu'une voie sur deux, tombe
-ici, à un endroit qui le nomme.
+A backend that makes `local_scratch` private per lane, or that only runs one lane out of two, fails
+here, at a spot that names it.
 """
 import numpy
 
@@ -21,11 +21,11 @@ from errand import test
 
 
 def _sum_over_lanes( group_size ):
-    """Chaque voie dépose son rang dans `local_scratch`, puis la voie 0 en somme le contenu.
+    """Each lane drops its rank into `local_scratch`, then lane 0 sums its contents.
 
-    La somme vaut `0+1+...+(local_size-1)` SI et seulement si les trois garanties tiennent : une
-    voie manquante retire son terme, un scratch privé n'en laisse qu'un, une barrière absente en
-    perd au hasard. Le résultat attendu est donc une valeur unique, pas un intervalle.
+    The sum equals `0+1+...+(local_size-1)` IF AND ONLY IF the three guarantees hold: a missing
+    lane removes its term, a private scratch leaves only one, a missing barrier loses
+    some at random. The expected result is therefore a single value, not an interval.
     """
     num_group = Axis( ShapeVar( 2 ), name = "num_group" )
     res = IntTensor[ num_group ]()
@@ -51,20 +51,20 @@ def _sum_over_lanes( group_size ):
 
 
 if test( "a_group_of_one_degenerates_to_the_plain_kernel" ):
-    # `group_size == 1` est le cas de PRODUCTION sur CPU (`Cpu.group_size`) : le chemin coopératif
-    # doit s'y réduire exactement au kernel ordinaire. Une voie, son rang vaut 0, somme nulle.
+    # `group_size == 1` is the PRODUCTION case on CPU (`Cpu.group_size`): the cooperative path
+    # must reduce exactly to the ordinary kernel there. One lane, its rank is 0, zero sum.
     assert _sum_over_lanes( 1 ) == 0
 
 
 if test( "every_lane_of_a_group_runs_and_shares_its_scratch" ):
-    # le vrai test : au-delà d'une voie, les trois garanties deviennent observables.
+    # the real test: beyond one lane, the three guarantees become observable.
     for gs in ( 2, 4, 8 ):
         got = _sum_over_lanes( gs )
-        assert got == gs * ( gs - 1 ) // 2, f"group_size={ gs }: somme={ got }, attendu { gs * ( gs - 1 ) // 2 }"
+        assert got == gs * ( gs - 1 ) // 2, f"group_size={ gs }: sum={ got }, expected { gs * ( gs - 1 ) // 2 }"
 
 
 def _runtime_subgroup_width( group_size ):
-    """La largeur de sub-group que le BACKEND rapporte à l'exécution, pour ce `group_size`."""
+    """The sub-group width that the BACKEND reports at execution time, for this `group_size`."""
     num_group = Axis( ShapeVar( 2 ), name = "num_group" )
     res = IntTensor[ num_group ]()
 
@@ -83,20 +83,20 @@ def _runtime_subgroup_width( group_size ):
 
 
 if test( "the_runtime_subgroup_width_matches_what_the_device_claims" ):
-    # `Device.subgroup_size` est GRAVÉ côté Python dans la mémoire locale qu'`OtPlan1d` réserve
-    # (`local_mem_elems`, « kept in sync by hand »). Si le backend en rapporte une autre à
-    # l'exécution, le nombre de rangs réservés et le nombre de rangs utilisés divergent -- et le
-    # tri coopératif écrit hors de sa réservation, sans que rien ne le dise. D'où ce test : c'est
-    # une invariante tenue À LA MAIN, donc exactement le genre qui pourrit en silence.
-    # `Device.subgroup_size` est la largeur MATÉRIELLE (32 sur CUDA), donc un MAJORANT : un
-    # work-group de 4 items n'a pas un sous-groupe de 32. L'attendu est `min( group_size, claimed )`
-    # -- c'est bien ce que le dimensionnement d'`OtPlan1d` suppose, `num_sg = ceil( gs / sgs )`.
+    # `Device.subgroup_size` is ENGRAVED on the Python side in the local memory that `OtPlan1d` reserves
+    # (`local_mem_elems`, "kept in sync by hand"). If the backend reports another one at
+    # execution time, the number of reserved ranks and the number of used ranks diverge -- and the
+    # cooperative sort writes outside its reservation, with nothing to say so. Hence this test: it is
+    # an invariant maintained BY HAND, so exactly the kind that rots silently.
+    # `Device.subgroup_size` is the HARDWARE width (32 on CUDA), hence an UPPER BOUND: a
+    # work-group of 4 items does not have a sub-group of 32. The expectation is `min( group_size, claimed )`
+    # -- which is indeed what `OtPlan1d`'s sizing assumes, `num_sg = ceil( gs / sgs )`.
     claimed = driver.device.subgroup_size
     for gs in ( 1, 2, 4, 8 ):
         got = _runtime_subgroup_width( gs )
         expected = min( gs, claimed )
-        assert got == expected, ( f"group_size={ gs }: le backend rapporte un sub-group de { got }, "
-                                  f"attendu min( { gs }, { claimed } ) = { expected }" )
+        assert got == expected, ( f"group_size={ gs }: the backend reports a sub-group of { got }, "
+                                  f"expected min( { gs }, { claimed } ) = { expected }" )
 
 
 def _probe( group_size, expr, tag ):
@@ -114,22 +114,22 @@ def _probe( group_size, expr, tag ):
 
 
 if test( "the_lane_to_subgroup_mapping_is_linear" ):
-    # Ce dont le tri radix coopératif d'`OtPlan1d` a besoin : que chaque voie sache dans QUEL
-    # sous-groupe elle se trouve, pour recevoir un morceau distinct de l'entrée.
+    # What `OtPlan1d`'s cooperative radix sort needs: that each lane knows WHICH
+    # sub-group it is in, in order to receive a distinct piece of the input.
     #
-    # Le demander au backend ne marche pas. `omp.library-only` renvoie `get_group_linear_id() == 0`
-    # pour TOUTE voie, tout en donnant des `local_index` distincts -- le découpage s'effondrait
-    # alors sur le même morceau pour toutes, qui triaient la même tranche vers les mêmes
-    # destinations. Le symptôme était un coût de transport faux de 3 %, sans aucun accès hors
-    # bornes pour le signaler : rien ne pointait vers les sous-groupes.
+    # Asking the backend does not work. `omp.library-only` returns `get_group_linear_id() == 0`
+    # for EVERY lane, while giving distinct `local_index`es -- the split then collapsed
+    # onto the same piece for all of them, which sorted the same slice towards the same
+    # destinations. The symptom was a wrong transport cost of 3%, with no out-of-bounds
+    # access to flag it: nothing pointed to the sub-groups.
     #
-    # L'identifiant est donc DÉRIVÉ de `local_index` (voir `OtPlan1d.cxx::sort_diracs`), et c'est
-    # cette dérivation que ce test verrouille : distincte par sous-groupe, couvrant 0..num_sg-1.
+    # The identifier is therefore DERIVED from `local_index` (see `OtPlan1d.cxx::sort_diracs`), and it is
+    # this derivation that this test locks down: distinct per sub-group, covering 0..num_sg-1.
     for gs in ( 1, 2, 4, 8 ):
         widths = _probe( gs, "sub_group.get_local_linear_range()", "rng" )
-        assert len( set( widths ) ) == 1, f"largeur de sub-group non uniforme dans le groupe: { widths }"
+        assert len( set( widths ) ) == 1, f"non-uniform sub-group width within the group: { widths }"
         w = widths[ 0 ]
         derived = sorted( set( li // w for li in _probe( gs, "local_index", "li" ) ) )
         num_sg = ( gs + w - 1 ) // w
         assert derived == list( range( num_sg ) ), \
-            f"group_size={ gs }, sub-group={ w } : sous-groupes dérivés { derived }, attendu 0..{ num_sg - 1 }"
+            f"group_size={ gs }, sub-group={ w }: derived sub-groups { derived }, expected 0..{ num_sg - 1 }"

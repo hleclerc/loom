@@ -20,9 +20,9 @@
 
 #define SCInt static constexpr int
 
-// `HD` marque ce qui doit exister des deux côtés, hôte et device : vide partout sauf sous nvcc, où
-// c'est `__host__ __device__`. C'est le SEUL endroit où l'attribut est épelé -- le code métier
-// écrit `HD`, jamais `__device__`.
+// `HD` marks what must exist on both sides, host and device: empty everywhere except under nvcc, where
+// it is `__host__ __device__`. This is the ONLY place the attribute is spelled -- application code
+// writes `HD`, never `__device__`.
 #ifdef __CUDACC__
 #define HD __host__ __device__
 #else
@@ -30,11 +30,11 @@
 #endif
 #define HD_INLINE HD inline
 
-// `LOOM_CONSTANT( déclaration )` : une constante globale utilisable des deux côtés -- une table
-// de quadrature lue avec un indice de boucle, l'étiquette d'un axe sur laquelle on appelle
-// `num_vertex = i`. Un `constexpr` de portée globale n'est pas utilisable dans du code device dès
-// qu'il est ODR-utilisé (indice non constant, `this` d'une méthode) ; nvcc compile la même source
-// deux fois, et la passe device veut un `__device__` -- ce qu'on lui donne, là et seulement là.
+// `LOOM_CONSTANT( declaration )`: a global constant usable on both sides -- a quadrature table
+// read with a loop index, an axis label on which one calls
+// `num_vertex = i`. A global-scope `constexpr` is not usable in device code as soon as
+// it is ODR-used (non-constant index, `this` of a method); nvcc compiles the same source
+// twice, and the device pass wants a `__device__` -- which is what we give it, there and only there.
 //     LOOM_CONSTANT( double gl8_x[ 4 ] ) = { ... };
 //     LOOM_TAG( _num_vertex, num_vertex );
 #ifdef __CUDA_ARCH__
@@ -44,8 +44,8 @@
 #endif
 #define LOOM_TAG( Type, name ) LOOM_CONSTANT( Type name ){}
 
-// `LOOM_EXPORT` : un symbole qu'une bibliothèque PUBLIE (tout est caché par défaut,
-// `-fvisibility=hidden`) -- le point d'entrée d'un noyau, la file de threads du runtime.
+// `LOOM_EXPORT`: a symbol a library PUBLISHES (everything is hidden by default,
+// `-fvisibility=hidden`) -- a kernel's entry point, the runtime's thread pool.
 #if defined( _WIN32 )
 #define LOOM_EXPORT __declspec( dllexport )
 #else
@@ -90,22 +90,22 @@ namespace sdot { namespace detail {
 #define IS_DETECTED( Op, ... )     ::sdot::detail::is_detected<Op,__VA_ARGS__>::value
 #define HAS_CT_RANK( T )           ::sdot::detail::has_ct_rank<T>::value
 
-// ---- verification de bornes, OPTIONNELLE (`-DLOOM_BOUNDS_CHECK`) -------------------------------
+// ---- OPTIONAL bounds checking (`-DLOOM_BOUNDS_CHECK`) ------------------------------------------
 //
-// `TensorView::squeeze` est le point de passage UNIQUE de toute indexation : y borner l'indice
-// attrape n'importe quel depassement, dans n'importe quel kernel, sans sanitizer.
+// `TensorView::squeeze` is the SINGLE point every indexing goes through: bounding the index there
+// catches any overrun, in any kernel, without a sanitizer.
 //
-// Pourquoi ce n'est pas toujours actif : c'est un test par acces, sur le chemin le plus chaud du
-// code. Pourquoi ca existe : un indice hors bornes ne fait PAS toujours fauter -- il tombe souvent
-// dans de la memoire mappee voisine, et le calcul continue faux, ou faute des minutes plus tard
-// dans un kernel innocent. `compute-sanitizer` le voit, mais il est lent et change assez le timing
-// pour faire disparaitre les bugs de course. Ce garde-fou, lui, est deterministe et nomme la ligne.
+// Why it is not always on: it is one test per access, on the hottest path of the
+// code. Why it exists: an out-of-bounds index does NOT always fault -- it often lands
+// in neighbouring mapped memory, and the computation carries on wrong, or faults minutes later
+// in an innocent kernel. `compute-sanitizer` sees it, but it is slow and changes the timing enough
+// to make race bugs disappear. This guard, for its part, is deterministic and names the line.
 //
-// Usage : `LOOM_BOUNDS_CHECK=1 ./run test ...` (voir `adaptive_cpp.py`).
+// Usage: `LOOM_BOUNDS_CHECK=1 ./run test ...`.
 #ifdef LOOM_BOUNDS_CHECK
 #include <cassert>
 #define LOOM_CHECK_INDEX( index, extent ) \
-    assert( SI( index ) >= 0 && SI( index ) < SI( extent ) && "TensorView: indice hors bornes" )
+    assert( SI( index ) >= 0 && SI( index ) < SI( extent ) && "TensorView: index out of bounds" )
 #else
 #define LOOM_CHECK_INDEX( index, extent ) ( (void) 0 )
 #endif

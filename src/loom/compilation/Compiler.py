@@ -1,29 +1,29 @@
-"""Les compilateurs : ce qui transforme un source généré en bibliothèque chargeable, PAR DEVICE.
+"""The compilers: what turns a generated source into a loadable library, PER DEVICE.
 
-Un device dit avec quoi il se compile (`Device.compiler`) : le compilateur hôte pour le CPU, `nvcc`
-autour du compilateur hôte pour CUDA. C'est le seul aiguillage -- `make_library` ne sait pas quel
-device il sert, il demande une commande au compilateur et gère le cache disque, pareil pour tous.
+A device says what it is compiled with (`Device.compiler`): the host compiler for the CPU, `nvcc`
+around the host compiler for CUDA. This is the only switch -- `make_library` does not know which
+device it serves, it asks the compiler for a command and manages the disk cache, the same for all.
 
-Un compilateur répond à trois questions :
-  * `commands()` / `rule_for( src )` -- comment compiler une source en objet, lier une
-    bibliothèque, un exécutable (voir `build.py`, qui ne connaît que des chemins et des règles) ;
-  * `build_signature` -- ce qui, HORS du source, change le binaire (les flags, la machine quand
-    `-march=native` en fait partie) ; `JaxFfi` la met dans le nom du `.so` avec le hash du source,
-    pour qu'un changement de réglage ne retombe pas sur un cache bâti avec un autre ;
-  * `describe()` -- ce que `sdot-toolchain` affiche.
+A compiler answers three questions:
+  * `commands()` / `rule_for( src )` -- how to compile a source into an object, link a
+    library, an executable (see `build.py`, which only knows paths and rules);
+  * `build_signature` -- what, OUTSIDE the source, changes the binary (the flags, the machine when
+    `-march=native` is part of them); `JaxFfi` puts it in the `.so` name with the source hash,
+    so that a change of setting does not fall back on a cache built with another one;
+  * `describe()` -- what `sdot-toolchain` displays.
 
-Réglages d'environnement, communs :
-  * `LOOM_CXX`     : le compilateur hôte (sinon `CXX`, sinon `c++` / `clang++` / `g++` sur PATH).
-  * `SDOT_CXXFLAGS`: des flags de plus, découpés en mots -- l'échappatoire pour essayer un réglage
-                     sans toucher au code. Ils entrent dans la signature.
-  * `SDOT_CPU_VARIANT` : compiler pour un NIVEAU d'architecture nommé (`x86-64-v2` / `v3` / `v4`,
-                     `armv8-a`) au lieu de `-march=native` -- un binaire à emporter ailleurs, et ce
-                     que le catalogue des wheels bâtit, une variante par niveau (`cpu_variant()`
-                     dit lequel la machine présente peut charger). `SDOT_NO_MARCH_NATIVE=1` :
-                     le x86-64 de base.
-  * `LOOM_LINEINFO=1`     : `-g`, pour qu'un profileur / sanitizer nomme la ligne.
-  * `LOOM_BOUNDS_CHECK=1` : arme la vérification de bornes de `TensorView::squeeze` (voir
-                            `common_macros.h`). Un test par accès, réservé au diagnostic.
+Environment settings, shared:
+  * `LOOM_CXX`     : the host compiler (otherwise `CXX`, otherwise `c++` / `clang++` / `g++` on PATH).
+  * `SDOT_CXXFLAGS`: extra flags, split into words -- the escape hatch to try a setting
+                     without touching the code. They enter the signature.
+  * `SDOT_CPU_VARIANT` : compile for a named architecture LEVEL (`x86-64-v2` / `v3` / `v4`,
+                     `armv8-a`) instead of `-march=native` -- a binary to take elsewhere, and what
+                     the wheel catalogue builds, one variant per level (`cpu_variant()`
+                     says which one the present machine can load). `SDOT_NO_MARCH_NATIVE=1`:
+                     baseline x86-64.
+  * `LOOM_LINEINFO=1`     : `-g`, so that a profiler / sanitizer names the line.
+  * `LOOM_BOUNDS_CHECK=1` : arms the bounds check of `TensorView::squeeze` (see
+                            `common_macros.h`). One test per access, reserved for diagnosis.
 """
 from pathlib import Path
 import platform
@@ -35,13 +35,71 @@ from .. import env
 
 
 def env_cxxflags() -> list:
-    """`SDOT_CXXFLAGS`, découpé en mots."""
+    """`SDOT_CXXFLAGS`, split into words."""
     return shlex.split( env.var( "CXXFLAGS", "" ) )
 
 
+# ── macOS: an SDK the linker can read ────────────────────────────────────────────────────────────
+# The default SDK ( `xcrun --show-sdk-path` ) can be newer than the installed `ld`: its `.tbd`s
+# name an architecture this `ld` does not know ( `tapi error: ... unknown architecture` ), and
+# nothing links any more -- not even an `int main(){}`. Older SDKs, on the other hand, work. It is not
+# loom's job to repair the machine ( `xcode-select`, updating the tools ), but it can take note of
+# it: try an empty program ONCE, and failing that the most recent SDK that links. Nothing
+# happens when the user chose for themselves ( `SDKROOT`, or an `-isysroot` in `SDOT_CXXFLAGS` ).
+
+_sysroot_flags_cache = {}
+
+
+def _links( cxx: str, sysroot: str | None ) -> bool:
+    """An empty program, compiled AND linked with `cxx` ( on this sysroot, or the default one )."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        cmd = [ cxx, "-x", "c++", "-", "-o", str( Path( tmp ) / "probe" ), *( [ "-isysroot", sysroot ] if sysroot else [] ) ]
+        try:
+            return subprocess.run( cmd, input = b"int main() { return 0; }\n", capture_output = True, timeout = 60 ).returncode == 0
+        except ( OSError, subprocess.SubprocessError ):
+            return False
+
+
+def _sdk_candidates() -> list:
+    """The machine's macOS SDKs, from most recent to oldest ( excluding the versionless alias, which
+    the default already is )."""
+    import re, subprocess
+    roots = [ Path( "/Library/Developer/CommandLineTools/SDKs" ) ]
+    try:
+        dev = subprocess.run( [ "xcode-select", "-p" ], capture_output = True, text = True, timeout = 10 ).stdout.strip()
+        if dev:
+            roots.append( Path( dev ) / "Platforms/MacOSX.platform/Developer/SDKs" )
+    except ( OSError, subprocess.SubprocessError ):
+        pass
+    found = {}
+    for root in roots:
+        for p in root.glob( "MacOSX*.sdk" ):
+            m = re.fullmatch( r"MacOSX(\d+(?:\.\d+)*)\.sdk", p.name )
+            if m:
+                found.setdefault( tuple( int( x ) for x in m.group( 1 ).split( "." ) ), str( p ) )
+    return [ found[ v ] for v in sorted( found, reverse = True ) ]
+
+
+def sysroot_flags( cxx: str | None ) -> list:
+    """`[ "-isysroot", sdk ]` when the default SDK does not link and another one does, otherwise `[]`."""
+    if sys.platform != "darwin" or cxx is None:
+        return []
+    if os.environ.get( "SDKROOT" ) or any( f.startswith( ( "-isysroot", "--sysroot" ) ) for f in env_cxxflags() ):
+        return []
+    if cxx not in _sysroot_flags_cache:
+        flags = []
+        if not _links( cxx, None ):
+            sdk = next( ( s for s in _sdk_candidates() if _links( cxx, s ) ), None )
+            if sdk is not None:
+                flags = [ "-isysroot", sdk ]
+        _sysroot_flags_cache[ cxx ] = flags
+    return _sysroot_flags_cache[ cxx ]
+
+
 def cpu_model() -> str:
-    """Le processeur, tel que `-march=native` le voit -- ce qui doit entrer dans le nom d'un `.so`
-    compilé pour lui. `/proc/cpuinfo` sur Linux, `platform` ailleurs."""
+    """The processor, as `-march=native` sees it -- what must enter the name of a `.so`
+    compiled for it. `/proc/cpuinfo` on Linux, `platform` elsewhere."""
     try:
         with open( "/proc/cpuinfo" ) as f:
             for line in f:
@@ -52,8 +110,8 @@ def cpu_model() -> str:
     return platform.processor() or platform.machine()
 
 
-# les niveaux d'architecture, du plus riche au plus pauvre, et ce que chacun exige : le catalogue
-# d'un wheel en bâtit une variante par niveau, l'import charge le plus riche que la machine porte
+# the architecture levels, from richest to poorest, and what each requires: a wheel's catalogue
+# builds one variant per level, the import loads the richest one the machine supports
 X86_LEVELS = (
     ( "x86-64-v4", ( "AVX512F", "AVX512BW", "AVX512CD", "AVX512DQ", "AVX512VL" ) ),
     ( "x86-64-v3", ( "AVX2", "FMA3", "BMI2", "F16C", "LZCNT", "MOVBE" ) ),
@@ -62,9 +120,9 @@ X86_LEVELS = (
 
 
 def cpu_variant() -> str:
-    """Le niveau d'architecture le plus riche que cette machine porte (`x86-64-v3`, `armv8-a`...) :
-    la clé sous laquelle un catalogue précompilé range ses variantes. numpy sait lire le CPU
-    (`__cpu_features__`) ; à défaut, `/proc/cpuinfo`."""
+    """The richest architecture level this machine supports (`x86-64-v3`, `armv8-a`...):
+    the key under which a precompiled catalogue files its variants. numpy can read the CPU
+    (`__cpu_features__`); failing that, `/proc/cpuinfo`."""
     machine = platform.machine().lower()
     if machine in ( "aarch64", "arm64" ):
         return "armv8-a"
@@ -92,7 +150,7 @@ def cpu_variant() -> str:
 
 
 def find_host_cxx() -> str | None:
-    """Le compilateur C++ hôte : `LOOM_CXX`, puis `CXX`, puis les noms usuels sur PATH."""
+    """The host C++ compiler: `LOOM_CXX`, then `CXX`, then the usual names on PATH."""
     for var in ( "LOOM_CXX", "SDOT_CXX", "CXX" ):
         cxx = os.getenv( var )
         if cxx and ( shutil.which( cxx ) or Path( cxx ).is_file() ):
@@ -104,7 +162,7 @@ def find_host_cxx() -> str | None:
 
 
 class Compiler:
-    """Le contrat. Une instance par device, obtenue par `Device.compiler`."""
+    """The contract. One instance per device, obtained through `Device.compiler`."""
 
     name = "compiler"
 
@@ -116,25 +174,25 @@ class Compiler:
         raise NotImplementedError
 
     def commands( self ) -> dict:
-        """nom -> ( GABARIT d'argv, a un depfile, description ). Attendus : une entrée par sorte de
-        source (`rule_for`), plus `link_shared` et `link_executable`.
+        """name -> ( argv TEMPLATE, has a depfile, description ). Expected: one entry per kind of
+        source (`rule_for`), plus `link_shared` and `link_executable`.
 
-        Un gabarit est une LISTE d'arguments, pas une ligne de shell, et ses trous sont nommés :
-        `{in}`, `{out}`, `{depfile}`, `{includes}`, `{defines}`, `{extra}` pour une compilation ;
-        `{in}`, `{out}`, `{libs}`, `{soname}` pour une liaison.
+        A template is a LIST of arguments, not a shell line, and its holes are named:
+        `{in}`, `{out}`, `{depfile}`, `{includes}`, `{defines}`, `{extra}` for a compilation;
+        `{in}`, `{out}`, `{libs}`, `{soname}` for a link.
 
-        C'est ce qui sépare LES FLAGS ( ici, la connaissance du compilateur ) de LA SYNTAXE ( là où
-        la commande est rendue ). Le même gabarit se rend en règle ninja, s'exécute directement, ou
-        s'écrit dans un `compile_commands.json` -- sans que cette couche sache laquelle."""
+        This is what separates THE FLAGS ( here, the compiler's knowledge ) from THE SYNTAX ( where
+        the command is rendered ). The same template renders as a ninja rule, runs directly, or
+        is written into a `compile_commands.json` -- without this layer knowing which."""
         raise NotImplementedError
 
     def rule_for( self, src: Path ) -> str:
-        """La règle qui compile cette source (par extension : `.cpp` -> le compilateur hôte,
+        """The rule that compiles this source (by extension: `.cpp` -> the host compiler,
         `.cu` -> nvcc)."""
         raise NotImplementedError
 
     def link_libraries( self, libraries: list ) -> str:
-        """Les flags pour lier ces bibliothèques partagées (chemins), rpath compris."""
+        """The flags to link these shared libraries (paths), rpath included."""
         raise NotImplementedError
 
     def soname_flags( self, out: Path ) -> str:
@@ -147,34 +205,34 @@ class Compiler:
         return f"lib{ name }.dylib" if sys.platform == "darwin" else f"lib{ name }.so"
 
     def describe( self ) -> list:
-        """Lignes (`nom`, `valeur`) pour `sdot-toolchain`."""
+        """Lines (`name`, `value`) for `sdot-toolchain`."""
         raise NotImplementedError
 
 
 class HostCxx( Compiler ):
-    """Le compilateur hôte, tel quel : ce que le CPU utilise.
+    """The host compiler, as is: what the CPU uses.
 
-    `-O3 -march=native` par défaut. Ce n'était PAS le cas tant que le clip était scalaire : mesuré,
-    `-march=native` ne rendait rien (voir `notes/2026-09-02-perf-2d-lmo.md`), et il figeait
-    l'architecture de la machine dans un `.so` que le cache nommait d'après le seul `.cpp` généré.
-    Le noyau à registres de `sdot/cell/Moteur2Reg.h` change la donne : écrit en asimd, il tient
-    huit sommets dans un registre AVX2 et se DÉCOUPE en deux `xmm` SSE2 sans ce flag -- mesuré,
-    1e6 germes 2D sur le même Xeon : 1.00 s en x86-64 de base, 0.33 s avec `-march=native`. Le
-    piège du cache est levé autrement : le nom du `.so` porte les flags ET le modèle de processeur
+    `-O3 -march=native` by default. This was NOT the case as long as the clip was scalar: measured,
+    `-march=native` gained nothing (see `notes/2026-09-02-perf-2d-lmo.md`), and it froze the
+    machine's architecture into a `.so` that the cache named after the generated `.cpp` alone.
+    The register kernel of `sdot/cell/Engine2Reg.h` changes the picture: written in asimd, it holds
+    eight vertices in an AVX2 register and gets SPLIT into two SSE2 `xmm` without this flag -- measured,
+    1e6 2D seeds on the same Xeon: 1.00 s on baseline x86-64, 0.33 s with `-march=native`. The
+    cache trap is removed another way: the `.so` name carries the flags AND the processor model
     (`build_signature`).
 
-    `-fvisibility=hidden` : une bibliothèque générée n'exporte que son point d'entrée (déclaré
-    `visibility( "default" )` par le source généré) -- mesuré, le `.so` d'un noyau passe de 5.5 Mo
-    à 0.3 Mo, et rien de ses milliers d'instanciations de templates n'est visible d'une autre.
+    `-fvisibility=hidden`: a generated library exports only its entry point (declared
+    `visibility( "default" )` by the generated source) -- measured, a kernel's `.so` goes from 5.5 MB
+    to 0.3 MB, and none of its thousands of template instantiations is visible from another.
 
-    `SDOT_CXXFLAGS` qui nomme déjà un `-march=` / `-mcpu=` l'emporte.
+    An `SDOT_CXXFLAGS` that already names a `-march=` / `-mcpu=` takes precedence.
     """
 
     name = "host c++"
 
     def __init__( self, cxx: str | None = None, variant: str | None = None ):
         self.cxx = cxx or find_host_cxx()
-        # `None` = cette machine (`-march=native`) ; un niveau nommé = un binaire portable
+        # `None` = this machine (`-march=native`); a named level = a portable binary
         self.variant = variant or env.var( "CPU_VARIANT" ) or None
 
     def is_available( self ) -> bool:
@@ -190,8 +248,8 @@ class HostCxx( Compiler ):
         return [ "-march=native" ]
 
     def opt_flags( self ) -> list:
-        # `-O3` vaut 4 % sur le corps du kernel (Xeon W-2145, 16 threads, FP64, 1e6 germes en 2D,
-        # leaf = 10 : 1.018 s en `-O2`, 0.979 s en `-O3`).
+        # `-O3` is worth 4 % on the kernel body (Xeon W-2145, 16 threads, FP64, 1e6 seeds in 2D,
+        # leaf = 10: 1.018 s with `-O2`, 0.979 s with `-O3`).
         return [ "-O3", "-fno-math-errno" ]
 
     def diagnostic_flags( self ) -> list:
@@ -204,7 +262,7 @@ class HostCxx( Compiler ):
 
     def flags( self ) -> list:
         return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
-                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *env_cxxflags() ]
+                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ), *env_cxxflags() ]
 
     @property
     def build_signature( self ) -> str:
@@ -216,20 +274,20 @@ class HostCxx( Compiler ):
 
     def _require( self ):
         if self.cxx is None:
-            raise RuntimeError( "loom : aucun compilateur C++ trouvé (LOOM_CXX, CXX, ou c++/clang++/g++ sur PATH)" )
+            raise RuntimeError( "loom: no C++ compiler found (LOOM_CXX, CXX, or c++/clang++/g++ on PATH)" )
 
     def commands( self ):
         self._require()
-        # ELF : lier chaque référence INTERNE à la définition locale -- pas de PLT pour les appels
-        # d'une bibliothèque générée à ses propres instanciations de templates.
+        # ELF: bind each INTERNAL reference to the local definition -- no PLT for the calls
+        # of a generated library to its own template instantiations.
         bsymbolic = [] if sys.platform == "darwin" else [ "-Wl,-Bsymbolic" ]
         return {
             "cxx":             ( [ self.cxx, *self.flags(), "{includes}", "{defines}", "{extra}",
                                    "-MMD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
                                  True, "c++ $in $defines" ),
-            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *bsymbolic, "{soname}",
+            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *sysroot_flags( self.cxx ), *bsymbolic, "{soname}",
                                    "-o", "{out}", "{in}", "{libs}" ], False, "link $out" ),
-            "link_executable": ( [ self.cxx, "-pthread", "-o", "{out}", "{in}", "{libs}" ],
+            "link_executable": ( [ self.cxx, "-pthread", *sysroot_flags( self.cxx ), "-o", "{out}", "{in}", "{libs}" ],
                                  False, "link $out" ),
         }
 
@@ -237,7 +295,7 @@ class HostCxx( Compiler ):
         return "cxx"
 
     def source_suffix( self ) -> str:
-        """L'extension d'un source généré pour ce compilateur (`.cu` sous nvcc)."""
+        """The extension of a source generated for this compiler (`.cu` under nvcc)."""
         return ".cpp"
 
     def link_libraries( self, libraries ):
@@ -255,14 +313,14 @@ class HostCxx( Compiler ):
         return f"-Wl,-install_name,@rpath/{ Path( out ).name }" if sys.platform == "darwin" else ""
 
     def describe( self ):
-        return [ ( "c++ hôte", self.cxx or "introuvable" ), ( "flags", " ".join( self.flags() ) ),
-                 ( "variante", f"{ self.variant or 'native' } (la machine porte { cpu_variant() })" ) ]
+        return [ ( "host c++", self.cxx or "not found" ), ( "flags", " ".join( self.flags() ) ),
+                 ( "variant", f"{ self.variant or 'native' } (the machine supports { cpu_variant() })" ) ]
 
 
 def find_nvcc() -> str | None:
-    """`nvcc` : `SDOT_NVCC`, puis celui du paquet pip `nvidia-cuda-nvcc` (le même toolkit que le
-    plugin CUDA de Jax, et un compilateur sans rien installer sur la machine), puis
-    `/usr/local/cuda/bin`, puis PATH."""
+    """`nvcc`: `SDOT_NVCC`, then the one from the pip package `nvidia-cuda-nvcc` (the same toolkit as
+    Jax's CUDA plugin, and a compiler with nothing installed on the machine), then
+    `/usr/local/cuda/bin`, then PATH."""
     override = env.var( "NVCC" )
     if override and Path( override ).is_file():
         return override
@@ -278,17 +336,17 @@ def find_nvcc() -> str | None:
 
 
 class Nvcc( Compiler ):
-    """`nvcc` autour du compilateur hôte : ce que CUDA utilise. Une source `.cu` passe par nvcc
-    (le noyau, code hôte et device dans la même unité), une `.cpp` par le compilateur hôte tel
-    quel ; nvcc lie (il sait où est `libcudart`).
+    """`nvcc` around the host compiler: what CUDA uses. A `.cu` source goes through nvcc
+    (the kernel, host and device code in the same unit), a `.cpp` through the host compiler as
+    is; nvcc links (it knows where `libcudart` is).
 
-    `arch` est celle de la carte présente (`sm_75`), lue par `CudaGpu.sm_arch` : on compile pour
-    ELLE. Un binaire pour plusieurs architectures est l'affaire des wheels (étape 4).
+    `arch` is that of the present card (`sm_75`), read by `CudaGpu.sm_arch`: we compile for
+    IT. A binary for several architectures is the wheels' business (step 4).
 
-    `--expt-relaxed-constexpr` : les fonctions `constexpr` de la bibliothèque standard
-    (`std::min`, `std::forward`, `std::tuple`, ...) deviennent appelables du device -- ce que le
-    code des noyaux fait partout. `--extended-lambda` : un corps écrit à la main peut rester un
-    lambda, à condition de le marquer `[] HD ( ... )` (ce que loom génère, lui, est un foncteur).
+    `--expt-relaxed-constexpr`: the `constexpr` functions of the standard library
+    (`std::min`, `std::forward`, `std::tuple`, ...) become callable from the device -- which the
+    kernels' code does everywhere. `--extended-lambda`: a hand-written body can remain a
+    lambda, provided it is marked `[] HD ( ... )` (what loom generates, for its part, is a functor).
     """
 
     name = "nvcc"
@@ -305,16 +363,16 @@ class Nvcc( Compiler ):
         return ".cu"
 
     def flags( self ) -> list:
-        # les `-D` valent pour les deux passes (nvcc les prend directement) ; le reste des flags
-        # hôte va au compilateur hôte via `-Xcompiler`
+        # the `-D`s apply to both passes (nvcc takes them directly); the rest of the host flags
+        # goes to the host compiler via `-Xcompiler`
         host_flags = [ f for f in self.host.flags() if f not in ( "-std=c++20", "-pthread" ) and not f.startswith( "-D" ) ]
         defines    = [ f for f in self.host.flags() if f.startswith( "-D" ) ]
-        # `--Werror cross-execution-space-call` : appeler une fonction hôte depuis du code device est
-        # une ERREUR de compilation, pas un avertissement -- nvcc en fait sinon un piège qui se
-        # manifeste à l'exécution en « illegal memory access », loin de la ligne fautive
-        # une architecture : `-arch=sm_75` ; plusieurs (`SDOT_CUDA_ARCH=sm_70,sm_80,sm_90`, le
-        # catalogue) : un `-gencode` par architecture, plus le PTX de la plus haute pour ce qui
-        # viendra après
+        # `--Werror cross-execution-space-call`: calling a host function from device code is
+        # a compilation ERROR, not a warning -- otherwise nvcc makes it a trap that
+        # shows up at run time as an "illegal memory access", far from the faulty line
+        # one architecture: `-arch=sm_75`; several (`SDOT_CUDA_ARCH=sm_70,sm_80,sm_90`, the
+        # catalogue): one `-gencode` per architecture, plus the PTX of the highest for whatever
+        # comes after
         archs = [ a.strip() for a in self.arch.split( "," ) if a.strip() ]
         if len( archs ) == 1:
             arch_flags = [ f"-arch={ archs[ 0 ] }" ]
@@ -332,8 +390,8 @@ class Nvcc( Compiler ):
 
     def commands( self ):
         if not self.is_available():
-            raise RuntimeError( "loom : nvcc introuvable (pip install nvidia-cuda-nvcc-cu13, ou LOOM_NVCC=/chemin/nvcc)" )
-        # les `.cpp` gardent la commande hôte : un device CUDA compile les deux sortes de source
+            raise RuntimeError( "loom: nvcc not found (pip install nvidia-cuda-nvcc-cu13, or LOOM_NVCC=/path/nvcc)" )
+        # `.cpp` files keep the host command: a CUDA device compiles both kinds of source
         res = dict( self.host.commands() )
         bsymbolic = [] if sys.platform == "darwin" else [ "-Xlinker", "-Bsymbolic" ]
         ccbin = f"-ccbin={ self.host.cxx }"
@@ -350,11 +408,11 @@ class Nvcc( Compiler ):
         return "nvcc" if Path( src ).suffix == ".cu" else "cxx"
 
     def link_libraries( self, libraries ):
-        # nvcc ne connaît pas `-Wl,` : ce qui va à l'éditeur de liens passe par `-Xlinker`
+        # nvcc does not know `-Wl,`: what goes to the linker goes through `-Xlinker`
         return self.host.link_libraries( libraries ).replace( "-Wl,-rpath,", "-Xlinker -rpath -Xlinker " )
 
     def soname_flags( self, out ):
         return self.host.soname_flags( out ).replace( "-Wl,-install_name,", "-Xlinker -install_name -Xlinker " )
 
     def describe( self ):
-        return [ ( "nvcc", self.nvcc or "introuvable" ), ( "arch", self.arch ), *self.host.describe() ]
+        return [ ( "nvcc", self.nvcc or "not found" ), ( "arch", self.arch ), *self.host.describe() ]

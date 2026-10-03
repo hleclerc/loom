@@ -1,29 +1,29 @@
-"""Le CATALOGUE : des noyaux précompilés, livrés dans un wheel, pour qu'un usage standard n'ait
-rien à compiler.
+"""The CATALOGUE: precompiled kernels, shipped in a wheel, so that a standard use has
+nothing to compile.
 
-Trois temps :
+Three steps:
 
-  1. ENREGISTRER (`SDOT_CATALOGUE_RECORD=dir`) : sur une machine de développement, on lance ce
-     qui provoque les compilations voulues (les tests, `python -m sdot.catalogue`) ; chaque source
-     généré qui passe par `compile_and_register` est déposé dans `dir` avec ce qu'il faut pour le
-     recompiler ailleurs (le device, les sources de domaine, les en-têtes générés). Un GPU n'est
-     nécessaire qu'ici, pour EXÉCUTER les appels -- pas pour compiler.
+  1. RECORD (`SDOT_CATALOGUE_RECORD=dir`): on a development machine, run whatever
+     triggers the desired compilations (the tests, `python -m sdot.catalogue`); every generated
+     source that goes through `compile_and_register` is dropped into `dir` with what is needed to
+     recompile it elsewhere (the device, the domain sources, the generated headers). A GPU is
+     only needed here, to EXECUTE the calls -- not to compile.
 
-  2. COMPILER (`scripts/build_catalogue.py compile`) : pour une variante (`x86-64-v3`, ou une liste
-     d'architectures CUDA), chaque source enregistré devient un objet, tous sont liés en UNE
-     bibliothèque (`libsdot_kernels.so`, avec le runtime dedans) et `catalogue.json` dit quel
-     point d'entrée sert quelle clé. C'est ce que fait l'intégration continue, par plateforme.
+  2. COMPILE (`scripts/build_catalogue.py compile`): for a variant (`x86-64-v3`, or a list
+     of CUDA architectures), each recorded source becomes an object, all are linked into ONE
+     library (`libsdot_kernels.so`, with the runtime inside) and `catalogue.json` says which
+     entry point serves which key. This is what continuous integration does, per platform.
 
-  3. CHERCHER (à l'exécution) : la clé d'un noyau est le hachage de son source, de ses sources de
-     domaine et de l'ÉTIQUETTE du catalogue (`cpu-x86-64-v3`, `cuda`) -- rien de la machine ni du
-     compilateur, donc la même clé chez tout le monde. À l'import, le paquet enregistre son
-     répertoire de catalogues (`register_catalogue`) ; à l'appel, `lookup` essaie les étiquettes
-     que la machine peut charger, de la plus riche à la plus pauvre, et rend le point d'entrée.
-     Rien à parcourir, rien à valider : le wheel embarque en-têtes et catalogue bâtis ensemble.
+  3. LOOK UP (at execution time): a kernel's key is the hash of its source, of its domain
+     sources and of the catalogue's TAG (`cpu-x86-64-v3`, `cuda`) -- nothing of the machine or of the
+     compiler, so the same key for everyone. At import, the package registers its
+     catalogue directory (`register_catalogue`); at call time, `lookup` tries the tags
+     that the machine can load, from richest to poorest, and returns the entry point.
+     Nothing to walk, nothing to validate: the wheel embeds headers and catalogue built together.
 
-`SDOT_KERNELS` : `auto` (catalogue, sinon compiler -- le défaut), `catalogue` (jamais compiler :
-une absence est une erreur qui nomme le noyau), `atelier` (toujours compiler, ignorer le
-catalogue -- ce que fait un checkout de développement de toute façon, il n'a pas de catalogue).
+`SDOT_KERNELS`: `auto` (catalogue, otherwise compile -- the default), `catalogue` (never compile:
+an absence is an error that names the kernel), `compile` (always compile, ignore the
+catalogue -- which is what a development checkout does anyway, it has no catalogue).
 """
 from pathlib import Path
 import hashlib
@@ -34,23 +34,23 @@ import os
 from ..util.encode_base_62 import encode_base_62
 from .. import env
 
-# tags -> répertoire (contenant `catalogue.json` et la bibliothèque), dans l'ordre d'enregistrement
+# tags -> directory (containing `catalogue.json` and the library), in registration order
 _catalogues = {}
 _loaded_libs = {}
-_entries = {}  # tag -> dict( clé -> nom du point d'entrée )
+_entries = {}  # tag -> dict( key -> entry point name )
 
 
 def policy() -> str:
     v = env.var( "KERNELS", "auto" ).strip().lower()
-    if v not in ( "auto", "catalogue", "atelier" ):
-        raise ValueError( f"LOOM_KERNELS={ v !r} : attendu auto, catalogue ou atelier" )
+    if v not in ( "auto", "catalogue", "compile" ):
+        raise ValueError( f"LOOM_KERNELS={ v !r}: expected auto, catalogue or compile" )
     return v
 
 
 def key( source: str, sources, tag: str ) -> str:
-    """La clé d'un noyau dans le catalogue `tag` : source + sources de domaine (chemins tels que
-    donnés, relatifs aux racines C++) + étiquette. Sous une forme canonique, pour que le même
-    noyau ait la même clé à l'enregistrement, à la compilation et à l'appel."""
+    """A kernel's key in the catalogue `tag`: source + domain sources (paths as
+    given, relative to the C++ roots) + tag. In a canonical form, so that the same
+    kernel has the same key at recording, at compilation and at call time."""
     canon = json.dumps( [ [ str( p ), [ [ str( k ), str( v ) ] for k, v in d ] ] for p, d in sources ], sort_keys = True )
     h = hashlib.sha256( f"{ source }|{ canon }|{ tag }".encode() ).hexdigest()
     return encode_base_62( h )[ :24 ]
@@ -61,8 +61,8 @@ def entry_symbol( k: str ) -> str:
 
 
 def register_catalogue( root ):
-    """`root/<tag>/catalogue.json` + `root/<tag>/libsdot_kernels.<so|dylib>` pour chaque étiquette
-    présente. Appelé par le paquet qui livre le catalogue (`sdot/__init__.py`)."""
+    """`root/<tag>/catalogue.json` + `root/<tag>/libsdot_kernels.<so|dylib>` for each tag
+    present. Called by the package that ships the catalogue (`sdot/__init__.py`)."""
     root = Path( root )
     if not root.is_dir():
         return
@@ -86,15 +86,15 @@ def _library_of( tag ):
         d = _catalogues[ tag ]
         libs = [ p for p in d.iterdir() if p.name.startswith( "libsdot_kernels" ) ]
         if not libs:
-            raise RuntimeError( f"sdot: catalogue `{ tag }` sans bibliothèque dans { d }" )
+            raise RuntimeError( f"sdot: catalogue `{ tag }` has no library in { d }" )
         _loaded_libs[ tag ] = ctypes.CDLL( str( libs[ 0 ] ) )
     return _loaded_libs[ tag ]
 
 
 def lookup( source: str, sources, device ):
-    """`( bibliothèque, point d'entrée )` du noyau précompilé qui sert ce source sur ce device, ou
-    None. Les étiquettes sont essayées de la plus riche à la plus pauvre (`device.catalogue_tags`)."""
-    if policy() == "atelier" or not _catalogues:
+    """`( library, entry point )` of the precompiled kernel that serves this source on this device, or
+    None. Tags are tried from richest to poorest (`device.catalogue_tags`)."""
+    if policy() == "compile" or not _catalogues:
         return None
     for tag in device.catalogue_tags():
         if tag not in _catalogues:
@@ -107,12 +107,12 @@ def lookup( source: str, sources, device ):
     return None
 
 
-# ── enregistrement ───────────────────────────────────────────────────────────
+# ── recording ───────────────────────────────────────────────────────────────
 
 def record( source: str, sources, device ):
-    """Dépose ce source dans `SDOT_CATALOGUE_RECORD` (si mis), avec ce qu'il faut pour le
-    recompiler ailleurs : `<h>.<cpp|cu>`, `<h>.json` (device, sources de domaine), et les en-têtes
-    générés du build courant (copiés en entier, ils sont petits et déterministes)."""
+    """Drops this source into `SDOT_CATALOGUE_RECORD` (if set), with what is needed to
+    recompile it elsewhere: `<h>.<cpp|cu>`, `<h>.json` (device, domain sources), and the
+    generated headers of the current build (copied whole, they are small and deterministic)."""
     root = env.var( "CATALOGUE_RECORD" )
     if not root:
         return
@@ -128,7 +128,7 @@ def record( source: str, sources, device ):
     if not src.exists():
         src.write_text( source )
         ( root / f"{ h }.json" ).write_text( json.dumps( { "sources": [ list( s ) for s in sources ] }, indent = 1 ) )
-    # les en-têtes générés : la même arborescence, fusionnée (write-if-changed, comme à l'origine)
+    # the generated headers: the same tree, merged (write-if-changed, as originally)
     gen_src = include_root()
     gen_dst = Path( env.var( "CATALOGUE_RECORD" ) ) / "include"
     for p in gen_src.rglob( "*.h" ):
@@ -138,17 +138,17 @@ def record( source: str, sources, device ):
             shutil.copyfile( p, q )
 
 
-# ── compilation d'un catalogue ───────────────────────────────────────────────
+# ── compiling a catalogue ───────────────────────────────────────────────────
 
 def build( record_root, out_root, device, tag: str ):
-    """Compile tout ce qui est enregistré pour ce genre de device (`record_root/<cpu|cuda>`) avec
-    le compilateur de `device` (sa variante / ses architectures), lie le tout -- runtime compris --
-    en `out_root/<tag>/libsdot_kernels.so`, et écrit `catalogue.json`. Rend le nombre de noyaux."""
+    """Compiles everything recorded for this kind of device (`record_root/<cpu|cuda>`) with
+    `device`'s compiler (its variant / its architectures), links the whole -- runtime included --
+    into `out_root/<tag>/libsdot_kernels.so`, and writes `catalogue.json`. Returns the number of kernels."""
     from .build import Build, runtime_sources
     from ..drivers.JaxFfi import ffi_include_dir, _resolve_source
     from . import build_dir
 
-    record_root = Path( record_root ).resolve()  # ninja tourne depuis le répertoire de build
+    record_root = Path( record_root ).resolve()  # ninja runs from the build directory
     kind_root = record_root / device.catalogue_kind()
     out = Path( out_root ).resolve() / tag
     out.mkdir( parents = True, exist_ok = True )

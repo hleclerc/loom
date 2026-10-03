@@ -44,27 +44,27 @@ class Parametrized:
         except ( TypeError, ValueError ):
             declared = set()
 
-        # UNE FABRIQUE QUI DÉCLARE `**kwargs` DIT QU'ELLE PREND DES NOMS ARBITRAIRES, et la règle
-        # ci-dessus s'inverse alors : ce qui n'est pas un kwarg de TEMPLATE lui revient. Sans ça,
-        # `RealTensor[ n, n ].expr( "...", c = centre )` envoyait `c` dans les template kwargs, où
-        # il était ignoré -- et le C++ engendré ne compilait pas, faute de `c`. Les kwargs de
-        # template sont une liste FERMÉE ( ce que `Tensor.__init__` et `_declared_dtype` lisent ),
-        # donc on peut la nommer ici sans risquer d'en oublier un en silence.
-        prend_tout = any( p.kind == inspect.Parameter.VAR_KEYWORD
+        # A FACTORY THAT DECLARES `**kwargs` SAYS IT TAKES ARBITRARY NAMES, and the rule
+        # above then flips: whatever is not a TEMPLATE kwarg goes to it. Without this,
+        # `RealTensor[ n, n ].expr( "...", c = centre )` sent `c` into the template kwargs, where
+        # it was ignored -- and the generated C++ did not compile, for lack of `c`. The template
+        # kwargs are a CLOSED list ( what `Tensor.__init__` and `_declared_dtype` read ),
+        # so we can name it here without risking silently forgetting one.
+        takes_all = any( p.kind == inspect.Parameter.VAR_KEYWORD
                           for p in inspect.signature( attr ).parameters.values() ) if declared else False
 
-        def pour_la_fabrique( k ):
-            return k in declared or ( prend_tout and k not in _TEMPLATE_KWARGS )
+        def for_the_factory( k ):
+            return k in declared or ( takes_all and k not in _TEMPLATE_KWARGS )
 
         def method( *args, scope = None, **kwargs ):
-            own = { k: v for k, v in kwargs.items() if pour_la_fabrique( k ) }
-            merged_kwargs = { **self.kwargs, **{ k: v for k, v in kwargs.items() if not pour_la_fabrique( k ) } }
+            own = { k: v for k, v in kwargs.items() if for_the_factory( k ) }
+            merged_kwargs = { **self.kwargs, **{ k: v for k, v in kwargs.items() if not for_the_factory( k ) } }
             return attr( *args, **own, template_args = self.args, template_kwargs = merged_kwargs, scope = scope )
         return method
 
 
-# LES KWARGS DE TEMPLATE, liste fermée : ce que `Tensor.__init__` et `_declared_dtype` lisent.
-# Tout le reste, sur une fabrique qui déclare `**kwargs`, appartient à la fabrique.
+# THE TEMPLATE KWARGS, closed list: what `Tensor.__init__` and `_declared_dtype` read.
+# Everything else, on a factory that declares `**kwargs`, belongs to the factory.
 _TEMPLATE_KWARGS = ( "dtype", "size", "device" )
 
 

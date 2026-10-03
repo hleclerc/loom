@@ -6,17 +6,17 @@ import re
 from .Affine import Affine, parse_terms
 
 
-# CE QU'UNE AFFINE SAIT LIRE, exactement : des termes `nb_truc`, `3 * nb_truc` ou `7`, séparés par
-# `+` / `-`. Tout le reste -- une parenthèse, une division, un produit de DEUX comptes -- est une
-# FORMULE, et prend l'autre chemin ( voir `_parse_expr` ).
+# WHAT AN AFFINE CAN READ, exactly: terms `nb_thing`, `3 * nb_thing` or `7`, separated by `+` / `-`.
+# Anything else -- a parenthesis, a division, a product of TWO counts -- is a FORMULA, and takes
+# the other path ( see `_parse_expr` ).
 #
-# Un test POSITIF de ce que `parse_terms` accepte, et pas une liste des caractères qui le fâchent :
-# c'est lui qui décide, donc c'est lui qu'on décrit. Une expression qu'il lirait de travers ( `x /
-# 2`, qu'il prendrait pour un nom ) part ainsi du bon côté au lieu d'échouer sur une résolution de
-# nom qui ne veut rien dire.
-_TERME_AFFINE = r"(?:\d+\s*\*\s*)?[A-Za-z_]\w*|\d+"
-_EST_AFFINE = re.compile( rf"^\s*[+-]?\s*(?:{ _TERME_AFFINE })"
-                          rf"(?:\s*[+-]\s*(?:{ _TERME_AFFINE }))*\s*$" )
+# A POSITIVE test of what `parse_terms` accepts, and not a list of the characters that upset it:
+# it is the one that decides, so it is the one we describe. An expression it would misread ( `x /
+# 2`, which it would take for a name ) thus goes down the right side instead of failing on a name
+# resolution that makes no sense.
+_AFFINE_TERM = r"(?:\d+\s*\*\s*)?[A-Za-z_]\w*|\d+"
+_IS_AFFINE = re.compile( rf"^\s*[+-]?\s*(?:{ _AFFINE_TERM })"
+                          rf"(?:\s*[+-]\s*(?:{ _AFFINE_TERM }))*\s*$" )
 
 
 def count_name_for( axis_name ):
@@ -226,10 +226,10 @@ class AbstractAxis( Attribute ):
         concatenate over a tensor's axes -- it needs no notion of how many `AxisList`s there are or
         how wide each unrolls. `index` is the axis' position, used only for the nameless fallback.
 
-        LE NOM PAR DEFAUT EST EXPLICITE ( `axis_0` et non `a0` ) : en C++ un nom d'axe nomme
-        L'AXE, et ce qui s'en derive le nomme aussi -- l'indice le long de l'axe `A` s'ecrit
-        `i_A`, son etendue `n_A` ( voir `Tensor.expr` ). `i_a0` ne disait rien ; `i_axis_0` dit
-        ce que c'est."""
+        THE DEFAULT NAME IS EXPLICIT ( `axis_0` and not `a0` ): in C++ an axis name names
+        THE AXIS, and whatever derives from it names it too -- the index along axis `A` is written
+        `i_A`, its extent `n_A` ( see `Tensor.expr` ). `i_a0` said nothing; `i_axis_0` says
+        what it is."""
         return [ self.name or f"axis_{ index }" ]
 
     @staticmethod
@@ -288,9 +288,9 @@ class AbstractAxis( Attribute ):
             self._add_symbol( ShapeVar( expr ), 1, scope )
             return
 
-        if not _EST_AFFINE.match( str( expr ) ):
-            # UNE FORMULE, pas une affine : `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]`. Elle se CALCULE
-            # au lieu de se résoudre, et c'est tout ce qui la distingue -- voir `ShapeVar.set_formula`.
+        if not _IS_AFFINE.match( str( expr ) ):
+            # A FORMULA, not an affine: `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]`. It is COMPUTED
+            # instead of resolved, and that is all that sets it apart -- see `ShapeVar.set_formula`.
             self._add_symbol( self._formula_shape_var( expr, scope ), 1, scope )
             return
 
@@ -300,23 +300,23 @@ class AbstractAxis( Attribute ):
             self._add_symbol( var_name, coeff, scope )
 
     def _formula_shape_var( self, expr, scope ):
-        """Le `ShapeVar` qu'une FORMULE se donne : un compte à part entière, dont la valeur est
-        calculée depuis d'autres comptes plutôt que prescrite ou déduite.
+        """The `ShapeVar` that a FORMULA gives itself: a full-fledged count, whose value is computed
+        from other counts rather than prescribed or deduced.
 
-        Un compte minté, et pas un simple décalage dans l'affine : c'est un compte qui se partage,
-        se lit et s'affiche comme les autres -- et une étendue qui ne dépend que de `CtShapeVar`s
-        doit en rester une, sans quoi elle sortirait du type C++ ( `Ct<SI, 3>` ) pour redevenir une
-        dimension d'exécution. D'où la classe choisie sur celle des symboles."""
+        A minted count, and not a mere offset in the affine: it is a count that can be shared,
+        read and displayed like the others -- and an extent that only depends on `CtShapeVar`s
+        must remain one, otherwise it would leave the C++ type ( `Ct<SI, 3>` ) and become a runtime
+        dimension again. Hence the class being chosen from that of the symbols."""
         from .CtShapeVar import CtShapeVar
         from .ShapeVar import ShapeVar
 
-        noms = sorted( set( re.findall( r"[A-Za-z_]\w*", str( expr ) ) ) )
-        symboles = { nom: resolve_attribute( nom, scope, ShapeVar ) for nom in noms }
+        names = sorted( set( re.findall( r"[A-Za-z_]\w*", str( expr ) ) ) )
+        symbols = { name: resolve_attribute( name, scope, ShapeVar ) for name in names }
 
-        cls = CtShapeVar if symboles and all( isinstance( s, CtShapeVar ) for s in symboles.values() ) else ShapeVar
+        cls = CtShapeVar if symbols and all( isinstance( s, CtShapeVar ) for s in symbols.values() ) else ShapeVar
         res = cls()
         res.name = str( expr ).replace( " ", "" )
-        res.set_formula( expr, symboles )
+        res.set_formula( expr, symbols )
         return res
 
     def _add_symbol( self, var, coeff, scope ):

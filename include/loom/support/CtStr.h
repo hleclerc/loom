@@ -6,9 +6,9 @@
 
 namespace sdot {
 
-/// Chaîne constante utilisable comme paramètre template (NTTP « fixed-string », C++20).
-/// `FixedStr` est un type structurel -> deux valeurs distinctes donnent des spécialisations
-/// distinctes (c'est ce qui rend `CtStr<"x">` et `CtStr<"y">` différents).
+/// Constant string usable as a template parameter (NTTP "fixed-string", C++20).
+/// `FixedStr` is a structural type -> two distinct values give distinct
+/// specializations (this is what makes `CtStr<"x">` and `CtStr<"y">` different).
 template<std::size_t N>
 struct FixedStr {
     char data[ N ] {};
@@ -17,10 +17,10 @@ struct FixedStr {
 
        constexpr bool operator==( const FixedStr & ) const = default;
 
-    static constexpr std::size_t size = N; ///< inclut le '\0' final
+    static constexpr std::size_t size = N; ///< includes the trailing '\0'
 };
 
-/// Tag de chaîne connue à la compilation : `CtStr<"x">`, `CtStr<"">` -> types distincts.
+/// Tag of a string known at compile time: `CtStr<"x">`, `CtStr<"">` -> distinct types.
 template<FixedStr S>
 struct CtStr {
     static constexpr auto str = S;

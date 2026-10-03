@@ -21,31 +21,31 @@
 
 namespace sdot {
 
-/// Le contexte d'exécution CPU : la file de threads du processus (`cpu_thread_pool()`, dans la
-/// bibliothèque runtime), et les deux formes de lancement qu'un kernel peut demander
+/// The CPU execution context: the process's thread queue (`cpu_thread_pool()`, in the
+/// runtime library), and the two launch forms a kernel can ask for
 /// (`submit_kernel`, `submit_kernel_grouped`).
 ///
-/// C'est ICI que vit ce qui est propre au CPU -- la boucle sur les items, la répartition entre
-/// fils, les réductions par fil. `run_parallel` ne sait rien du device : il pèle les catégories
-/// d'entrée/sortie, rend les arguments disponibles, et appelle `submit_kernel( queue, ... )` --
-/// une surcharge par type de queue, trouvée par ADL. Ajouter un device = écrire sa queue et ses
-/// deux `submit_kernel`, pas un `if` dans `run_parallel`.
+/// This is WHERE everything CPU-specific lives -- the loop over items, the split between
+/// threads, the per-thread reductions. `run_parallel` knows nothing about the device: it peels the
+/// input/output categories, makes the arguments available, and calls `submit_kernel( queue, ... )` --
+/// one overload per queue type, found by ADL. Adding a device = writing its queue and its
+/// two `submit_kernel`, not an `if` in `run_parallel`.
 ///
-/// Chaque « fil virtuel » `t` de `[ 0, nb_threads )` traite une tranche CONTIGUË des items
-/// (`[ t n / T, ( t + 1 ) n / T )`), voir `CpuThreadPool`. Le contrat du corps ne change pas :
-/// `thread_index` est unique et STABLE pour tout ce qu'un fil traite (une ligne de scratch par
-/// fil), et `nb_threads` est leur compte.
+/// Each "virtual thread" `t` of `[ 0, nb_threads )` handles a CONTIGUOUS slice of the items
+/// (`[ t n / T, ( t + 1 ) n / T )`), see `CpuThreadPool`. The body's contract does not change:
+/// `thread_index` is unique and STABLE for everything a thread handles (one scratch row per
+/// thread), and `nb_threads` is their count.
 ///
-// ── la forme libre, declaree ailleurs ─────────────────────────────────────────────────────
-/// déclarée par `run_parallel.h` ( qui nous inclut ) : la forme LIBRE, que la méthode ci-dessous
-/// appelle. Redéclarée ici pour que la méthode puisse la nommer sans dépendre de l'ordre des
-/// inclusions.
+// ── the free form, declared elsewhere ──────────────────────────────────────────────────────
+/// declared by `run_parallel.h` ( which includes us ): the FREE form, which the method below
+/// calls. Redeclared here so that the method can name it without depending on the order of
+/// includes.
 auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest );
 
-/// Une poignée trivialement copiable, comme l'était la queue SYCL.
+/// A trivially copyable handle.
 struct CpuQueue {
-    /// zone mémoire par défaut vue par les kernels lancés sur cette queue (un contexte
-    /// d'exécution peut exposer plusieurs zones ; celle-ci est celle utilisée par défaut)
+    /// default memory area seen by kernels launched on this queue (an execution
+    /// context may expose several areas; this one is the default)
     using DefaultKernelMemorySpace = CpuKernelMemorySpace;
 
     CpuQueue() : pool( &cpu_thread_pool() ) {}
@@ -53,28 +53,28 @@ struct CpuQueue {
     void run_threads( int nb_threads, const std::function<void( int )> &job ) const { pool->run_threads( nb_threads, job ); }
     int  nb_workers () const { return pool->nb_workers(); }
 
-    /// ce qu'un noyau peut savoir de cette machine ( voir `Machine.h` ). Pas de voies, donc pas de
-    /// sub-group : tout est a 1, et le budget de memoire partagee est notionnel -- `CpuQueue` prend
-    /// un `std::vector` sur le tas, il n'y a pas de limite materielle a annoncer.
+    /// what a kernel can know about this machine ( see `Machine.h` ). No lanes, hence no
+    /// sub-group: everything is 1, and the shared-memory budget is notional -- `CpuQueue` takes
+    /// a `std::vector` on the heap, there is no hardware limit to announce.
     Machine machine() const {
         return { SI( pool->nb_workers() ), 1, cpu_notional_local_mem_bytes, 1 };
     }
 
 
-    /// LANCER : `queue.run_parallel( Foncteur(), domaine, args )`.
+    /// LAUNCH: `queue.run_parallel( Functor(), domain, args )`.
     ///
-    /// Trois choses, et pas une liste de paires ( io, valeur ) : `args` traverse en UN morceau, son
-    /// `kernel_form` engendré portant la politique d'io de chaque argument. Le foncteur reçoit donc
-    /// `( item, args )`, où `args` est la forme KERNEL -- mêmes données, sans la queue.
+    /// Three things, and not a list of ( io, value ) pairs: `args` goes through in ONE piece, its
+    /// generated `kernel_form` carrying each argument's io policy. The functor thus receives
+    /// `( item, args )`, where `args` is the KERNEL form -- same data, without the queue.
     ///
-    /// La forme libre `sdot::run_parallel( queue, domaine, func, io, valeur, ... )` reste là pour
-    /// qui veut une autre politique ou un sous-ensemble.
+    /// The free form `sdot::run_parallel( queue, domain, func, io, value, ... )` remains for
+    /// whoever wants another policy or a subset.
     auto run_parallel( auto &&func, auto &&items, auto &&args ) {
         return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ), MutList(), FORWARD( args ) );
     }
 
-    /// la meme, en passant UNE valeur de plus au foncteur -- typiquement `batch_axes`, dont le corps
-    /// a besoin pour isoler ses axes propres ( `coords.axes - batch_axes` ).
+    /// the same, passing ONE more value to the functor -- typically `batch_axes`, whose body
+    /// needs it to isolate its own axes ( `coords.axes - batch_axes` ).
     auto run_parallel( auto &&func, auto &&items, auto &&args, auto &&extra ) {
         return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ),
                                    MutList(), FORWARD( args ), InpList(), FORWARD( extra ) );
@@ -83,21 +83,21 @@ struct CpuQueue {
     CpuThreadPool *pool;
 };
 
-/// Coût de transfert (secondes par octet) pour rendre une zone source accessible depuis ce
-/// contexte d'exécution. Un contexte connaît les zones qu'il peut atteindre (l'inverse non),
-/// donc ces surcharges vivent près du contexte.
-///   CPU -> CPU : la donnée est déjà en RAM hôte, rien à transférer.
+/// Transfer cost (seconds per byte) to make a source area accessible from this
+/// execution context. A context knows the areas it can reach (not the reverse),
+/// so these overloads live next to the context.
+///   CPU -> CPU: the data is already in host RAM, nothing to transfer.
 constexpr auto transfer_cost_per_byte( const CpuQueue &, CpuHostMemorySpace ) { return Ct<double,0.0>(); }
 
 namespace detail::CpuQueueLaunch {
-    /// appel du corps pour un item, avec ou sans les infos de fil selon ce que `func` accepte
-    /// (les corps générés par `FfiCode.per_item` les prennent ; `TensorView::fill_with` non).
+    /// call of the body for an item, with or without the thread info depending on what `func` accepts
+    /// (bodies generated by `FfiCode.per_item` take them; `TensorView::fill_with` does not).
     ///
-    /// `flat_index` EST LE RANG PLAT DE L'ITEM dans le domaine parcouru -- « qui suis-je ? ». Il
-    /// était déjà là, dans la variable de boucle ; il ne traversait simplement pas. Faute de
-    /// quoi chaque noyau qui en avait besoin se fabriquait un agrégat-prétexte portant un
-    /// `iota` ( `examples/splats::Rangs`, et le même dans `examples/diffusion` avant lui ) --
-    /// un tenseur entier de plus, écrit et lu, pour un nombre que la boucle connaissait.
+    /// `flat_index` IS THE FLAT RANK OF THE ITEM in the traversed domain -- "who am I?". It
+    /// was already there, in the loop variable; it simply did not get passed through. Failing
+    /// that, every kernel that needed it built a pretext aggregate carrying an
+    /// `iota` ( `examples/splats::Rangs`, and the same in `examples/diffusion` before it ) --
+    /// an entire extra tensor, written and read, for a number the loop already knew.
     void call( auto &&func, auto &&item, SI flat_index, int thread_index, int nb_threads, auto &...reducers_and_args ) {
         if constexpr ( requires { func( item, flat_index, thread_index, nb_threads, reducers_and_args... ); } )
             func( item, flat_index, thread_index, nb_threads, reducers_and_args... );
@@ -107,8 +107,8 @@ namespace detail::CpuQueueLaunch {
             func( item, reducers_and_args... );
     }
 
-    /// le pendant coopératif de `call` : le rang plat s'y ajoute de la même façon, et un foncteur
-    /// qui ne le prend pas continue de marcher.
+    /// the cooperative counterpart of `call`: the flat rank is added the same way, and a functor
+    /// that does not take it keeps working.
     HD_INLINE void call_grouped( auto &&func, auto &&item, SI flat_index, auto &&...rest ) {
         if constexpr ( requires { func( item, flat_index, rest... ); } )
             func( item, flat_index, rest... );
@@ -116,18 +116,18 @@ namespace detail::CpuQueueLaunch {
             func( item, rest... );
     }
 
-    /// une ligne de réduction par fil virtuel, initialisée à l'identité
+    /// one reduction row per virtual thread, initialized to the identity
     template<class Op,class T>
     auto partials_for( const ReductionTarget<Op,T> &target, int nb_threads ) {
         return std::vector<Reducer<Op,T>>( nb_threads, Reducer<Op,T>{ target.op, Reducer<Op,T>::identity( target.op ) } );
     }
 }
 
-/// Lancement plat : `nb_threads` fils virtuels, chacun sa tranche d'items. `reduction_targets`
-/// est un `std::tuple` de `ReductionTarget` (op + pointeur hôte), pelés par `run_parallel` en
-/// tête des arguments ; chaque fil accumule dans son propre `Reducer`, combinés à la fin.
-/// Synchrone (la file rend la main quand tout est fait) : l'événement rendu est déjà complet.
-/// Les dépendances `deps` sont attendues avant de commencer (gratuit si elles le sont déjà).
+/// Flat launch: `nb_threads` virtual threads, each with its slice of items. `reduction_targets`
+/// is a `std::tuple` of `ReductionTarget` (op + host pointer), peeled by `run_parallel` off the
+/// head of the arguments; each thread accumulates in its own `Reducer`, combined at the end.
+/// Synchronous (the queue returns once everything is done): the returned event is already complete.
+/// The `deps` dependencies are awaited before starting (free if they already are done).
 auto submit_kernel( const CpuQueue &queue, const auto &deps, auto &&func, auto &&item_list,
                     int nb_items, int nb_threads, auto reduction_targets, auto &&...args ) {
     deps.wait_all();
@@ -140,7 +140,7 @@ auto submit_kernel( const CpuQueue &queue, const auto &deps, auto &&func, auto &
                 for ( int index = b; index < e; ++index )
                     detail::CpuQueueLaunch::call( func, item_list[ index ], SI( index ), t, nb_threads, vecs[ t ]..., args... );
             } );
-            // combinaison des lignes dans la cible hôte
+            // combining the rows into the host target
             ( [&]( auto &target, auto &vec ) {
                 for ( auto &r : vec )
                     *target.host = target.op( *target.host, r.value );
@@ -150,19 +150,19 @@ auto submit_kernel( const CpuQueue &queue, const auto &deps, auto &&func, auto &
     }, reduction_targets );
 }
 
-/// Lancement coopératif : un GROUPE de `group_size` voies par item concurrent (`nb_groups` groupes
-/// en vol), qui partagent `local_scratch` (`local_elems` mots `int32`) et se synchronisent par
+/// Cooperative launch: a GROUP of `group_size` lanes per concurrent item (`nb_groups` groups
+/// in flight), which share `local_scratch` (`local_elems` `int32` words) and synchronize through
 /// `group_barrier( group )`.
 ///
-/// `group_size == 1` (la production sur CPU, voir `Cpu.group_size` côté python) se réduit au
-/// lancement plat : une voie, pas de barrière, un scratch par fil. Au-delà, chaque groupe est
-/// `group_size` fils système autour d'un `std::barrier` -- correct, pas rapide : c'est le chemin
-/// qui fait tourner sur CPU un kernel écrit pour les groupes d'un GPU, à fins de test.
+/// `group_size == 1` (production on CPU, see `Cpu.group_size` on the python side) reduces to the
+/// flat launch: one lane, no barrier, one scratch per thread. Beyond that, each group is
+/// `group_size` system threads around a `std::barrier` -- correct, not fast: it is the path
+/// that runs on CPU a kernel written for GPU groups, for testing purposes.
 auto submit_kernel_grouped( const CpuQueue &queue, const auto &deps, auto &&func, auto &&item_list,
                             int nb_items, int nb_groups, int group_size, int local_elems, auto reduction_targets, auto &&...args ) {
     deps.wait_all();
     static_assert( std::tuple_size_v<DECAYED_TYPE_OF( reduction_targets )> == 0,
-                   "les réductions ne sont pas supportées dans un kernel de groupe" );
+                   "reductions are not supported in a group kernel" );
     const int scratch_stride = std::max( local_elems, 1 );
     std::vector<std::int32_t> scratch( std::size_t( scratch_stride ) * std::size_t( nb_groups ) );
 
@@ -177,7 +177,7 @@ auto submit_kernel_grouped( const CpuQueue &queue, const auto &deps, auto &&func
         return QueueEvent{};
     }
 
-    // un groupe = `group_size` fils système et une barrière ; les groupes tournent en parallèle
+    // a group = `group_size` system threads and a barrier; the groups run in parallel
     std::vector<std::thread> lanes;
     lanes.reserve( std::size_t( nb_groups ) * group_size );
     std::vector<std::unique_ptr<std::barrier<>>> barriers;

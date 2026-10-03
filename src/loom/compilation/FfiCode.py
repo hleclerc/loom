@@ -2,108 +2,108 @@ from pathlib import Path
 
 
 class AbstractFfiCode:
-    """Le C++ qu'un appel exécute, derrière deux questions : `code_for( call_args_analysis )`, les
-    instructions à l'intérieur du handler, et `preamble_for( ... )`, ce qui doit exister au niveau
-    du namespace avant lui (un foncteur).
+    """The C++ that a call executes, behind two questions: `code_for( call_args_analysis )`, the
+    instructions inside the handler, and `preamble_for( ... )`, what must exist at namespace
+    level before it (a functor).
 
-    Il n'y a pas de direction dans ces deux questions : un BACKWARD est un noyau à part entière,
-    que l'appel obtient par `for_backward()` et lance ensuite comme n'importe quel forward. Le
-    reste du pipeline ne connaît donc qu'un seul sens."""
+    There is no direction in these two questions: a BACKWARD is a full-fledged kernel,
+    which the call obtains through `for_backward()` and then launches like any other forward. The
+    rest of the pipeline therefore only knows a single direction."""
 
     def code_for( self, call_args_analysis ) -> str:
         raise NotImplementedError
 
     def preamble_for( self, call_args_analysis ) -> str:
-        """C++ de niveau namespace émis avant le handler. Rien par défaut (un corps verbatim
-        apporte le sien)."""
+        """Namespace-level C++ emitted before the handler. Nothing by default (a verbatim body
+        brings its own)."""
         return ""
 
     @property
     def wants_allocator( self ) -> bool:
-        """Si le handler doit recevoir l'allocateur d'XLA (`Scratch`). Faux par défaut : c'est la
-        SOURCE qui est hachée pour nommer un noyau, donc lier ce contexte sans qu'on le demande
-        recompilerait tout le dépôt pour une capacité que personne n'utilise."""
+        """Whether the handler must receive XLA's allocator (`Scratch`). False by default: it is the
+        SOURCE that is hashed to name a kernel, so binding this context without being asked
+        would recompile the whole repository for a capability that nobody uses."""
         return False
 
     @property
     def is_handler( self ) -> bool:
-        """Si le corps EST le handler -- donc si c'est LUI qui lance. Faux par défaut."""
+        """Whether the body IS the handler -- i.e. whether IT is what launches. False by default."""
         return False
 
 
 class FfiCode( AbstractFfiCode ):
-    """UN NOYAU : le C++ que l'appel exécute, et ce qu'il faut pour le compiler.
+    """ONE KERNEL: the C++ that the call executes, and what is needed to compile it.
 
-    = Ce que loom écrit, et ce qu'il n'écrit pas
+    = What loom writes, and what it does not write
 
-    `code` est le corps DU HANDLER, recopié tel quel. Loom écrit tout ce qui l'entoure -- et c'est
-    tout ce qu'il a à écrire, parce que c'est là qu'est la douleur : l'enrobage FFI, la liaison des
-    tampons aux vues, la construction des agrégats, le semis des sorties, l'adjoint côté Jax. Les
-    interfaces de Jax et de Torch sont lourdes ET différentes ; c'est ça qu'on ne veut pas écrire
-    deux fois.
+    `code` is the body OF THE HANDLER, copied as is. Loom writes everything around it -- and that is
+    all it has to write, because that is where the pain is: the FFI wrapping, the binding of
+    buffers to views, the construction of aggregates, the seeding of outputs, the adjoint on the Jax side. The
+    Jax and Torch interfaces are heavy AND different; that is what we do not want to write
+    twice.
 
-    Dans le corps, loom met à disposition `queue` et les arguments de l'appel sous leurs noms
-    Python. Ce qu'on en fait ne le regarde pas :
+    In the body, loom makes `queue` and the call's arguments available under their Python
+    names. What you do with them is none of its business:
 
         FfiCode(
-            include_roots = [ ma_racine ],
-            includes = [ "diffusion/noyaux.h" ],
-            code = "diffusion::pas( queue, grille, coef, suivant );",
+            include_roots = [ my_root ],
+            includes = [ "diffusion/kernels.h" ],
+            code = "diffusion::step( queue, grid, coef, next );",
         )
 
-    Le parcours, le choix du parallélisme, la géométrie de lancement vivent alors dans NOTRE C++ --
-    un fichier ordinaire, qui se compile et se teste sans loom, et qu'on remplace par du Kokkos, du
-    SYCL, de l'OpenMP ou une simple boucle sans toucher à Python. `run_parallel` est l'outil que
-    loom propose, pas une obligation qu'il impose.
+    The traversal, the choice of parallelism, the launch geometry then live in OUR C++ --
+    an ordinary file, which compiles and is tested without loom, and which can be replaced by Kokkos,
+    OpenMP or a plain loop without touching Python. `run_parallel` is the tool that
+    loom offers, not an obligation that it imposes.
 
-    = Un noyau ne se contient pas lui-même
+    = A kernel does not contain itself
 
-    L'adjoint n'est pas un champ de l'aller : c'est un autre noyau, et c'est l'APPEL qui en prend
-    plusieurs.
+    The adjoint is not a field of the forward: it is another kernel, and it is the CALL that takes
+    several of them.
 
         driver.call(
-            FfiCode( code = "monpaquet::avant( queue, ... );" ),
-            FfiCode( code = "monpaquet::arriere( queue, ... );" ),   # optionnel
-            name = "un_pas",
+            FfiCode( code = "mypackage::forward( queue, ... );" ),
+            FfiCode( code = "mypackage::backward( queue, ... );" ),   # optional
+            name = "one_step",
             ... )
 
-    Il tourne sur d'autres tampons (les cotangentes), fait un autre travail, et n'a aucune raison de
-    vouloir la même géométrie que l'aller. Le NOM est sur l'appel : il identifie le couple, préfixe
-    la cible compilée et groupe le journal des compilations.
+    It runs on other buffers (the cotangents), does other work, and has no reason to
+    want the same geometry as the forward. The NAME is on the call: it identifies the pair, prefixes
+    the compiled target and groups the compilation journal.
 
-    = Où vit le C++
+    = Where the C++ lives
 
-    `include_roots` : les racines `-I` de CE noyau. Un noyau sait où sont ses en-têtes -- ça n'a pas
-    à être une incantation de module (`compilation.register_include_root`) prononcée avant tout le
-    reste et sans rapport visible avec lui.
+    `include_roots`: the `-I` roots of THIS kernel. A kernel knows where its headers are -- that should not
+    be a module incantation (`compilation.register_include_root`) pronounced before everything
+    else and with no visible relation to it.
 
-    `includes` : les en-têtes dont le corps a besoin, émis après ceux du runtime. `sources` : les
-    unités C++ qu'il LIE (`"sdot/x.cpp"` ou `( "sdot/x.cpp", { "DEF": "1" } )`), compilées une fois
-    par (source, defines, compilateur) et partagées par tous les noyaux qui les nomment.
+    `includes`: the headers that the body needs, emitted after those of the runtime. `sources`: the
+    C++ units that it LINKS (`"sdot/x.cpp"` or `( "sdot/x.cpp", { "DEF": "1" } )`), compiled once
+    per (source, defines, compiler) and shared by all the kernels that name them.
 
-    `prologue` : une instruction C++ émise avant le corps, dans la même portée. Vestige de l'époque
-    où le corps était par item et ne pouvait pas exprimer une pré-passe ; un corps qui est le
-    handler n'en a plus besoin.
+    `prologue`: a C++ statement emitted before the body, in the same scope. A relic of the time
+    when the body was per item and could not express a pre-pass; a body that is the
+    handler no longer needs it.
 
-    `allocator = True` fait lier l'allocateur d'XLA, donc `args.allocator.view<T>( n )` dans le corps : de la
-    mémoire dimensionnée à l'exécution, à une taille que seul le noyau connaît, sous `jit` comme en
-    eager. Voir `support/kernels/Scratch.h` et `tests/test_scratch_gpu.py`.
+    `allocator = True` makes it bind XLA's allocator, hence `args.allocator.view<T>( n )` in the body: memory
+    sized at execution time, at a size that only the kernel knows, under `jit` as in
+    eager. See `support/kernels/Scratch.h` and `tests/test_scratch_gpu.py`.
 
-    = LE SUCRE : un corps par item ( `FfiCode.per_item` )
+    = THE SUGAR: a body per item ( `FfiCode.per_item` )
 
-    Quand le parallélisme du noyau EST celui de l'appel -- un item par multi-indice de batch, ce
-    qu'un `vmap` fabrique -- loom peut écrire le foncteur ET son lancement, et le corps n'est plus
-    que ce qui se passe pour un item. Trois noms sont alors réservés : `batch_index`,
-    `flat_index`, `thread_index`, `nb_threads` (ou, en coopératif, `flat_index`, `group_index`,
+    When the kernel's parallelism IS that of the call -- one item per batch multi-index, what
+    a `vmap` produces -- loom can write the functor AND its launch, and the body is no longer
+    anything but what happens for one item. Three names are then reserved: `batch_index`,
+    `flat_index`, `thread_index`, `nb_threads` (or, in cooperative mode, `flat_index`, `group_index`,
     `local_index`, `local_size`,
-    `group`, `local_scratch`, `sub_group`). La géométrie se déclare en corps de méthode du foncteur
-    engendré : `max_nb_threads`, `group_size`, `local_mem_elems` -- `group_size` exige
-    `local_mem_elems`, sans quoi le chemin coopératif serait silencieusement ignoré.
+    `group`, `local_scratch`, `sub_group`). The geometry is declared as method bodies of the generated
+    functor: `max_nb_threads`, `group_size`, `local_mem_elems` -- `group_size` requires
+    `local_mem_elems`, otherwise the cooperative path would be silently ignored.
 
-    Le piège, et c'est pour ça que ce n'est plus le défaut : le domaine engendré est
-    `global_batch_indices` et RIEN D'AUTRE. Un noyau dont le parallélisme n'est pas un axe de `vmap`
-    -- une grille cartésienne, parcourue en (j, i) -- devait s'en déguiser un, matérialiser un rang
-    plat et le redécouper en C++. Voir `examples/diffusion/README.md`, friction 3.
+    The trap, and that is why it is no longer the default: the generated domain is
+    `global_batch_indices` and NOTHING ELSE. A kernel whose parallelism is not a `vmap` axis
+    -- a Cartesian grid, traversed in (j, i) -- had to disguise one as such, materialize a flat
+    rank and split it back up in C++. See `examples/diffusion/README.md`, friction 3.
     """
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
@@ -117,33 +117,33 @@ class FfiCode( AbstractFfiCode ):
             raise ValueError( "FfiCode: `local_mem_elems` without `group_size` -- there is no "
                               "work-group to share it" )
         if ( max_nb_threads or group_size or local_mem_elems ) and not _scaffold:
-            raise ValueError( "FfiCode: une géométrie de lancement (`max_nb_threads`, "
-                              "`group_size`, `local_mem_elems`) est faite de MÉTHODES du foncteur "
-                              "engendré -- un corps qui lance lui-même n'en a pas. Passez-la à "
-                              "`run_parallel` là où vous lancez, ou utilisez `FfiCode.per_item`." )
+            raise ValueError( "FfiCode: a launch geometry (`max_nb_threads`, "
+                              "`group_size`, `local_mem_elems`) is made of METHODS of the generated "
+                              "functor -- a body that launches by itself has none. Pass it to "
+                              "`run_parallel` where you launch, or use `FfiCode.per_item`." )
 
-        # OÙ VIT LE C++ DE CE NOYAU. C'était un appel de module à part
-        # (`compilation.register_include_root( ... )`), donc une incantation avant toute chose et
-        # sans rapport visible avec le noyau qui en a besoin. Un noyau sait où sont ses en-têtes :
-        # il le dit ici.
+        # WHERE THIS KERNEL'S C++ LIVES. It used to be a separate module-level call
+        # (`compilation.register_include_root( ... )`), hence an incantation before anything else and
+        # with no visible relation to the kernel that needs it. A kernel knows where its headers are:
+        # it says so here.
         from . import register_include_root
         if not include_roots and not _scaffold:
-            # LA RACINE PAR DÉFAUT : le répertoire du `.py` qui construit ce noyau. Une règle, zéro
-            # exception -- `#include "mon_noyau.h"` marche pour un fichier posé à côté, ce qui est
-            # tout ce qu'un tutoriel doit expliquer. Une disposition différente se dit
-            # explicitement.
-            # `currentframe` et pas `inspect.stack()` : ce dernier reconstruit TOUT le contexte
-            # source de chaque cadre ( il lit les fichiers ), ce qui se paie en dizaines de
-            # millisecondes -- invisible tant qu'un noyau était un constant de module, mesurable dès
-            # qu'il est construit là où il sert, c'est-à-dire à chaque appel.
+            # THE DEFAULT ROOT: the directory of the `.py` that builds this kernel. One rule, zero
+            # exceptions -- `#include "my_kernel.h"` works for a file placed next to it, which is
+            # all a tutorial has to explain. A different layout is stated
+            # explicitly.
+            # `currentframe` and not `inspect.stack()`: the latter rebuilds ALL the source
+            # context of each frame ( it reads the files ), which costs tens of
+            # milliseconds -- invisible as long as a kernel was a module constant, measurable as soon
+            # as it is built where it is used, that is to say at every call.
             import inspect
-            cadre = inspect.currentframe()
-            while cadre is not None:
-                chemin = Path( cadre.f_code.co_filename )
-                if chemin.is_file() and "loom/compilation" not in chemin.as_posix():
-                    include_roots = [ chemin.resolve().parent ]
+            frame = inspect.currentframe()
+            while frame is not None:
+                path = Path( frame.f_code.co_filename )
+                if path.is_file() and "loom/compilation" not in path.as_posix():
+                    include_roots = [ path.resolve().parent ]
                     break
-                cadre = cadre.f_back
+                frame = frame.f_back
         for root in include_roots:
             register_include_root( root )
 
@@ -155,29 +155,29 @@ class FfiCode( AbstractFfiCode ):
         self.allocator = bool( allocator )
         self._scaffold = _scaffold
 
-        # les corps des hooks que `run_parallel` détecte sur le foncteur -- du C++, pas des
-        # expressions évaluées dans une portée que l'appelant ne voit pas. L'ordre compte :
-        # `local_mem_elems` peut appeler `group_size`.
+        # the bodies of the hooks that `run_parallel` detects on the functor -- C++, not
+        # expressions evaluated in a scope that the caller cannot see. Order matters:
+        # `local_mem_elems` may call `group_size`.
         self.hooks = { hook: body for hook, body in
                        ( ( "max_nb_threads", max_nb_threads ), ( "group_size", group_size ),
                          ( "local_mem_elems", local_mem_elems ) ) if body }
 
     @classmethod
     def handler( cls, code = "", **kwargs ):
-        """Redondant : c'est ce que fait `FfiCode` tout court depuis qu'un corps qui lance lui-même
-        est la forme NORMALE. Gardé parce que des appels existants le nomment."""
+        """Redundant: it is what plain `FfiCode` does since a body that launches by itself
+        is the NORMAL form. Kept because existing calls name it."""
         return cls( code, **kwargs )
 
     @classmethod
     def inline( cls, code = "", **kwargs ):
-        """LE CORPS DU HANDLER, SANS L'ENROBAGE -- la forme à écrire quand le C++ vit dans un
-        en-tête à soi.
+        """THE HANDLER BODY, WITHOUT THE WRAPPING -- the form to write when the C++ lives in a
+        header of your own.
 
-        Un noyau qui lance lui-même doit fournir `void kernel( queue, batch_axes, args )` dans un
-        namespace anonyme. C'est toujours la même enveloppe, elle n'apprend rien à personne, et
-        c'est elle qui obligeait à poser le noyau dans une constante de module -- loin de l'appel
-        qui s'en sert. `inline` ne prend que ce qu'il y a dedans, donc le noyau tient sur la ligne
-        où il est lancé :
+        A kernel that launches by itself must provide `void kernel( queue, batch_axes, args )` in an
+        anonymous namespace. It is always the same envelope, it teaches nobody anything, and
+        it is what forced the kernel to be put in a module constant -- far from the call
+        that uses it. `inline` only takes what is inside, so the kernel fits on the line
+        where it is launched:
 
             loom.ffi_call(
                 "splats_render",
@@ -185,14 +185,14 @@ class FfiCode( AbstractFfiCode ):
                                      includes = [ "splats.h" ] ),
                 ... )
 
-        Le namespace anonyme n'est pas décoratif : `compilation/catalogue.py` compile chaque noyau
-        dans son propre objet puis les lie dans UNE bibliothèque, donc deux `kernel` à nom fixe sans
-        liaison interne seraient une violation d'ODR.
+        The anonymous namespace is not decorative: `compilation/catalogue.py` compiles each kernel
+        in its own object and then links them into ONE library, so two fixed-name `kernel`s without
+        internal linkage would be an ODR violation.
 
-        CE N'EST PAS `per_item` : le corps reste celui du HANDLER, donc c'est encore lui qui choisit
-        son domaine (`queue.run_parallel( ..., args.outputs.image.domain( ... ), ... )`). `inline`
-        n'enlève que les accolades. Ce qui doit vivre au niveau du namespace -- un `#include`, un
-        foncteur -- passe par `includes` ou par `FfiCode` tout court."""
+        THIS IS NOT `per_item`: the body remains that of the HANDLER, so it is still the body that chooses
+        its domain (`queue.run_parallel( ..., args.outputs.image.domain( ... ), ... )`). `inline`
+        only removes the braces. What must live at namespace level -- an `#include`, a
+        functor -- goes through `includes` or through plain `FfiCode`."""
         return cls( "namespace {\n"
                     "void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {\n"
                     f"    { code }\n"
@@ -201,16 +201,16 @@ class FfiCode( AbstractFfiCode ):
 
     @classmethod
     def per_item( cls, code = "", **kwargs ):
-        """LE SUCRE : un corps par ITEM, et loom engendre pour vous le foncteur ET son lancement.
+        """THE SUGAR: a body per ITEM, and loom generates the functor AND its launch for you.
 
-        C'est commode quand le parallélisme du noyau EST celui de l'appel -- un item par
-        multi-indice de batch, ce qu'un `vmap` fabrique. Ça ne l'est pas sinon : le domaine engendré
-        est `global_batch_indices` et rien d'autre, donc un noyau qui veut parcourir une grille en
-        (j, i) devait se déguiser un axe de batch plat ( voir `examples/diffusion/README.md`,
-        friction 3 ). Dans ce cas, écrivez le lancement -- c'est `FfiCode` tout court."""
+        It is convenient when the kernel's parallelism IS that of the call -- one item per
+        batch multi-index, what a `vmap` produces. It is not otherwise: the generated domain
+        is `global_batch_indices` and nothing else, so a kernel that wants to traverse a grid in
+        (j, i) had to disguise a flat batch axis ( see `examples/diffusion/README.md`,
+        friction 3 ). In that case, write the launch yourself -- that is plain `FfiCode`."""
         return cls( code, _scaffold = True, **kwargs )
 
-    # ---- ce que l'appel demande ( il passe le nom du foncteur, qu'il est seul à connaître ) ----
+    # ---- what the call asks for ( it passes the functor name, which only it knows ) ----
 
     @property
     def cooperative( self ):
@@ -222,18 +222,18 @@ class FfiCode( AbstractFfiCode ):
 
     @property
     def is_handler( self ):
-        """Le corps EST le handler : c'est LUI qui lance. Voir `FfiCode.handler`."""
+        """The body IS the handler: IT is what launches. See `FfiCode.handler`."""
         return not self._scaffold
 
     def _params( self, names ):
-        """Les paramètres de l'`operator()` : les réservés, puis un par argument de l'appel --
-        chacun avec son propre paramètre de template, puisque leur type côté kernel est décidé en
+        """The parameters of `operator()`: the reserved ones, then one per call argument --
+        each with its own template parameter, since their kernel-side type is decided in
         C++."""
-        # `flat_index` : LE RANG PLAT DE L'ITEM dans le domaine parcouru -- « qui suis-je ? ». Il
-        # vient de la variable de boucle du lancement ( voir `CpuQueue::call` ), donc il ne coûte
-        # rien ; avant, un noyau qui en avait besoin se fabriquait un agrégat-prétexte portant un
-        # `iota` ( `examples/splats::Rangs` ), soit un tenseur entier écrit puis lu pour un nombre
-        # que la boucle connaissait déjà.
+        # `flat_index`: THE FLAT RANK OF THE ITEM in the traversed domain -- "who am I?". It
+        # comes from the launch's loop variable ( see `CpuQueue::call` ), so it costs
+        # nothing; before, a kernel that needed it built a pretext aggregate carrying an
+        # `iota` ( `examples/splats::Rangs` ), i.e. a whole tensor written then read for a number
+        # that the loop already knew.
         if self.cooperative:
             reserved = [ ( "BatchIndex", "batch_index" ), ( "SI", "flat_index" ), ( "int", "group_index" ),
                          ( "int", "local_index" ), ( "int", "local_size" ), ( "Group", "group" ),
@@ -246,10 +246,10 @@ class FfiCode( AbstractFfiCode ):
         return tparams, params
 
     def _hook_methods( self, names ):
-        """Les hooks de lancement, en méthodes du foncteur. `run_parallel` les appelle avec les
-        arguments de l'appel (`func.max_nb_threads( args... )`, voir `run_parallel.cxx`), donc ils
-        prennent la même liste que l'`operator()`, sans les noms réservés -- et ils tournent CÔTÉ
-        HÔTE, avant le lancement, donc pas de `HD`."""
+        """The launch hooks, as methods of the functor. `run_parallel` calls them with the
+        call's arguments (`func.max_nb_threads( args... )`, see `run_parallel.cxx`), so they
+        take the same list as `operator()`, without the reserved names -- and they run ON THE
+        HOST, before the launch, so no `HD`."""
         if not self.hooks:
             return ""
         tparams = ", ".join( f"class T_{ n }" for n in names )
@@ -264,14 +264,14 @@ class FfiCode( AbstractFfiCode ):
 
     def preamble_for( self, call_args_analysis, functor ) -> str:
         if not self._scaffold:
-            # TOUT le C++ de l'usager, VERBATIM, au niveau du namespace : ses `#include`, ses
-            # foncteurs, sa fonction `kernel`. Loom n'y touche pas -- y compris pour le namespace
-            # anonyme, que l'usager écrit lui-même : sinon ses `#include` se retrouveraient DANS ce
-            # namespace, et loom avec eux.
+            # ALL of the user's C++, VERBATIM, at namespace level: their `#include`s, their
+            # functors, their `kernel` function. Loom does not touch it -- including the anonymous
+            # namespace, which the user writes themself: otherwise their `#include`s would end up INSIDE that
+            # namespace, and loom's with them.
             #
-            # Ce namespace n'est pas décoratif : `compilation/catalogue.py` compile chaque noyau
-            # dans son propre objet puis les lie dans UNE bibliothèque, donc deux `kernel` à nom
-            # fixe sans liaison interne seraient une violation d'ODR.
+            # This namespace is not decorative: `compilation/catalogue.py` compiles each kernel
+            # in its own object and then links them into ONE library, so two fixed-name `kernel`s
+            # without internal linkage would be an ODR violation.
             return self.code
         names = list( call_args_analysis.args )
         tparams, params = self._params( names )
@@ -284,15 +284,15 @@ class FfiCode( AbstractFfiCode ):
                  f"}};\n" )
 
     def code_for( self, call_args_analysis, functor ) -> str:
-        # émis AVANT le lancement, dans la portée du handler (voir la docstring) -- une pré-passe
-        # unique, pas un morceau du foncteur.
+        # emitted BEFORE the launch, in the handler's scope (see the docstring) -- a single
+        # pre-pass, not a piece of the functor.
         prologue = ( self.prologue + "\n" ) if self.prologue else ""
 
         if not self._scaffold:
-            # L'APPEL, et il est fixe : `kernel( queue, batch_axes, args )`. Trois choses, et la
-            # deuxième est ce qui rend cette forme aussi capable que l'échafaudage -- les axes de
-            # batch de l'appel sont une VALEUR que le noyau compose avec les siens
-            # (`batch_axes + args.<tenseur>.domain()`), au lieu d'un domaine qu'on lui impose.
+            # THE CALL, and it is fixed: `kernel( queue, batch_axes, args )`. Three things, and the
+            # second is what makes this form as capable as the scaffold -- the call's batch
+            # axes are a VALUE that the kernel composes with its own
+            # (`batch_axes + args.<tensor>.domain()`), instead of a domain imposed on it.
             return prologue + "kernel( queue, global_batch_indices, args );"
 
         names = list( call_args_analysis.args )
@@ -306,9 +306,9 @@ class FfiCode( AbstractFfiCode ):
                  ");" )
 
     def inheriting( self, other ):
-        """Nous, mais en prenant de `other` ce que nous n'avons pas dit : `includes` et `sources`
-        sont ce que l'APPEL compile et lie, identique dans les deux sens. La géométrie, elle, n'est
-        jamais héritée -- c'est tout l'intérêt de l'avoir sortie."""
+        """Ourselves, but taking from `other` what we have not said: `includes` and `sources`
+        are what the CALL compiles and links, identical in both directions. The geometry, on the other hand, is
+        never inherited -- that is the whole point of having taken it out."""
         if self.includes and self.sources:
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
@@ -321,13 +321,13 @@ class FfiCode( AbstractFfiCode ):
 
 
 class Kernels( AbstractFfiCode ):
-    """CE QU'UN APPEL LANCE : un noyau aller, un noyau retour optionnel, et le nom qui identifie
-    les deux.
+    """WHAT A CALL LAUNCHES: a forward kernel, an optional backward kernel, and the name that identifies
+    both.
 
-    Ce n'est pas une classe qu'on écrit soi-même : `driver.call` la construit à partir des
-    `FfiCode` qu'on lui passe. Elle existe parce que le pipeline a besoin d'UN objet à qui
-    demander « ton préambule », « ton corps », « ton adjoint », « toi avec un axe de plus » -- et
-    parce que ces trois dernières questions portent sur le COUPLE, pas sur un noyau.
+    This is not a class that you write yourself: `driver.call` builds it from the
+    `FfiCode`s that you pass it. It exists because the pipeline needs ONE object to ask
+    "your preamble", "your body", "your adjoint", "you with one more axis" -- and
+    because these last three questions are about the PAIR, not about one kernel.
     """
 
     def __init__( self, name, forward, backward = None, batch_axes = () ) -> None:
@@ -339,7 +339,7 @@ class Kernels( AbstractFfiCode ):
         self.backward = backward
         self.batch_axes = tuple( batch_axes )
 
-    # ce que le rendu de la source lit sur nous, directement
+    # what the source rendering reads on us, directly
     @property
     def includes( self ):
         return self.forward.includes
@@ -357,18 +357,18 @@ class Kernels( AbstractFfiCode ):
         return self.forward.is_handler
 
     def cpp_base_name( self ) -> str:
-        """Le nom de l'appel, rendu identifiant C++. Tout ce qui est engendré pour cet appel en
-        dérive, et c'est ce qui les garde distincts quand un catalogue lie plusieurs noyaux dans une
-        seule bibliothèque."""
+        """The call's name, rendered as a C++ identifier. Everything generated for this call
+        derives from it, and that is what keeps them distinct when a catalogue links several kernels into a
+        single library."""
         base = "".join( c if c.isalnum() or c == "_" else "_" for c in self.name )
         return "_" + base if base[ 0 ].isdigit() else base
 
     def functor_name( self ) -> str:
-        """L'identifiant C++ du foncteur engendré ( forme `per_item` )."""
+        """The C++ identifier of the generated functor ( `per_item` form )."""
         return f"{ self.cpp_base_name() }_kernel"
 
     def args_name( self ) -> str:
-        """L'identifiant C++ de l'agrégat d'arguments ( forme générale )."""
+        """The C++ identifier of the argument aggregate ( general form )."""
         return f"{ self.cpp_base_name() }_args"
 
     def preamble_for( self, call_args_analysis ) -> str:
@@ -379,19 +379,19 @@ class Kernels( AbstractFfiCode ):
 
     @property
     def has_backward( self ):
-        """Avoir un adjoint est ce qui rend un appel différentiable."""
+        """Having an adjoint is what makes a call differentiable."""
         return self.backward is not None
 
     def for_backward( self ):
-        """L'adjoint, prêt à être lancé comme un aller ordinaire : le retour devient le noyau
-        d'un couple sans retour, sous un nom dérivé. Il garde NOS axes de batch -- ce qu'un `vmap`
-        a ajouté à l'appel vaut pour les deux sens."""
+        """The adjoint, ready to be launched like an ordinary forward: the backward becomes the kernel
+        of a pair with no backward, under a derived name. It keeps OUR batch axes -- what a `vmap`
+        added to the call holds for both directions."""
         return Kernels( self.name + "_bwd", self.backward.inheriting( self.forward ),
                         batch_axes = self.batch_axes )
 
     def with_batch_axis( self ):
-        """Le même couple, mappé sur un axe de plus : ce que lance un `vmap`. Le nom de l'axe est
-        dérivé du nombre déjà présents, donc un `vmap` imbriqué en prend un frais, de façon
-        déterministe."""
+        """The same pair, mapped over one more axis: what a `vmap` launches. The axis name is
+        derived from the number already present, so a nested `vmap` gets a fresh one, in a
+        deterministic way."""
         name = f"vmap_{ len( self.batch_axes ) }"
         return name, Kernels( self.name, self.forward, self.backward, self.batch_axes + ( name, ) )

@@ -9,10 +9,10 @@
 
 namespace sdot {
 
-/// Réductions construites *au-dessus* de `run_parallel` : `RedList(op)` demande à la queue un
-/// accumulateur privé par fil (`Reducer`), combiné dans la cible hôte une fois le kernel fini.
-/// Le `QueueEvent` temporaire renvoyé par `run_parallel` est détruit en fin d'expression : il attend
-/// la fin du kernel puis exécute ses finalizers -> `res` est prêt au `return`.
+/// Reductions built *on top of* `run_parallel`: `RedList(op)` asks the queue for a private
+/// per-thread accumulator (`Reducer`), combined into the host target once the kernel is done.
+/// The temporary `QueueEvent` returned by `run_parallel` is destroyed at the end of the expression: it waits for
+/// the kernel to finish then runs its finalizers -> `res` is ready at the `return`.
 
 HD auto sum( auto &&queue_list, auto &&a ) {
     using TF = typename DECAYED_TYPE_OF( a )::TF;

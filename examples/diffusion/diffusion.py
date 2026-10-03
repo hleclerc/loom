@@ -1,48 +1,48 @@
-"""Un solveur de diffusion DERIVABLE, et ce que les AXES achetent.
+"""A DIFFERENTIABLE diffusion solver, and what AXES buy.
 
-C'est un USAGER ETRANGER de loom : il n'importe que `loom`, et rien de ce qu'il fait ne ressemble a
-une cellule de Laguerre -- grille cartesienne, stencil a cinq points, aucun ragged, aucune geometrie.
+This is a FOREIGN USER of loom: it imports only `loom`, and nothing it does resembles
+a Laguerre cell -- Cartesian grid, five-point stencil, no ragged, no geometry.
 
-    du/dt = k laplacien( u ),   pas de temps explicite, temperature imposee au bord
+    du/dt = k laplacian( u ),   explicit time step, imposed temperature on the boundary
 
-    u'( a ) = u( a ) + c * somme_{b voisine} ( u( b ) - u( a ) ),   c = dt k / h^2
+    u'( a ) = u( a ) + c * sum_{b neighbour} ( u( b ) - u( a ) ),   c = dt k / h^2
 
-CE QUE L'EXEMPLE MONTRE : le corps du noyau ne compte JAMAIS de dimensions. Il demande ses axes,
-les parcourt, et se deplace le long de l'un d'eux. Le meme corps vaut donc en 2D, en 3D, batche ou
-non -- et un `vmap` lui ajoute un axe sans qu'il sache qu'il existe ( c'est teste ).
+WHAT THE EXAMPLE SHOWS: the kernel body NEVER counts dimensions. It asks for its axes,
+walks them, and moves along one of them. The same body therefore works in 2D, in 3D, batched or
+not -- and a `vmap` adds an axis to it without it knowing that it exists ( this is tested ).
 """
-# `loom.X` et non `from loom import X` : dans un tutoriel, on doit voir d'ou vient chaque nom.
+# `loom.X` and not `from loom import X`: in a tutorial, one must see where each name comes from.
 import loom
 
 
-# LE NOYAU, en clair : on lit le tutoriel sans naviguer dans les fichiers.
+# THE KERNEL, in plain sight: the tutorial reads without navigating through files.
 #
-# Le `namespace { }` est a nous -- nos `#include` vont donc ou on veut, et il donne a tout ce qu'il
-# contient une liaison INTERNE ( plusieurs noyaux finissent lies dans une meme bibliotheque, voir
+# The `namespace { }` is ours -- so our `#include`s go wherever we want, and it gives everything it
+# contains INTERNAL linkage ( several kernels end up linked in the same library, see
 # `compilation/catalogue.py` ).
 #
-# Loom appelle `void kernel( auto &&queue, auto &&batch_axes, auto &&args )` :
+# Loom calls `void kernel( auto &&queue, auto &&batch_axes, auto &&args )` :
 #
-#   queue       le contexte d'execution. `queue.run_parallel` est SON outil, pas une obligation :
-#               un usager Kokkos ou OpenMP l'ignore et prend `queue.stream` plus les pointeurs et
-#               les formes de `args`.
-#   batch_axes  les axes que l'appel a ajoutes ( ce qu'un `vmap` fabrique ).
-#   args        nos arguments sous leurs noms Python, plus `machine` et `errors`. `TF` est le
-#               scalaire reel de l'appel.
+#   queue       the execution context. `queue.run_parallel` is ITS tool, not an obligation:
+#               a Kokkos or OpenMP user ignores it and takes `queue.stream` plus the pointers and
+#               the shapes of `args`.
+#   batch_axes  the axes that the call added ( what a `vmap` makes ).
+#   args        our arguments under their Python names, plus `machine` and `errors`. `TF` is the
+#               real scalar of the call.
 #
-# LES TROIS PRIMITIVES D'AXE, et tout en decoule :
+# THE THREE AXIS PRIMITIVES, and everything follows from them:
 #
-#   coords[ axis ]              la coordonnee PAR NOM, pas par position
-#   coords + axis               le voisin le long de CET axe ; les autres coordonnees ne bougent
-#                               pas, y compris celles du batch
-#   coords.axes - batch_axes    mes axes propres, par soustraction d'ensembles a la compilation
+#   coords[ axis ]              the coordinate BY NAME, not by position
+#   coords + axis               the neighbour along THAT axis; the other coordinates do not
+#                               move, including those of the batch
+#   coords.axes - batch_axes    my own axes, by set subtraction at compile time
 #
-_avant = loom.FfiCode(
+_forward = loom.FfiCode(
     code = """
         namespace {
-            struct UnPas {
-                /// le bord porte une temperature imposee : il n'est jamais mis a jour.
-                HD bool on_bord( auto coords, auto main_axes, const auto &args ) const {
+            struct OneStep {
+                /// the boundary carries an imposed temperature: it is never updated.
+                HD bool on_border( auto coords, auto main_axes, const auto &args ) const {
                     return any_of( main_axes, [&]( auto axis ) {
                         return coords[ axis ] == 0
                             || coords[ axis ] + 1 == args.inputs.temperature.size( axis );
@@ -53,45 +53,45 @@ _avant = loom.FfiCode(
                     const auto main_axes = coords.axes - batch_axes;
 
                     const TF uc = args.inputs.temperature( coords );
-                    if ( on_bord( coords, main_axes, args ) ) {
+                    if ( on_border( coords, main_axes, args ) ) {
                         args.outputs.temperature( coords ) = uc;
                         return;
                     }
 
-                    TF somme = 0;
+                    TF total = 0;
                     for_each( main_axes, [&]( auto axis ) {
-                        somme += args.inputs.temperature( coords + axis )
+                        total += args.inputs.temperature( coords + axis )
                                + args.inputs.temperature( coords - axis ) - 2 * uc;
                     } );
-                    args.outputs.temperature( coords ) = uc + args.inputs.coef * somme;
+                    args.outputs.temperature( coords ) = uc + args.inputs.coef * total;
                 }
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPas(), args.outputs.temperature.domain(), args, batch_axes );
+                queue.run_parallel( OneStep(), args.outputs.temperature.domain(), args, batch_axes );
             }
         }
     """,
 )
 
-# L'ADJOINT est un noyau comme un autre : c'est l'APPEL qui prend les deux et qui porte le nom.
+# THE ADJOINT is a kernel like any other: it is the CALL that takes both and carries the name.
 #
-# `u( a )` intervient dans la sortie de `a` ( le terme identite, et `-2 c D u( a )` si `a` est
-# interieure, `D` etant le nombre d'axes ) et dans celle de chaque voisine INTERIEURE `b`. D'ou une
-# lecture des voisines et une seule ecriture : un GATHER pur, sans accumulation atomique.
-_arriere = loom.FfiCode(
+# `u( a )` contributes to the output of `a` ( the identity term, and `-2 c D u( a )` if `a` is
+# interior, `D` being the number of axes ) and to that of each INTERIOR neighbour `b`. Hence one
+# read of the neighbours and a single write: a pure GATHER, without atomic accumulation.
+_backward = loom.FfiCode(
     code = """
         namespace {
-            struct UnPasAdjoint {
-                HD bool on_bord( auto coords, auto main_axes, const auto &args ) const {
+            struct OneStepAdjoint {
+                HD bool on_border( auto coords, auto main_axes, const auto &args ) const {
                     return any_of( main_axes, [&]( auto axis ) {
                         return coords[ axis ] == 0
                             || coords[ axis ] + 1 == args.inputs.temperature.size( axis );
                     } );
                 }
 
-                /// vrai si `coords` decale de `d` le long de `axis` est encore dans la grille
-                HD bool dedans( auto coords, auto axis, SI d, const auto &args ) const {
+                /// true if `coords` shifted by `d` along `axis` is still inside the grid
+                HD bool inside( auto coords, auto axis, SI d, const auto &args ) const {
                     const SI c = coords[ axis ] + d;
                     return c >= 0 && c < args.inputs.temperature.size( axis );
                 }
@@ -99,30 +99,30 @@ _arriere = loom.FfiCode(
                 HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
                     const auto main_axes = coords.axes - batch_axes;
 
-                    // `coef` est une constante du probleme, jamais perturbee : son gradient
-                    // demanderait une reduction globale, et il n'est pas ecrit.
+                    // `coef` is a constant of the problem, never perturbed: its gradient
+                    // would require a global reduction, and it is not written.
                     static_assert( ! args.grad_of_inputs.coef.is_valid,
-                        "diffusion : le gradient par rapport a dt k / h^2 n'est pas implemente" );
+                        "diffusion: the gradient with respect to dt k / h^2 is not implemented" );
 
-                    // un tampon de sortie n'est PAS garanti a zero : quand la cotangente est un
-                    // zero symbolique il faut quand meme ecrire le gradient nul.
-                    constexpr bool nulle = args.grad_of_outputs.temperature.surely_null;
+                    // an output buffer is NOT guaranteed to be zero: when the cotangent is a
+                    // symbolic zero the null gradient must still be written.
+                    constexpr bool is_null = args.grad_of_outputs.temperature.surely_null;
 
                     TF res = 0;
-                    if constexpr ( ! nulle ) {
+                    if constexpr ( ! is_null ) {
                         constexpr SI D = DECAYED_TYPE_OF( main_axes )::ct_size;
                         const TF c = args.inputs.coef;
                         const TF g = args.grad_of_outputs.temperature( coords );
 
-                        res = on_bord( coords, main_axes, args ) ? g : g * ( 1 - c * ( 2 * D ) );
+                        res = on_border( coords, main_axes, args ) ? g : g * ( 1 - c * ( 2 * D ) );
 
                         for_each( main_axes, [&]( auto axis ) {
                             for ( SI s = -1; s <= 1; s += 2 ) {
-                                if ( ! dedans( coords, axis, s, args ) )
+                                if ( ! inside( coords, axis, s, args ) )
                                     continue;
-                                const auto voisin = s > 0 ? coords + axis : coords - axis;
-                                if ( ! on_bord( voisin, main_axes, args ) )
-                                    res += c * args.grad_of_outputs.temperature( voisin );
+                                const auto neighbor = s > 0 ? coords + axis : coords - axis;
+                                if ( ! on_border( neighbor, main_axes, args ) )
+                                    res += c * args.grad_of_outputs.temperature( neighbor );
                             }
                         } );
                     }
@@ -133,51 +133,51 @@ _arriere = loom.FfiCode(
             };
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-                queue.run_parallel( UnPasAdjoint(), args.inputs.temperature.domain(), args, batch_axes );
+                queue.run_parallel( OneStepAdjoint(), args.inputs.temperature.domain(), args, batch_axes );
             }
         }
     """,
 )
 
 
-def pas( temperature, coef ):
-    """UN pas de temps explicite.
+def step( temperature, coef ):
+    """ONE explicit time step.
 
-    `temperature` est un tableau `( ny, nx )` du framework ( ou un simple numpy ) et `coef` vaut
-    `dt k / h^2` -- la diffusivite est CONSTANTE. Rend la temperature mise a jour, derivable par
-    rapport a celle qu'on donne.
+    `temperature` is a `( ny, nx )` array of the framework ( or a plain numpy one ) and `coef` is
+    `dt k / h^2` -- the diffusivity is CONSTANT. Returns the updated temperature, differentiable with
+    respect to the one given.
 
-    RIEN A EMBALLER : les tableaux entrent tels quels, loom lit leur forme et leur type. Les axes
-    en sont DEDUITS -- anonymes, nommes par leur position a l'abaissement -- donc on ecrit un
-    stencil sans prononcer le mot « axe ».
+    NOTHING TO WRAP: arrays enter as they are, loom reads their shape and type. The axes
+    are DEDUCED from them -- anonymous, named by their position at lowering -- so one writes a
+    stencil without uttering the word "axis".
 
-    `loom.mutable` dit la seule chose qui reste a dire : cette grille est LUE ET RE-ECRITE. Les
-    entrees et les sorties d'un appel etant disjointes, ca fait deux tampons -- que le noyau voit
-    sous `args.inputs.temperature` et `args.outputs.temperature`, et l'adjoint sous
-    `args.grad_of_outputs.temperature` et `args.grad_of_inputs.temperature`."""
-    return loom.ffi_call( "diffusion_pas", _avant, _arriere,
+    `loom.mutable` says the only thing left to say: this grid is READ AND REWRITTEN. Since the
+    inputs and outputs of a call are disjoint, that makes two buffers -- which the kernel sees
+    under `args.inputs.temperature` and `args.outputs.temperature`, and the adjoint under
+    `args.grad_of_outputs.temperature` and `args.grad_of_inputs.temperature`."""
+    return loom.ffi_call( "diffusion_step", _forward, _backward,
         temperature = loom.mutable( temperature ),
         coef = coef,
     )
 
 
-def evolution( temperature, coef, nb_pas ):
-    """`nb_pas` pas de suite -- la chaine que l'adjoint doit remonter."""
-    for _ in range( nb_pas ):
-        temperature = pas( temperature, coef )
+def evolve( temperature, coef, nb_steps ):
+    """`nb_steps` consecutive steps -- the chain that the adjoint must walk back up."""
+    for _ in range( nb_steps ):
+        temperature = step( temperature, coef )
     return temperature
 
 
 if __name__ == "__main__":
-    # de quoi voir l'exemple tourner sans rien installer : `python diffusion.py`
+    # enough to see the example run without installing anything: `python diffusion.py`
     #
-    # RIEN NE PASSE PAR L'HOTE. La bosse est batie par une EXPRESSION C++ des coordonnees,
-    # compilee et executee la ou le tenseur vit ; les lectures finales sont des reductions de
-    # loom. Aucun numpy, et rien qui suppose un device plutot qu'un autre.
-    n, nb_pas, coef = 21, 40, 0.2
+    # NOTHING GOES THROUGH THE HOST. The bump is built by a C++ EXPRESSION of the coordinates,
+    # compiled and executed where the tensor lives; the final reads are loom
+    # reductions. No numpy, and nothing that assumes one device rather than another.
+    n, nb_steps, coef = 21, 40, 0.2
 
     u = loom.RealTensor[ n, n ].expr(
-        # le bord est impose a zero, et c'est la meme expression qui le dit
+        # the boundary is imposed at zero, and it is the same expression that says so
         "i_axis_0 == 0 || i_axis_1 == 0 || i_axis_0 + 1 == n_axis_0 || i_axis_1 + 1 == n_axis_1"
         " ? TF( 0 )"
         " : exp( - ( ( i_axis_0 - c ) * ( i_axis_0 - c )"
@@ -185,8 +185,8 @@ if __name__ == "__main__":
         c = ( n - 1 ) / 2,
     )
 
-    v = evolution( u, coef, nb_pas )
-    print( f"{ nb_pas } pas de diffusion sur une grille { n }x{ n } ( c = { coef } )" )
-    print( f"  pic  { float( u.max() ):.4f} -> { float( v.max() ):.4f}" )
-    # la somme DECROIT : le bord est impose a 0, donc la chaleur s'echappe par les cotes.
-    print( f"  somme { float( u.sum() ):.4f} -> { float( v.sum() ):.4f}   ( elle fuit par le bord )" )
+    v = evolve( u, coef, nb_steps )
+    print( f"{ nb_steps } diffusion steps on a { n }x{ n } grid ( c = { coef } )" )
+    print( f"  peak { float( u.max() ):.4f} -> { float( v.max() ):.4f}" )
+    # the sum DECREASES: the boundary is imposed at 0, so heat escapes through the sides.
+    print( f"  sum  { float( u.sum() ):.4f} -> { float( v.sum() ):.4f}   ( it leaks through the boundary )" )

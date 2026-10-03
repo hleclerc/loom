@@ -6,20 +6,20 @@
 
 namespace sdot {
 
-/// LA FORME NOYAU d'un argument de `run_parallel` : ce que le kernel reçoit à la place de la
-/// valeur hôte -- la même vue, retypée dans la zone mémoire du kernel (voir `Ptr.h`), un agrégat
-/// rebâti membre à membre, un scalaire tel quel.
+/// THE KERNEL FORM of a `run_parallel` argument: what the kernel receives in place of the
+/// host value -- the same view, retyped into the kernel's memory zone (see `Ptr.h`), an aggregate
+/// rebuilt member by member, a scalar as is.
 ///
-/// Une VALEUR, pas une continuation. La forme `make_available( queue, io, arg, cont )` d'avant
-/// (à la SYCL : `cont( ... )` pour garder vivants des tampons de transfert) empilait un lambda par
-/// membre de chaque agrégat, et nvcc (EDG) ne sait plus déduire le type de retour au fond d'une
-/// telle chaîne (« cannot deduce the return type », sur `measures_bwd`). Aucun de nos devices ne
-/// transfère (la donnée est déjà là où le kernel tourne, `transfer_cost_per_byte == 0`) : la forme
-/// noyau se calcule donc directement. Un device qui transférerait rendrait une vue sur sa copie et
-/// en confierait la vie au `QueueEvent`.
+/// A VALUE, not a continuation. The earlier `make_available( queue, io, arg, cont )` form
+/// (`cont( ... )` to keep transfer buffers alive) stacked one lambda per
+/// member of each aggregate, and nvcc (EDG) can no longer deduce the return type at the bottom of
+/// such a chain ("cannot deduce the return type", on `measures_bwd`). None of our devices
+/// transfers (the data is already where the kernel runs, `transfer_cost_per_byte == 0`): the kernel
+/// form is therefore computed directly. A device that did transfer would return a view on its copy and
+/// entrust its lifetime to the `QueueEvent`.
 ///
-/// Un type dit lui-même sa forme noyau par `kernel_form( queue, io )` ; un tuple la prend membre
-/// à membre ; un arithmétique est sa propre forme.
+/// A type states its own kernel form through `kernel_form( queue, io )`; a tuple takes it member
+/// by member; an arithmetic type is its own form.
 struct KernelFormProbe { void operator()( auto &&... ) const {} };
 
 auto kernel_form( auto &&queue, auto &&io_category, auto &&arg ) {
@@ -36,7 +36,7 @@ auto kernel_form( auto &&queue, auto &&io_category, auto &&arg ) {
         return arg.theres_no_kernel_form_func();
 }
 
-/// l'ancienne forme, pour les appelants qui passent une continuation
+/// the old form, for callers that pass a continuation
 auto make_available( auto &&queue, auto &&io_category, auto &&arg, auto &&cont ) {
     return cont( kernel_form( queue, io_category, FORWARD( arg ) ) );
 }

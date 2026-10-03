@@ -12,19 +12,20 @@ dependencies = [
     "pyyaml",
     "devtools",
     "ninja",
+    "pip>=26.2.1",
 ]
 
 [project.optional-dependencies]
 jax = ["jax"]
 torch = ["torch"]
-# le compilateur CUDA de pip, epingle : le frontend de 13.4 s'effondre sur nos noyaux, 13.3 passe
+# the pip CUDA compiler, pinned: the 13.4 frontend collapses on our kernels, 13.3 works
 cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.4"]
 
 [project.scripts]
 loom-toolchain = "loom.toolchain:main"
-# fabriquer le catalogue des noyaux precompiles depuis n'importe quel systeme de construction :
-# c'est l'artefact par lequel un projet exterieur produit ses noyaux a l'avance plutot qu'a
-# l'execution -- voir `loom/compilation/cli.py`
+# build the catalogue of precompiled kernels from any build system:
+# it is the artifact through which an external project produces its kernels ahead of time rather than
+# at run time -- see `loom/compilation/cli.py`
 loom-kernels = "loom.compilation.cli:main"
 
 [tool.hatch.build.targets.wheel]

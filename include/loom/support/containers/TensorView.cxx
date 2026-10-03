@@ -23,7 +23,7 @@ UTP HD DTP::TensorView( DataPtr data, Shape shape, Strides strides ) :
 
 UTP HD auto DTP::size( auto axis ) const {
     constexpr int pos = AxisPos<DECAYED_TYPE_OF( axis ),AxisNames>::value;
-    static_assert( pos >= 0, "TensorView::size : ce tenseur n'a pas cet axe" );
+    static_assert( pos >= 0, "TensorView::size : this tensor has no such axis" );
     return _shape[ Ct<int,pos>() ];
 }
 
@@ -34,14 +34,14 @@ UTP HD auto DTP::domain() const {
 UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
     using KMS = typename DECAYED_TYPE_OF( queue )::DefaultKernelMemorySpace;
 
-    // un argument doit être catégorisé (Inp/Out/Mut) ; sinon l'utilisateur a oublié un tag
+    // an argument must be categorized (Inp/Out/Mut); otherwise the user forgot a tag
     static_assert( ! std::is_same_v<DECAYED_TYPE_OF( io_category ), UndefList>,
-                   "argument passe a run_parallel sans categorie Inp/Out/Mut" );
+                   "argument passed to run_parallel without an Inp/Out/Mut category" );
 
-    // coût nul -> donnée déjà accessible depuis le contexte cible -> on retype le Ptr. Un device
-    // qui devrait transférer n'existe pas encore (voir `kernel_form` dans make_avaiable.h)
+    // zero cost -> data already accessible from the target context -> we retype the Ptr. A device
+    // that would have to transfer does not exist yet (see `kernel_form` in make_avaiable.h)
     static_assert( DECAYED_TYPE_OF( transfer_cost_per_byte( queue, _data.memory_space ) )::value == 0,
-                   "TensorView::kernel_form : cette queue ne voit pas cette zone memoire, et le transfert n'est pas ecrit" );
+                   "TensorView::kernel_form : this queue cannot see this memory area, and the transfer is not written" );
     using KTensor = TensorView<TF,Shape,KMS,AxisNames,Strides>;
     return KTensor( typename KTensor::DataPtr( _data.template as<TF>() ), _shape, _strides );
 }
@@ -49,54 +49,54 @@ UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
 UTP HD auto DTP::operator()( const auto &index, auto ...rem ) const {
     using I = DECAYED_TYPE_OF( index );
     if constexpr ( IsCoords<I>::value )
-        // des coordonnees NOMMEES : on consomme le tuple qu'elles portent. Le `Tuple` nu reste
-        // accepte juste en dessous -- les deux marchent, comme convenu.
+        // NAMED coordinates: we consume the tuple they carry. The bare `Tuple` is still
+        // accepted just below -- both work, as agreed.
         return operator()( index.values, rem... );
     else if constexpr ( IsAxisIndex<I>::value )
-        // index = (nom = valeur) -> squeeze de l'axe nommé, puis on continue
+        // index = (name = value) -> squeeze the named axis, then carry on
         return squeeze( index )( rem... );
     else if constexpr ( HAS_CONSTEXPR_SIZE( index ) ) {
-        // index = multi-indice (taille connue à la compilation) -> on déplie ses composantes
+        // index = multi-index (size known at compile time) -> we unfold its components
         if constexpr ( DECAYED_TYPE_OF( index.size() )::value )
             return operator()( index[ Ct<int,0>() ], index.without_index( Ct<int,0>() ), rem... );
         else
             return operator()( rem... );
     } else
-        // index = position scalaire -> squeeze de l'axe 0
+        // index = scalar position -> squeeze axis 0
         return row( index )( rem... );
 }
 
-// 2 arguments : sélecteur (position `Ct<int,N>` ou nom d'axe) + valeur (`index`, possiblement un Ct)
+// 2 arguments: selector (position `Ct<int,N>` or axis name) + value (`index`, possibly a Ct)
 UTP HD auto DTP::squeeze( auto axis, auto index ) const {
     using A = DECAYED_TYPE_OF( axis );
     if constexpr ( is_axis<A> ) {
-        // axis = nom d'axe -> on résout sa position puis on squeeze positionnellement
+        // axis = axis name -> we resolve its position then squeeze positionally
         constexpr int pos = AxisPos<A, AxisNames>::value;
-        static_assert( pos >= 0, "nom d'axe inconnu pour ce tenseur" );
+        static_assert( pos >= 0, "unknown axis name for this tensor" );
         return squeeze( Ct<int,pos>(), index );
     } else {
-        // axis = position : on retire cet axe (shape/strides/noms) et on avance le Ptr
+        // axis = position: we remove this axis (shape/strides/names) and advance the Ptr
         auto new_shape   = _shape.without_index( axis );
         auto new_strides = _strides.without_index( axis );
         auto new_names   = AxisNames{}.without_index( axis );
         LOOM_CHECK_INDEX( index, _shape[ axis ] );
-        SI   off         = _strides[ axis ] * index;         // offset en octets (Ct ou runtime -> SI)
-        auto ptr         = DataPtr( ( _data + off ).template as<TF>(), _data.memory_space ); // typé, pour le ctor
+        SI   off         = _strides[ axis ] * index;         // offset in bytes (Ct or runtime -> SI)
+        auto ptr         = DataPtr( ( _data + off ).template as<TF>(), _data.memory_space ); // typed, for the ctor
         using R = TensorView<TF,DECAYED_TYPE_OF( new_shape ),MemorySpace,DECAYED_TYPE_OF( new_names ),DECAYED_TYPE_OF( new_strides )>;
         return R( ptr, new_shape, new_strides );
     }
 }
 
-// 1 argument : un indice nommé `dim = i` -> on en extrait nom + valeur
+// 1 argument: a named index `dim = i` -> we extract name + value
 UTP HD auto DTP::squeeze( auto axis_index ) const {
     using A = DECAYED_TYPE_OF( axis_index );
-    static_assert( IsAxisIndex<A>::value, "squeeze a 1 argument attend un indice nomme (nom = valeur)" );
+    static_assert( IsAxisIndex<A>::value, "squeeze with 1 argument expects a named index (name = value)" );
     constexpr int pos = AxisPos<typename A::axis_type, AxisNames>::value;
     if constexpr ( pos < 0 ) {
         // an axis we do not have. A strict index (`dim = 0`) makes this a typo; an OPTIONAL one
         // (a batch index, see AxisNames.h) is meant for whoever carries that axis -- we are not
         // mapped along it, so we simply let it through.
-        static_assert( A::optional, "nom d'axe inconnu pour ce tenseur" );
+        static_assert( A::optional, "unknown axis name for this tensor" );
         return *this;
     } else
         return squeeze( Ct<int,pos>(), axis_index.index );
@@ -108,13 +108,13 @@ UTP HD auto DTP::row( auto index ) const {
 
 UTP HD auto DTP::offset( const auto &index, auto ...rem ) const {
     if constexpr ( HAS_CONSTEXPR_SIZE( index ) ) {
-        // `index` est un multi-indice (taille connue à la compilation) -> on déplie ses composantes
+        // `index` is a multi-index (size known at compile time) -> we unfold its components
         if constexpr ( DECAYED_TYPE_OF( index.size() )::value )
             return offset( index[ Ct<int,0>() ], index.without_index( Ct<int,0>() ), rem... );
         else
             return offset( rem... );
     } else {
-        // décale l'axe 0 de `index` éléments (sous-vue) et avance le pointeur d'autant (strides en octets)
+        // shifts axis 0 by `index` elements (sub-view) and advances the pointer accordingly (strides in bytes)
         TensorView res = *this;
         res._shape.set( 0_c, res._shape[ 0_c ] - index );
         res._data.raw += _strides[ 0_c ] * index;
@@ -222,26 +222,26 @@ UTP HD auto DTP::nb_items() const {
     return product( _shape );
 }
 
-// coût (secondes) pour rendre cette vue accessible depuis `queue` = coût/octet * nb octets
+// cost (seconds) to make this view accessible from `queue` = cost/byte * nb bytes
 UTP    auto DTP::transfer_cost( const auto &queue, auto /*io_category*/ ) const {
     return transfer_cost_per_byte( queue, memory_space() ) * ( nb_items() * Ct<int,sizeof( TF )>() );
 }
 
-// variante « boucle simple » : nécessite que la zone soit accessible depuis l'hôte
-// (sinon, passer un tuple de contextes d'exécution -> surcharge run_parallel ci-dessous)
+// "simple loop" variant: requires the area to be accessible from the host
+// (otherwise, pass a tuple of execution contexts -> run_parallel overload below)
 UTP    void DTP::fill_with( TF value ) {
     static_assert(
         MemorySpace::directly_accessible,
-        "fill_with sans contexte : zone non accessible depuis l'hote ; passez un tuple de contextes d'execution"
+        "fill_with without context: area not accessible from the host; pass a tuple of execution contexts"
     );
     for_each_scalar( [&]( auto v ) { v.ref() = value; } );
 }
 
-// variante avec contextes d'exécution : dispatch via run_parallel (choix du meilleur contexte)
-// Choix de l'item_list + du kernel selon la forme. `run` effectue l'appel run_parallel (avec ou
-// sans dépendances) -> on ne nomme jamais SYCL/Dependencies ici (TensorView reste sans SYCL).
-// les corps de `fill_with`, des FONCTEURS nommés et non des lambdas : un lambda défini côté hôte ne
-// peut pas être le noyau d'un lancement device (nvcc), une struct à portée d'espace de noms si.
+// variant with execution contexts: dispatch via run_parallel (choice of the best context)
+// Choice of the item_list + the kernel according to the shape. `run` performs the run_parallel call (with or
+// without dependencies) -> we never name Dependencies here.
+// the bodies of `fill_with` are named FUNCTORS and not lambdas: a lambda defined on the host side cannot
+// be the kernel of a device launch (nvcc), whereas a namespace-scope struct can.
 namespace detail::TensorViewFill {
     struct Scalar     { template<class I,class Out,class V> HD void operator()( I, Out out, V v ) const { out.ref() = v; } };
     struct Contiguous { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out._data.template as<typename Out::TF>()[ id ] = v; } };
@@ -285,11 +285,11 @@ UTP    auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {
 //     return product( _shape );
 // }
 
-// Primitive boucle simple (hôte) : applique op( ref_scalaire_de_this, scalaire_de_that ) sur chaque
-// élément. `that` de même rang -> élémentaire ; tenseur rang 0 ou scalaire -> broadcast.
+// Simple loop primitive (host): applies op( scalar_ref_of_this, scalar_of_that ) on each
+// element. `that` of same rank -> element-wise; rank-0 tensor or scalar -> broadcast.
 UTP HD void DTP::_zip_apply( auto op, const auto &that ) const {
     static_assert( MemorySpace::directly_accessible,
-                   "operation sans contexte : zone non accessible depuis l'hote ; passez un tuple de contextes d'execution" );
+                   "operation without context: area not accessible from the host; pass a tuple of execution contexts" );
     using That = DECAYED_TYPE_OF( that );
     if constexpr ( ct_rank == 0 ) {
         if constexpr ( Is_TensorView<That>::value )
@@ -300,11 +300,11 @@ UTP HD void DTP::_zip_apply( auto op, const auto &that ) const {
         for ( TI i = 0; i < TI( shape( Ct<int,0>() ) ); ++i ) {
             if constexpr ( Is_TensorView<That>::value ) {
                 if constexpr ( int( That::ct_rank ) == int( ct_rank ) )
-                    operator[]( i )._zip_apply( op, that[ i ] );    // même rang -> élémentaire
+                    operator[]( i )._zip_apply( op, that[ i ] );    // same rank -> element-wise
                 else
-                    operator[]( i )._zip_apply( op, that );         // broadcast (rang différent)
+                    operator[]( i )._zip_apply( op, that );         // broadcast (different rank)
             } else
-                operator[]( i )._zip_apply( op, that );             // broadcast (scalaire)
+                operator[]( i )._zip_apply( op, that );             // broadcast (scalar)
         }
     }
 }

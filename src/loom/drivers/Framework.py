@@ -16,6 +16,9 @@ class Framework:
             case "jax":
                 from .JaxFramework import JaxFramework
                 return JaxFramework()
+            case "numpy" | "np":
+                from .NumpyFramework import NumpyFramework
+                return NumpyFramework()
             case _:
                 raise ValueError( f"unsupported framework name: { value }" )
 
@@ -29,6 +32,9 @@ class Framework:
 
     def __neq__( self, value, / ) -> bool:
         return not self.__eq__( value )
+
+    # a framework that is only ever the default when nothing else can be imported (see `NumpyFramework`)
+    is_fallback = False
 
     @property
     def module_name( self ):

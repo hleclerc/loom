@@ -4,17 +4,18 @@ import os
 
 from .TorchFramework import TorchFramework
 from .JaxFramework import JaxFramework
+from .NumpyFramework import NumpyFramework
 from .Framework import Framework
 
 from ..devices.Device import Device
 from .. import env
 
-# `Dtype` n'est importe QUE dans les methodes qui s'en servent. Au niveau du module, il tire
-# `loom/tensor/__init__.py`, qui tire `ShapeVar`, qui fait `from ..drivers.driver import driver` :
-# un CYCLE, des lors que `loom.drivers.driver` est le premier module de loom importe. C'est
-# exactement ce que fait `from loom import driver` en tete de fichier -- et ca cassait tout un
-# fichier de tests ( `sdot/tests/test_PowerDiagram.py` ). Ca ne marchait que si quelque chose
-# avait importe `loom.tensor` avant.
+# `Dtype` is imported ONLY in the methods that use it. At module level, it pulls
+# `loom/tensor/__init__.py`, which pulls `ShapeVar`, which does `from ..drivers.driver import driver`:
+# a CYCLE, as soon as `loom.drivers.driver` is the first loom module imported. That is
+# exactly what `from loom import driver` at the top of the file does -- and it broke a whole
+# test file ( `sdot/tests/test_PowerDiagram.py` ). It only worked if something
+# had imported `loom.tensor` beforehand.
 if TYPE_CHECKING:
     from ..tensor.Dtype import Dtype
     from .JaxDriver import JaxDriver
@@ -35,7 +36,7 @@ class DriverProxy:
 
         User can write sdot.driver.dtype = ... with any format ("float32", "FP32", torch.float32, ...)
 
-    Device attributs:
+    Device attributes:
         * `device`: instance used by the frawework
 
     Framework attributes:
@@ -45,7 +46,7 @@ class DriverProxy:
 
     To find the default framework:
         * look what is imported in sys.modules
-        * else, try if possible to import a module in self.prefered_frameworks ([ 'jax', 'torch' ] by default)
+        * else, try if possible to import a module in self.prefered_frameworks ([ 'jax', 'torch', 'numpy' ] by default, numpy being the forward-only fallback)
 
     Cpu | CudaGpu | AppleGpu
 
@@ -59,7 +60,7 @@ class DriverProxy:
     """
 
     def __init__( self ):
-        self.prefered_frameworks = [ JaxFramework(), TorchFramework() ]
+        self.prefered_frameworks = [ JaxFramework(), TorchFramework(), NumpyFramework() ]
 
         self._driver_instance = None
         self._framework = None
@@ -83,7 +84,8 @@ class DriverProxy:
             framework = self._framework
             if framework is None:
                 for prefered_framework in self.prefered_frameworks:
-                    if prefered_framework.module_name in sys.modules:
+                    # numpy is in `sys.modules` of nearly every process: that says nothing about the choice
+                    if prefered_framework.module_name in sys.modules and not prefered_framework.is_fallback:
                         framework = prefered_framework
                         break
 
@@ -96,7 +98,7 @@ class DriverProxy:
 
             # not found :()
             if framework is None:
-                raise RuntimeError( f"Found no valid for sdot (for now, one can use 'torch' or 'jax')" )
+                raise RuntimeError( "loom: found no framework to run on (one can use 'jax', 'torch' or 'numpy')" )
 
             # use framework
             self._driver_instance = framework.make_instance( self._device, self._ftype, self._itype )

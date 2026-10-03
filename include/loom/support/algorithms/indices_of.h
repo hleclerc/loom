@@ -8,7 +8,7 @@
 namespace sdot {
 
 namespace detail {
-    /// `x` -> `CartesianIndices` : tenseur (via `.shape()`) ou forme passée directement.
+    /// `x` -> `CartesianIndices`: tensor (via `.shape()`) or a shape passed directly.
     HD auto cartesian_indices_of( auto &&x ) {
         if constexpr ( requires { x.shape(); } )
             return CartesianIndices<DECAYED_TYPE_OF( x.shape() )>{ x.shape() };
@@ -17,8 +17,8 @@ namespace detail {
     }
 }
 
-/// `indices_of( a )` -> multi-indices de `a` ; `indices_of( a, b, ... )` -> intersection des parcours
-/// (indices communs). Chaque argument est un tenseur (via `.shape()`) ou une forme.
+/// `indices_of( a )` -> multi-indices of `a`; `indices_of( a, b, ... )` -> intersection of the traversals
+/// (common indices). Each argument is a tensor (via `.shape()`) or a shape.
 HD auto indices_of( auto &&...xs ) {
     return intersection( detail::cartesian_indices_of( FORWARD( xs ) )... );
 }

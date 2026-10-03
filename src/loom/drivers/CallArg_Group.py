@@ -4,40 +4,40 @@ from .CallArg import CallArg
 
 
 class CallArg_Group( CallArg_Aggregate ):
-    """UN GROUPE D'ARGUMENTS : `inputs`, `outputs`, `scratch`, `grad_of_inputs`, `grad_of_outputs`.
+    """A GROUP OF ARGUMENTS: `inputs`, `outputs`, `scratch`, `grad_of_inputs`, `grad_of_outputs`.
 
-    C'est un AGREGAT dont les membres sont DONNES au lieu d'etre trouves sur un objet python. Tout
-    ce qu'un agregat sait deja faire vaut tel quel pour lui -- la struct de vues, la politique d'io
-    membre par membre ( `<Type>_io` ), `kernel_form`, les en-tetes a inclure -- et c'est pourquoi
-    le regroupement ne demande pas une seconde machinerie a cote de la premiere.
+    It is an AGGREGATE whose members are GIVEN instead of being found on a python object. All
+    that an aggregate already knows how to do applies to it as is -- the struct of views, the io
+    policy member by member ( `<Type>_io` ), `kernel_form`, the headers to include -- which is why
+    grouping does not need a second machinery next to the first.
 
-    CE QU'IL ACHETE. Les arguments de l'appel occupaient le PREMIER niveau de `args`, qu'ils
-    partageaient avec les reglages de l'appel ( `name`, `output_attributes`, ... ) : un noyau ne
-    pouvait pas avoir un argument appele `name`. Sous les groupes, le premier niveau ne contient
-    plus que les groupes eux-memes -- un argument appele `name`, ou meme `inputs`, vit a
-    `args.inputs.name` et ne peut plus rien heurter.
+    WHAT IT BUYS. The call's arguments used to occupy the FIRST level of `args`, which they
+    shared with the call's settings ( `name`, `output_attributes`, ... ): a kernel could not
+    have an argument called `name`. Under groups, the first level holds nothing but the groups
+    themselves -- an argument called `name`, or even `inputs`, lives at `args.inputs.name` and
+    can no longer collide with anything.
 
-    LE NOM ET LE CHEMIN SE SEPARENT ICI, et c'est ce qui rend `loom.mutable` possible : un argument
-    mutable est DEUX tampons qui portent le MEME nom C++ ( `inputs.temperature` et
-    `outputs.temperature` ) sous DEUX chemins distincts ( `temperature_input`, `temperature_output`
-    -- ce que les capacites et les sorties nomment cote python ). `make_CallArg` prenait deja les
-    deux separement ; il ne restait qu'a s'en servir.
+    THE NAME AND THE PATH SPLIT HERE, which is what makes `loom.mutable` possible: a mutable
+    argument is TWO buffers carrying the SAME C++ name ( `inputs.temperature` and
+    `outputs.temperature` ) under TWO distinct paths ( `temperature_input`, `temperature_output`
+    -- what capacities and outputs are named on the python side ). `make_CallArg` already took
+    the two separately; all that was left was to use it.
 
-    Un groupe n'est pas un tampon : il n'a pas de categorie d'io propre, ses membres portent la
-    leur ( ce que la politique engendree exprime membre par membre ). D'ou `IoCategory.INPUT`
-    ci-dessous, qui n'est lu par personne pour un noeud sans tampon.
+    A group is not a buffer: it has no io category of its own, its members carry theirs ( what
+    the generated policy expresses member by member ). Hence `IoCategory.INPUT` below, which
+    nobody reads for a node without a buffer.
     """
 
     def __init__( self, call_args_analysis, name, type_name, children ) -> None:
-        # PAS `super().__init__` : celui de `CallArg_Aggregate` va chercher ses membres sur un
-        # objet python ( `attributes_of( inst )` ), et un groupe n'en a pas -- ses membres sont
-        # deja des `CallArg`, batis par l'appelant. On pose donc directement ce que la classe de
-        # base emet ensuite : le nom, le type, les membres.
+        # NOT `super().__init__`: the one in `CallArg_Aggregate` looks for its members on a python
+        # object ( `attributes_of( inst )` ), and a group has none -- its members are already
+        # `CallArg`s, built by the caller. So we directly set what the base class emits next:
+        # the name, the type, the members.
         CallArg.__init__( self, IoCategory.INPUT, name )
         self.type_name = type_name
-        # un groupe ne vient d'aucun objet de l'appelant : rien a re-deriver pour l'adjoint depuis
-        # lui ( c'est `_call_backward` qui rebatit les groupes du retour, membre par membre ).
+        # a group comes from no object of the caller's: nothing to re-derive for the adjoint from
+        # it ( `_call_backward` is what rebuilds the backward groups, member by member ).
         self.inst = None
         self.attributes = dict( children )
-        # les axes DECLARES le sont par les membres, chacun repond pour lui-meme.
+        # the DECLARED axes are declared by the members, each answers for itself.
         self.declared_axes = []

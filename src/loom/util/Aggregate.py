@@ -165,9 +165,9 @@ class Aggregate:
         if batch_axes:
             self.apply_batch_axes( batch_axes )
 
-        # importé ICI et non en tête de module : `loom.tensor` contient des agrégats
-        # ( `CsrTensor` ), donc il nous importe -- et un import de tête aurait fait du cycle une
-        # question d'ORDRE ( `loom.Aggregate` touché en premier échouait, `loom.RealTensor` non ).
+        # imported HERE and not at module top: `loom.tensor` contains aggregates
+        # ( `CsrTensor` ), so it imports us -- and a top-level import would have made the cycle a
+        # question of ORDER ( `loom.Aggregate` touched first failed, `loom.RealTensor` did not ).
         from ..tensor.AbstractAxis import AbstractAxis, AxisId
 
         # dimension SHARING: an `AxisId` names WHICH dimension, with no size of its own, so passing

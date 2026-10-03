@@ -1,67 +1,71 @@
-"""Vérificateur de dérivées agnostique (Jax aujourd'hui, Torch demain).
+"""Agnostic derivative checker (Jax today, Torch tomorrow).
 
-`check_grad` compare la dérivée d'une fonction, obtenue par le mode adjoint du
-driver (`driver.vjp`), à son estimation par différence finie centrée. Rien n'est
-spécifique à un framework : tout passe par `driver.vjp` / `driver.random` et par
-l'arithmétique des tenseurs (`+`, `*`, `.sum()`), commune à Jax et Torch -- voir
-la note d'archi sur les tests agnostiques.
+`check_grad` compares the derivative of a function, obtained through the driver's
+adjoint mode (`driver.vjp`), with its centered finite-difference estimate. Nothing is
+framework-specific: everything goes through `driver.vjp` / `driver.random` and through
+tensor arithmetic (`+`, `*`, `.sum()`), common to Jax and Torch -- see
+the architecture note on agnostic tests.
 
-Principe : on ne matérialise pas la jacobienne complète, on la teste sur des
-projections aléatoires. Avec une tangente `v` en entrée et une cotangente `w` en
-sortie, l'adjoint donne exactement `< vjp(w), v > = < w, J v >`, et le membre de
-droite est estimé par `( f(x+εv) - f(x-εv) ) / 2ε`. Un désaccord signale une
-dérivée fausse (un adjoint nul le fait ressortir immédiatement).
+Principle: we do not materialize the full Jacobian, we test it on random
+projections. With an input tangent `v` and an output cotangent `w`,
+the adjoint gives exactly `< vjp(w), v > = < w, J v >`, and the right-hand
+side is estimated by `( f(x+εv) - f(x-εv) ) / 2ε`. A disagreement signals a
+wrong derivative (a null adjoint makes it stand out immediately).
 
-`f` et ses arguments s'expriment en `Tensor` : un `Tensor` en entrée est dérivé
-par rapport à son buffer, un `Tensor` en sortie est comparé sur sa vue dense
-(`.value`) -- le padding de capacité est retiré pour nous, sans écrire de
+`f` and its arguments are expressed as `Tensor`: an input `Tensor` is differentiated
+with respect to its buffer, an output `Tensor` is compared on its dense view
+(`.value`) -- the capacity padding is removed for us, without writing
 `.raw[ :n ]`.
 """
+import numpy
+
 from loom.tensor import Tensor
 from loom import driver
 
 
 def _raw( x ):
-    """Le buffer différentiable derrière `x` : celui d'un `Tensor`, ou `x` tel quel."""
+    """The differentiable buffer behind `x`: that of a `Tensor`, or `x` as is."""
     return x.raw if isinstance( x, Tensor ) else x
 
 
 def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
-    """Vérifie la dérivée de `f` par différence finie.
+    """Checks the derivative of `f` by finite difference.
 
-    `f` prend un ou plusieurs `Tensor` (ou tenseurs bruts du driver) et renvoie un `Tensor`
-    (ou un tenseur brut). Lève une `AssertionError` si l'adjoint et la différence finie
-    s'écartent de plus de `atol + rtol * |num|`. Renvoie le couple ( adjoint, diff. finie ).
+    `f` takes one or more `Tensor` (or raw driver tensors) and returns a `Tensor`
+    (or a raw tensor). Raises an `AssertionError` if the adjoint and the finite difference
+    differ by more than `atol + rtol * |num|`. Returns the pair ( adjoint, finite diff. ).
 
-    `seed` fixe les projections aléatoires (la cotangente `w` et les tangentes `vs`). Sans lui
-    elles viennent du compteur de process de `driver.random`, donc de COMBIEN de tirages les
-    tests d'avant ont faits : un même test tire alors des directions différentes selon qu'il est
-    lancé seul ou dans la suite, et un contrôle dont l'erreur dépend de la direction peut passer
-    d'un côté et échouer de l'autre. Le passer rend le test reproductible.
+    `seed` fixes the random projections (the cotangent `w` and the tangents `vs`). Without it
+    they come from the process counter of `driver.random`, hence from HOW MANY draws the
+    previous tests made: the same test then draws different directions depending on whether it is
+    run alone or in the suite, and a check whose error depends on the direction may pass
+    on one side and fail on the other. Passing it makes the test reproducible.
 
-    ATTENTION à la FORME de la tolérance. `atol + rtol * |num|` suppose que l'erreur de la
-    différence finie est proportionnelle à ce qu'on mesure. C'est vrai quand elle vient de la
-    troncature ou de l'arrondi ; ça ne l'est PAS quand `f` a de petites discontinuités (une
-    quadrature adaptative par la valeur, une subdivision qui bascule) : l'écart est alors un SAUT
-    DIVISÉ PAR `2 eps`, une quantité ABSOLUE, indépendante de la projection tirée. Comme `num`
-    est le produit de la jacobienne par une direction aléatoire, il peut être petit là où le saut
-    ne l'est pas -- et c'est `atol`, pas `rtol`, qui doit alors porter le plancher. Voir
+    BEWARE of the SHAPE of the tolerance. `atol + rtol * |num|` assumes that the finite-difference
+    error is proportional to what is measured. That is true when it comes from
+    truncation or rounding; it is NOT when `f` has small discontinuities (a
+    value-adaptive quadrature, a subdivision that flips): the gap is then a JUMP
+    DIVIDED BY `2 eps`, an ABSOLUTE quantity, independent of the projection drawn. Since `num`
+    is the product of the Jacobian by a random direction, it can be small where the jump
+    is not -- and it is `atol`, not `rtol`, that must then carry the floor. See
     `test_PowerDiagram::the_subdivided_quadrature_derives_right`.
     """
-    # La différence finie centrée amplifie le bruit d'arrondi (~machine_eps / eps) : en FP32
-    # (machine_eps ~1.2e-7) avec eps=1e-4 ça reste marginal, mais suffisant pour noyer un vrai
-    # écart de la taille de `tol`. On force FP64 pour la durée du check, puis on restaure la
-    # valeur précédente pour ne pas la faire fuiter sur les tests suivants (driver est un
-    # singleton global partagé par tout le process de test).
+    # Centered finite difference amplifies rounding noise (~machine_eps / eps): in FP32
+    # (machine_eps ~1.2e-7) with eps=1e-4 it stays marginal, but enough to drown a real
+    # gap of the size of `tol`. We force FP64 for the duration of the check, then restore the
+    # previous value so as not to leak it into the following tests (driver is a
+    # global singleton shared by the whole test process).
     previous_ftype = driver.ftype
     driver.ftype = "FP64"
     try:
-        primals = [ _raw( a ) for a in args ]
+        # a host (numpy) primal is cast to the driver's own array type: `p + eps * v` below mixes it
+        # with `driver.random` draws, which a framework tensor does not accept from a numpy array
+        primals = [ driver.array( _raw( a ) ) if isinstance( _raw( a ), numpy.ndarray ) else _raw( a ) for a in args ]
 
-        # `f` renvoie en général un `Tensor` : c'est sa vue DENSE qu'on compare (le padding de
-        # capacité n'est pas une vraie sortie). L'étendue d'un axe écrit par le kernel est une valeur
-        # DEVICE sous une trace ; on capture donc la forme dense maintenant, à l'exécution eager, en
-        # entiers Python -- le rognage par trace devient alors statique, donc compatible avec la trace.
+        # `f` generally returns a `Tensor`: it is its DENSE view that we compare (the capacity
+        # padding is not a real output). The extent of an axis written by the kernel is a DEVICE
+        # value under a trace; we therefore capture the dense shape now, at eager execution, as
+        # Python integers -- the per-trace cropping then becomes static, hence compatible with the trace.
         probe = f( *primals )
         if isinstance( probe, Tensor ):
             dense_shape = tuple( probe.shape )
@@ -72,16 +76,16 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
 
         out, pullback = driver.vjp( out_f, *primals )
 
-        # cotangente aléatoire en sortie, tangentes aléatoires en entrée
+        # random cotangent on the output, random tangents on the inputs
         w  = driver.random( out.shape, seed = seed )
         vs = [ driver.random( p.shape, seed = None if seed is None else seed + 1 + i )
                for i, p in enumerate( primals ) ]
 
-        # adjoint : < vjp(w), v >, sommé sur les entrées
+        # adjoint: < vjp(w), v >, summed over the inputs
         grads = pullback( w )
         ana = sum( float( ( g * v ).sum() ) for g, v in zip( grads, vs ) )
 
-        # différence finie centrée : < w, ( f(x+εv) - f(x-εv) ) / 2ε >
+        # centered finite difference: < w, ( f(x+εv) - f(x-εv) ) / 2ε >
         plus  = out_f( *[ p + eps * v for p, v in zip( primals, vs ) ] )
         minus = out_f( *[ p - eps * v for p, v in zip( primals, vs ) ] )
         num = float( ( ( plus - minus ) * w ).sum() ) / ( 2 * eps )
@@ -91,7 +95,7 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
     err = abs( ana - num )
     tol = atol + rtol * abs( num )
     assert err <= tol, (
-        f"dérivée incorrecte : adjoint = { ana }, diff. finie = { num }, "
+        f"incorrect derivative: adjoint = { ana }, finite diff. = { num }, "
         f"|Δ| = { err } > { tol }"
     )
     return ana, num

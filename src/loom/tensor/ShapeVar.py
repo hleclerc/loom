@@ -38,9 +38,9 @@ class ShapeVar( Attribute ):
     `static_count` (a count Python actually holds). See `CallArgsAnalysis`.
     """
 
-    # au niveau de la CLASSE, comme `Attribute.name` : tout `ShapeVar` n'est pas bâti par notre
-    # `__init__` ( une sous-classe peut avoir le sien, un clone peut reconstruire l'objet ), et un
-    # compte sans formule est le cas NORMAL -- il ne doit pas dépendre d'un champ posé par un ctor.
+    # at the CLASS level, like `Attribute.name`: not every `ShapeVar` is built by our
+    # `__init__` ( a subclass may have its own, a clone may rebuild the object ), and a
+    # count without a formula is the NORMAL case -- it must not depend on a field set by a ctor.
     _formula = None
 
     if TYPE_CHECKING:
@@ -71,8 +71,8 @@ class ShapeVar( Attribute ):
 
         self.prescribed_value = None
         self._count = None     # count produced by a kernel: a driver tensor, possibly traced
-        # UNE FORMULE QUELCONQUE ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` ) : `( texte,
-        # { nom: ShapeVar } )`, evaluee a la demande. Voir `set_formula`.
+        # AN ARBITRARY FORMULA ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` ): `( text,
+        # { name: ShapeVar } )`, evaluated on demand. See `set_formula`.
         self._formula = None
 
         if value is not None:
@@ -121,55 +121,55 @@ class ShapeVar( Attribute ):
         self.prescribed_value = numpy.array( value, dtype = int )
 
     def set_formula( self, expr, symbols ):
-        """Notre compte est une FORMULE d'autres comptes : `"nb_dim * ( nb_dim + 1 ) / 2"`, avec
-        `symbols` qui dit quel `ShapeVar` chaque nom désigne.
+        """Our count is a FORMULA of other counts: `"nb_dim * ( nb_dim + 1 ) / 2"`, with
+        `symbols` saying which `ShapeVar` each name designates.
 
-        POURQUOI CE N'EST PAS UNE AFFINE. Une étendue d'axe est normalement affine ( `nb_dims + 1` )
-        parce que c'est elle qu'on INVERSE : voir une taille de 4 sur un tampon, et en déduire que
-        `nb_dims` vaut 3. Une formule quelconque ne s'inverse pas -- et n'a pas à l'être, parce
-        qu'elle ne décrit pas un compte inconnu : elle le CALCULE à partir de comptes déjà connus.
-        Les deux coexistent donc sans se gêner, et le partage est net :
+        WHY THIS IS NOT AN AFFINE. An axis extent is normally affine ( `nb_dims + 1` )
+        because that is what we INVERT: seeing a size of 4 on a buffer, and deducing that
+        `nb_dims` is 3. An arbitrary formula cannot be inverted -- and does not have to be, because
+        it does not describe an unknown count: it COMPUTES it from already-known counts.
+        The two therefore coexist without getting in each other's way, and the split is clean:
 
-            affine    ce qu'on RÉSOUT  ( `Axis[ "nb_rows + 1" ]` )
-            formule   ce qu'on CALCULE ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` )
+            affine    what we SOLVE   ( `Axis[ "nb_rows + 1" ]` )
+            formula   what we COMPUTE ( `Axis[ "nb_dim * ( nb_dim + 1 ) / 2" ]` )
 
-        Évaluée À LA DEMANDE, et c'est nécessaire : dans un agrégat les champs sont construits dans
-        l'ordre des annotations, donc l'axe est bâti AVANT que `Splats( nb_dim = 2 )` ait prescrit
-        quoi que ce soit. Tant qu'un symbole n'a pas de compte HÔTE ( `static_count` ), on rend
-        `None` -- exactement comme une affine non résolue."""
+        Evaluated ON DEMAND, and that is necessary: in an aggregate the fields are built in
+        the order of the annotations, so the axis is built BEFORE `Splats( nb_dim = 2 )` has prescribed
+        anything. As long as a symbol has no HOST count ( `static_count` ), we return
+        `None` -- exactly like an unresolved affine."""
         self._formula = ( str( expr ), dict( symbols ) )
 
     def _formula_value( self ):
-        """La formule évaluée, `None` tant qu'un de ses symboles n'a pas de compte hôte.
+        """The evaluated formula, `None` as long as one of its symbols has no host count.
 
-        PAR SEGMENT SI SES SYMBOLES LE SONT. Les symboles entrent TELS QUELS ( `static_raw`, et non
-        `static_count` qui en prend le maximum ), donc `( nb_pixels + 15 ) // 16` sur un `nb_pixels`
-        qui vaut `[ 256, 300 ]` rend `[ 16, 19 ]` : une étendue par dimension, ce qu'une `AxisList`
-        déroule. C'est l'arithmétique de numpy qui travaille, donc la FORME suit les symboles sans
-        qu'on ait à la dire -- un compte simple reste un scalaire.
+        PER SEGMENT IF ITS SYMBOLS ARE. The symbols enter AS THEY ARE ( `static_raw`, and not
+        `static_count` which takes their maximum ), so `( nb_pixels + 15 ) // 16` on a `nb_pixels`
+        equal to `[ 256, 300 ]` yields `[ 16, 19 ]`: one extent per dimension, which an `AxisList`
+        unrolls. It is numpy's arithmetic doing the work, so the SHAPE follows the symbols without
+        our having to say it -- a simple count stays a scalar.
 
-        Le résultat doit être ENTIER : `2 * 3 / 2` vaut `3.0`, ce qui est bien le compte 3 ; `5 / 2`
-        ne vaut aucun compte, et c'est une erreur de déclaration, pas un arrondi à faire en
-        silence."""
+        The result must be an INTEGER: `2 * 3 / 2` is `3.0`, which is indeed the count 3; `5 / 2`
+        is no count at all, and that is a declaration error, not a rounding to be done
+        silently."""
         if self._formula is None:
             return None
         expr, symbols = self._formula
 
         env = {}
-        for nom, shape_var in symbols.items():
-            compte = shape_var.static_raw()
-            if compte is None:
+        for name, shape_var in symbols.items():
+            count = shape_var.static_raw()
+            if count is None:
                 return None
-            env[ nom ] = numpy.asarray( compte )
+            env[ name ] = numpy.asarray( count )
 
-        res = numpy.asarray( eval( compile( expr, f"<taille d'axe { self.name }>", "eval" ),
+        res = numpy.asarray( eval( compile( expr, f"<axis size { self.name }>", "eval" ),
                                    { "__builtins__": {} }, env ) )
-        entier = numpy.rint( res ).astype( int )
-        if not numpy.all( res == entier ):
+        rounded = numpy.rint( res ).astype( int )
+        if not numpy.all( res == rounded ):
             raise ValueError(
-                f"la taille d'axe '{ expr }' vaut { res }, qui n'est pas un entier -- un compte en "
-                f"est un ( avec { ', '.join( f'{ n } = { v }' for n, v in env.items() ) } )" )
-        return entier
+                f"the axis size '{ expr }' is { res }, which is not an integer -- a count is "
+                f"one ( with { ', '.join( f'{ n } = { v }' for n, v in env.items() ) } )" )
+        return rounded
 
     def _pull( self, kind ):
         """Solve our count from the tensors that use us: the FIRST usage able to invert one of its
@@ -199,8 +199,8 @@ class ShapeVar( Attribute ):
         if self._count is not None:
             return self._count
 
-        brut = self.static_raw()
-        return None if brut is None else numpy.asarray( brut )
+        raw = self.static_raw()
+        return None if raw is None else numpy.asarray( raw )
 
     @property
     def value( self ):
@@ -237,20 +237,20 @@ class ShapeVar( Attribute ):
         from .Tensor import Tensor
         return Tensor.wrap( raw, names = self._axis_names_for( raw ) )
 
-    # UN COMPTE EST UN NOMBRE, et l'hôte doit pouvoir s'en servir comme tel. Sans ça, tout site qui
-    # dimensionne quelque chose écrivait `int( splats.nb_splats.value )` -- un détour par la lecture
-    # hôte, puis une conversion, pour un entier que l'objet connaît. `__index__` est ce qui le rend
-    # utilisable partout où une taille est attendue : `range( n )`, une borne de tranche, `[ 0 ] * n`.
+    # A COUNT IS A NUMBER, and the host must be able to use it as such. Without this, every site that
+    # sizes something wrote `int( splats.nb_splats.value )` -- a detour through the host read,
+    # then a conversion, for an integer that the object knows. `__index__` is what makes it
+    # usable wherever a size is expected: `range( n )`, a slice bound, `[ 0 ] * n`.
     #
-    # C'est `value` qui travaille, donc le refus est le sien : un compte qui vit sur le DEVICE
-    # ( écrit par un noyau, lu sous `jit` ) dit pourquoi il ne peut pas être lu ici, au lieu de
-    # rendre un tracer qui échouera quarante cadres plus loin.
+    # It is `value` that does the work, so the refusal is its own: a count that lives on the DEVICE
+    # ( written by a kernel, read under `jit` ) says why it cannot be read here, instead of
+    # returning a tracer that will fail forty frames further on.
     def __int__( self ) -> int:
-        valeur = self.value
-        if valeur is None:
-            raise ValueError( f"le compte '{ self.name }' n'est pas résolu : rien ne le prescrit et "
-                              f"aucun tenseur déclaré dessus n'a encore de forme" )
-        return int( valeur )
+        val = self.value
+        if val is None:
+            raise ValueError( f"the count '{ self.name }' is not resolved: nothing prescribes it and "
+                              f"no tensor declared on it has a shape yet" )
+        return int( val )
 
     def __index__( self ) -> int:
         return self.__int__()
@@ -280,14 +280,14 @@ class ShapeVar( Attribute ):
         if self.prescribed_value is not None:
             return self.prescribed_value
 
-        calcule = self._formula_value()
-        if calcule is not None:
-            return calcule
+        computed = self._formula_value()
+        if computed is not None:
+            return computed
 
         return self._pull( "logical" )
 
     def static_count( self ):
         """Our count when PYTHON holds it, as ONE number -- the MAXIMUM when there is one per
         segment, because that is what sizes things. See `static_raw`."""
-        brut = self.static_raw()
-        return None if brut is None else int( numpy.max( brut ) )
+        raw = self.static_raw()
+        return None if raw is None else int( numpy.max( raw ) )

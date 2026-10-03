@@ -11,16 +11,16 @@
 
 namespace sdot {
 
-/// La valeur dont on remplit un tampon de SORTIE sous `LOOM_ZERO_OUTPUTS=poison` : ce qu'un
-/// élément jamais écrit vaudra.
+/// The value an OUTPUT buffer is filled with under `LOOM_ZERO_OUTPUTS=poison`: what a
+/// never-written element will be worth.
 ///
-/// Semer à zéro rend une sortie partiellement écrite INOFFENSIVE (voir
-/// `CallArg_Tensor.cpp_seed_member`) -- mais ça la rend aussi CRÉDIBLE : zéro est très souvent une
-/// valeur plausible, et une écriture oubliée passe alors les tests en silence. Le poison ne la
-/// laisse pas passer : un NaN se propage dans tout ce qu'il touche, et l'entier choisi est assez
-/// gros pour faire sortir des bornes toute boucle qu'il viendrait à borner.
+/// Seeding with zero makes a partially written output HARMLESS (see
+/// `CallArg_Tensor.cpp_seed_member`) -- but it also makes it CREDIBLE: zero is very often a
+/// plausible value, and a forgotten write then passes the tests silently. Poison does not
+/// let it through: a NaN propagates through everything it touches, and the chosen integer is big
+/// enough to push out of bounds any loop it would end up bounding.
 ///
-/// C'est un outil de DEBUG, pas un défaut : le défaut reste zéro, qui est sûr.
+/// It is a DEBUG tool, not a default: the default stays zero, which is safe.
 template<class TF>
 HD constexpr TF poison_value() {
     if constexpr ( std::is_floating_point_v<TF> )

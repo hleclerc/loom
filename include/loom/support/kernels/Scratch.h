@@ -7,42 +7,42 @@
 
 namespace sdot {
 
-/// De la mémoire allouée PENDANT l'appel, à une taille que seul le noyau connaît.
+/// Memory allocated DURING the call, at a size that only the kernel knows.
 ///
-/// On avait supposé la chose impossible : Jax préalloue le gros de la RAM du GPU, donc il ne
-/// resterait rien. La prémisse est fausse -- et surtout elle porte sur la mauvaise contrainte.
-/// Ce qu'XLA exige au traçage, c'est la forme d'une SORTIE. Une taille INTERNE, il ne l'a jamais
-/// demandée. Donc tout ce qui est construit et consommé dans le même appel ( un index, un tampon
-/// de tri, un CSR ) peut être dimensionné EXACTEMENT, sans borne devinée, et sous `jit` comme en
-/// eager. C'est la différence avec `scratch_attributes`, dont la capacité descend de Python.
+/// We had assumed this was impossible: Jax preallocates most of the GPU's RAM, so there would be
+/// nothing left. The premise is false -- and above all it concerns the wrong constraint.
+/// What XLA requires at tracing time is the shape of an OUTPUT. An INTERNAL size, it never
+/// asked for. So everything that is built and consumed within the same call ( an index, a sort
+/// buffer, a CSR ) can be sized EXACTLY, with no guessed bound, under `jit` as in
+/// eager. That is the difference with `scratch_attributes`, whose capacity comes down from Python.
 ///
-/// D'OÙ VIENT LA MÉMOIRE, et pourquoi ce n'est pas la même réponse partout :
+/// WHERE THE MEMORY COMES FROM, and why the answer is not the same everywhere:
 ///
-///   * sur GPU, il faut le pool d'XLA -- c'est lui qui détient la carte. `XLA_FFI_DeviceMemory_
-///     Allocate` est un champ de la struct `XLA_FFI_Api`, donc de l'ABI C stable.
-///   * sur CPU, non : le handler tourne sur l'hôte, ses tampons SONT de la mémoire hôte, et un
-///     `malloc` fait l'affaire. Ce n'est pas un pis-aller -- le backend CPU d'XLA répond
-///     « No device memory allocator available on this platform », et il a raison : il n'y a pas
-///     de device.
+///   * on GPU, we need XLA's pool -- it is the one that owns the card. `XLA_FFI_DeviceMemory_
+///     Allocate` is a field of the `XLA_FFI_Api` struct, hence of the stable C ABI.
+///   * on CPU, no: the handler runs on the host, its buffers ARE host memory, and a
+///     `malloc` does the job. This is not a stopgap -- XLA's CPU backend answers
+///     "No device memory allocator available on this platform", and it is right: there is no
+///     device.
 ///
-/// Le choix est celui du DEVICE ( `Device.cpp_scratch_decl` ), pas du corps : un corps écrit une
-/// fois marche des deux côtés.
+/// The choice is the DEVICE's ( `Device.cpp_scratch_decl` ), not the body's: a body written once
+/// works on both sides.
 ///
-/// L'ÉCHEC EST UNE VALEUR, pas une exception : un pool peut dire non. `view()` rend alors une vue
-/// VIDE et lève `failed`, que le handler engendré rapporte à XLA en sortant. Un corps qui borne
-/// ses boucles sur LA VUE -- et non sur ce qu'il voulait y mettre -- ne fait alors rien, ce qui
-/// est le comportement voulu. Un corps qui borne sur son intention écrit à travers un pointeur
-/// nul : c'est exactement le segfault qui a servi à découvrir le refus du CPU, donc l'erreur est
-/// facile à faire et vaut d'être dite ici.
+/// FAILURE IS A VALUE, not an exception: a pool can say no. `view()` then returns an EMPTY view
+/// and raises `failed`, which the generated handler reports to XLA on exit. A body that bounds
+/// its loops on THE VIEW -- and not on what it wanted to put in it -- then does nothing, which
+/// is the intended behavior. A body that bounds on its intention writes through a null
+/// pointer: that is exactly the segfault that revealed the CPU's refusal, so the mistake is
+/// easy to make and worth stating here.
 template<class _MemorySpace>
 struct Scratch {
     using        MemorySpace = _MemorySpace;
 
-    /// comment on alloue, rendu opaque EXPRÈS : ce header ne connaît pas XLA ( il est inclus par
-    /// des en-têtes écrits à la main, qui n'ont pas à traîner `xla/ffi/api/ffi.h` ). C'est la
-    /// source engendrée qui branche ces deux pointeurs.
+    /// how we allocate, made opaque ON PURPOSE: this header does not know XLA ( it is included by
+    /// hand-written headers, which have no business dragging in `xla/ffi/api/ffi.h` ). It is the
+    /// generated source that plugs in these two pointers.
     using        AllocFn     = void *( * )( void *ctx, SI nb_bytes, SI alignment );
-    /// `nullptr` quand le pool libère tout seul à la fin de l'appel ( cas d'XLA ).
+    /// `nullptr` when the pool frees by itself at the end of the call ( XLA's case ).
     using        FreeFn      = void ( * )( void *ctx, void *ptr );
 
     /* */        Scratch     ( AllocFn alloc_fn, void *ctx = nullptr, FreeFn free_fn = nullptr )
@@ -52,22 +52,22 @@ struct Scratch {
 
     /* */        ~Scratch    () {
         if ( free_fn )
-            for ( void *p : blocs )
+            for ( void *p : blocks )
                 free_fn( ctx, p );
     }
 
-    /// `n` éléments de type `T`, contigus, NON initialisés -- comme un `malloc`, et pour la même
-    /// raison : semer coûte, et l'appelant sait s'il écrit avant de lire.
+    /// `n` elements of type `T`, contiguous, NOT initialized -- like a `malloc`, and for the same
+    /// reason: seeding costs, and the caller knows whether it writes before reading.
     template<class T>
     auto         view        ( SI n ) {
         T *ptr = nullptr;
-        if ( n > 0 ) { // 0 ne s'alloue pas : rien à demander, donc rien à refuser
+        if ( n > 0 ) { // 0 is not allocated: nothing to ask for, hence nothing to refuse
             ptr = reinterpret_cast<T *>( alloc_fn( ctx, n * SI( sizeof( T ) ), SI( alignof( T ) ) ) );
             if ( ptr == nullptr ) {
                 failed = true;
                 n = 0;
             } else if ( free_fn )
-                blocs.push_back( ptr );
+                blocks.push_back( ptr );
         }
         return tensor_view<MemorySpace>( ptr, tuple( n ) );
     }
@@ -75,17 +75,17 @@ struct Scratch {
     AllocFn             alloc_fn;
     FreeFn              free_fn;
     void               *ctx;
-    std::vector<void *> blocs;          ///< vide quand le pool libère lui-même
-    bool                failed = false; ///< un refus au moins ( lu par le handler engendré )
+    std::vector<void *> blocks;          ///< empty when the pool frees by itself
+    bool                failed = false; ///< at least one refusal ( read by the generated handler )
 };
 
-/// le scratch d'un handler HÔTE : `aligned_alloc`, libéré en sortant. Voir la docstring ci-dessus
-/// pour pourquoi ce n'est pas un pis-aller sur CPU.
+/// the scratch of a HOST handler: `aligned_alloc`, freed on exit. See the docstring above
+/// for why this is not a stopgap on CPU.
 template<class MemorySpace>
 Scratch<MemorySpace> host_scratch() {
     return Scratch<MemorySpace>(
         []( void *, SI nb_bytes, SI alignment ) -> void * {
-            // `aligned_alloc` veut une taille multiple de l'alignement
+            // `aligned_alloc` wants a size that is a multiple of the alignment
             SI a = alignment < SI( sizeof( void * ) ) ? SI( sizeof( void * ) ) : alignment;
             SI s = ( nb_bytes + a - 1 ) / a * a;
             return std::aligned_alloc( size_t( a ), size_t( s ) );

@@ -73,7 +73,7 @@ struct SectionScope {
         } \
     } while( false )
 
-// concaténation avec expansion (sinon __LINE__ n'est pas développé -> collisions)
+// concatenation with expansion (otherwise __LINE__ is not expanded -> collisions)
 #define _TM_CAT2( a, b ) a##b
 #define _TM_CAT( a, b ) _TM_CAT2( a, b )
 

@@ -14,9 +14,9 @@ class CudaGpu( Device ):
     def __init__( self, device_id, mem_fraction = 0.5, _attrs = None ):
         self.mem_fraction = mem_fraction  # fraction of total_dev_mem reserved for per-thread scratch
         self.device_id = device_id
-        # INDEXÉ, pas dépaqueté par la fin : `shm_per_block` est le DERNIER, donc un
-        # `*_, sm_major, sm_minor = attrs` prend `( sm_minor, shm_per_block )` et fabrique un
-        # `sm_549152` au lieu de `sm_75`.
+        # INDEXED, not unpacked from the end: `shm_per_block` is the LAST one, so a
+        # `*_, sm_major, sm_minor = attrs` takes `( sm_minor, shm_per_block )` and builds an
+        # `sm_549152` instead of `sm_75`.
         self._attrs = _attrs # (nb_sm, max_thr_per_sm, regs_per_sm, shm_per_sm, total_dev_mem, sm_major, sm_minor, shm_per_block)
 
     def copy( self ) -> 'Device':
@@ -74,9 +74,9 @@ class CudaGpu( Device ):
     def cpp_queue_decl( self ):
         return "Queue queue( xla_stream );"
 
-    # la carte est à XLA ( il en préalloue le gros ), donc c'est SON pool qu'on ouvre :
-    # `XLA_FFI_DeviceMemory_Allocate`, un champ de la struct `XLA_FFI_Api` -- de l'ABI C stable,
-    # pas un utilitaire d'en-tête. Il libère tout seul au retour du handler, d'où l'absence de
+    # the card belongs to XLA ( it preallocates most of it ), so it is ITS pool we open:
+    # `XLA_FFI_DeviceMemory_Allocate`, a field of the `XLA_FFI_Api` struct -- stable C ABI,
+    # not a header utility. It frees everything by itself when the handler returns, hence the absence of
     # `FreeFn`.
     def cpp_scratch_param( self ):
         return "ffi::ScratchAllocator xla_scratch"
@@ -232,8 +232,8 @@ class CudaGpu( Device ):
         Re-measure (`ncu`/the execution-speed benchmark) before changing this again.
 
         Deliberately `shm_per_block` (`MAX_SHARED_MEMORY_PER_BLOCK`, the no-opt-in static default,
-        49152B on Turing), NOT `shm_per_sm` (`..._PER_MULTIPROCESSOR`, 65536B on Turing): AdaptiveCpp's
-        CUDA backend launches SSCP/generic kernels via the driver API without ever calling
+        49152B on Turing), NOT `shm_per_sm` (`..._PER_MULTIPROCESSOR`, 65536B on Turing): a
+        launch through the CUDA driver API does not call
         `cuFuncSetAttribute( CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, ... )`, so a launch
         requesting more than the static per-block default fails at submission with
         `CUDA_ERROR_INVALID_VALUE` (`error code = CU:1`) -- silently, no compile-time signal -- even

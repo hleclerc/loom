@@ -17,9 +17,9 @@ T_TA    constexpr auto for_each_item_split( T &&list, PI rel, PI mod, A &&func )
     if constexpr ( detail::has_for_each_item_split_method<T>::value ) {
         list.for_each_item_split( rel, mod, FORWARD( func ) );
     } else {
-        PI cpt = 0;
+        PI counter = 0;
         for_each_item( FORWARD( list ), [&]( auto &&item ) {
-            if ( cpt++ % mod == rel )
+            if ( counter++ % mod == rel )
                 func( FORWARD( item ) );
         } );
     }

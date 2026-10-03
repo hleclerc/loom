@@ -27,8 +27,8 @@ struct Ct {
     // (`cell( batch_index )`) whose members are not all mapped -- or not tensors at all.
     HD constexpr auto operator()( auto &&.../*index*/ ) const { return *this; }
 
-    // as a `run_parallel` argument: la valeur est dans le type, il n'y a rien en mémoire à
-    // rendre accessible -- elle traverse le kernel telle quelle, à coût nul.
+    // as a `run_parallel` argument: the value is in the type, there is nothing in memory to
+    // make accessible -- it goes through the kernel as is, at zero cost.
        constexpr auto transfer_cost ( const auto &/*queue*/, auto /*io_category*/ ) const { return Ct<double,0.0>(); }
        constexpr auto kernel_form   ( auto &&/*queue*/, auto /*io_category*/ ) const { return *this; }
 

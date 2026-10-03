@@ -15,72 +15,72 @@ is known in Python, so the outputs can be allocated and displayed without a kern
 `new_batch_axis( size )` mints a fresh, unshared one; passing the SAME axis object to several
 aggregates is how they get JOINED (co-iterated) instead -- which is opt-in, never the default.
 
-= Ce nom-ci ne sort PLUS de l'objet : le C++ le reçoit de l'APPEL
+= This name no longer leaves the object: C++ receives it from the CALL
 
-ATTENTION : cette section décrit un état dépassé, gardé parce qu'il explique le mécanisme ci-dessous.
-Le nom qu'un axe porte ici N'ATTEINT PLUS LA SOURCE C++ : `CallArgsAnalysis` renomme les axes de
-batch d'un appel en `batch_0`, `batch_1`, ... dans l'ordre où ils s'y présentent (voir
-`CallArgsAnalysis.cpp_axis_name`). C'est le remède définitif qui était annoncé en bas de cette
-docstring, et il est en place.
+WARNING: this section describes an outdated state, kept because it explains the mechanism below.
+The name an axis carries here NO LONGER REACHES THE C++ SOURCE: `CallArgsAnalysis` renames the
+batch axes of a call to `batch_0`, `batch_1`, ... in the order they show up in it (see
+`CallArgsAnalysis.cpp_axis_name`). This is the definitive remedy that was announced at the bottom
+of this docstring, and it is in place.
 
-Ce qui suit reste vrai sur un seul point, et il compte encore : deux axes VIVANTS EN MÊME TEMPS
-doivent porter des noms DISTINCTS, sans quoi la collecte par nom de `CallArgsAnalysis` les
-confondrait en un seul. C'est ce que la piscine garantit.
+What follows remains true on a single point, and it still matters: two axes ALIVE AT THE SAME TIME
+must carry DISTINCT names, otherwise the by-name collection of `CallArgsAnalysis` would merge them
+into one. That is what the pool guarantees.
 
---- l'état d'avant, et pourquoi il ne suffisait pas ---
+--- the previous state, and why it was not enough ---
 
-Le nom traversait jusqu'à la source C++ (`DEFINE_AXIS( thread_0 )`, le type `_thread_0` que porte
-chaque tenseur batché), et la clé du cache de compilation est le HASH DE CETTE SOURCE. Un nom
-frais à chaque appel signifiait donc : deux appels identiques, deux sources différentes, deux
-compilations de ~8 s -- et un cache disque qui grossit sans jamais resservir. Ce n'était pas une
-inefficacité de détail : ça rendait tout chronométrage d'une boucle d'appels impossible à lire.
+The name went all the way to the C++ source (`DEFINE_AXIS( thread_0 )`, the type `_thread_0` that
+each batched tensor carries), and the compilation cache key is the HASH OF THAT SOURCE. A fresh
+name on every call therefore meant: two identical calls, two different sources, two compilations
+of ~8 s -- and a disk cache that grows without ever being reused. This was not a minor
+inefficiency: it made any timing of a loop of calls impossible to read.
 
-Le remède d'alors était d'EMPRUNTER les noms : pris au plus petit indice libre de son préfixe,
-rendu quand l'axe meurt. Une suite d'appels qui se répète retrouvait alors les mêmes noms, donc la
-même source, donc le cache -- mais SEULEMENT si les axes mouraient entre deux appels. Dès qu'une
-CHAÎNE les tient tous vivants à la fois (dix pas de `examples/diffusion`, que l'adjoint doit
-remonter), chacun prend un indice différent et on repaie tout : TRENTE noyaux mesurés
-(`LOOM_JOURNAL=1`) dont vingt-huit ne différaient que par `cellule_0` ... `cellule_19`, et ça
-croissait linéairement avec la longueur de la chaîne. Renommer à l'abaissement les a ramenés à 3.
+The remedy back then was to BORROW the names: taken at the smallest free index of its prefix,
+given back when the axis dies. A repeating sequence of calls would then find the same names again,
+hence the same source, hence the cache -- but ONLY if the axes died between two calls. As soon as
+a CHAIN keeps them all alive at once (ten steps of `examples/diffusion`, which the adjoint has to
+walk back up), each one takes a different index and everything is paid for again: THIRTY kernels
+measured (`LOOM_JOURNAL=1`) of which twenty-eight differed only by `cell_0` ... `cell_19`,
+and it grew linearly with the length of the chain. Renaming at lowering brought them back to 3.
 
-Le PRÉFIXE sépare les familles (`thread_0` pour les work-items, `cell_0` pour les cellules) : il
-reste lisible dans un affichage Python et isole les numérotations, mais il ne se voit plus dans la
-source engendrée.
+The PREFIX separates the families (`thread_0` for work-items, `cell_0` for cells): it stays
+readable in a Python display and isolates the numberings, but it no longer shows in the generated
+source.
 
-= Le `gc.collect()` est un FILET, et il ne devrait plus jamais servir
+= The `gc.collect()` is a SAFETY NET, and it should never be needed anymore
 
-Emprunter suppose de rendre, et rendre suppose que l'axe MEURE. Il ne mourait pas : deux anneaux
-de références le retenaient, et un anneau n'est défait que par le ramasse-miettes cyclique.
+Borrowing assumes giving back, and giving back assumes the axis DIES. It was not dying: two rings
+of references held it, and a ring is only undone by the cyclic garbage collector.
 
-  * `CallArgsAnalysis <-> CallArg_*` -- l'arbre d'abaissement, dont chaque noeud tensoriel tenait
-    son analyse en retour (`CallArg_Tensor._caa`). C'était LE coupable : il retenait aussi les
-    agrégats de l'appel, donc leurs tampons device, bien après la fin de l'appel. La référence
-    remontante est maintenant faible.
-  * `Axis -> coeffs -> ShapeVar -> usages -> résolveur -> Axis` -- les résolveurs de
-    `AbstractAxis._register_dense` capturaient leur axe et leur compte par argument par défaut.
-    Faibles aussi désormais (la référence vers le TENSEUR l'était déjà).
+  * `CallArgsAnalysis <-> CallArg_*` -- the lowering tree, whose every tensor node held its
+    analysis back (`CallArg_Tensor._caa`). This was THE culprit: it also held the aggregates of
+    the call, hence their device buffers, long after the call ended. The back reference is now
+    weak.
+  * `Axis -> coeffs -> ShapeVar -> usages -> resolver -> Axis` -- the resolvers of
+    `AbstractAxis._register_dense` captured their axis and their per-argument count through a
+    default argument. Weak too now (the reference to the TENSOR already was).
 
-Vérifié en désactivant le ramasse-miettes cyclique : les axes sont rendus par le simple comptage
-de références. Le `gc.collect()` ci-dessous ne se déclenche que si la réserve est vide -- donc au
-moment précis où l'on paierait une compilation -- et ne devrait donc plus jamais rien avoir à
-rendre. Il reste comme filet : un anneau réintroduit ailleurs coûterait 9 ms au lieu de 9 s, et
-`in_use( prefix )` le dirait.
+Verified by disabling the cyclic garbage collector: axes are given back by plain reference
+counting. The `gc.collect()` below only fires if the reserve is empty -- that is, at the very
+moment a compilation would be paid for -- and should therefore never have anything left to give
+back. It remains as a safety net: a ring reintroduced elsewhere would cost 9 ms instead of 9 s,
+and `in_use( prefix )` would tell.
 
-= Le remède définitif : EN PLACE
+= The definitive remedy: IN PLACE
 
-Nommer les axes au moment de l'ABAISSEMENT -- `CallArgsAnalysis` connaît l'ensemble exact des
-axes de CET appel et les numérote dans un ordre déterministe -- de sorte qu'il n'y a plus aucune
-durée de vie à suivre pour obtenir le cache.
+Name the axes at LOWERING time -- `CallArgsAnalysis` knows the exact set of axes of THIS call and
+numbers them in a deterministic order -- so that there is no lifetime left to track to get the
+cache.
 
-Le blocage annoncé ici (« un axe de batch peut atteindre un appel par un tenseur NU, donc il
-faudrait une pré-passe ») n'en était pas un : l'analyse ne collecte les `batch_axes` que des
-arguments AGRÉGATS, et un tenseur nu portant un axe de batch est simplement ignoré -- le noyau
-reçoit alors un `batch_index` vide et échoue en `static_assert` C++ (voir
-`loom/examples/diffusion/README.md`, friction 3). L'ensemble est donc connu avant que le premier
-`CallArg` ne soit construit, et le renommage se fait là.
+The blocker announced here ("a batch axis can reach a call through a BARE tensor, so a pre-pass
+would be needed") was not one: the analysis only collects `batch_axes` from AGGREGATE arguments,
+and a bare tensor carrying a batch axis is simply ignored -- the kernel then receives an empty
+`batch_index` and fails with a C++ `static_assert` (see `loom/examples/diffusion/README.md`,
+friction 3). The set is therefore known before the first `CallArg` is built, and the renaming
+happens there.
 
-Reste à la piscine son autre rôle, qui lui n'a pas bougé : des noms distincts entre axes vivants
-en même temps.
+What remains for the pool is its other role, which has not moved: distinct names between axes
+alive at the same time.
 """
 import gc
 import threading
@@ -91,31 +91,30 @@ from .Axis import Axis
 
 
 class _NamePool:
-    """Les indices EMPRUNTABLES d'un préfixe : le plus petit libre est repris avant d'en créer un.
+    """The BORROWABLE indices of a prefix: the smallest free one is reused before creating a new one.
 
-    Reprendre le plus petit, et non le dernier rendu, est ce qui rend la suite REPRODUCTIBLE :
-    deux exécutions du même programme empruntent dans le même ordre, quelle que soit la façon dont
-    les emprunts se sont chevauchés.
+    Taking the smallest, and not the last given back, is what makes the sequence REPRODUCIBLE:
+    two runs of the same program borrow in the same order, however the borrows overlapped.
     """
 
-    # ramasser avant de créer un nom neuf. Coupable : un appelant qui ferait BEAUCOUP d'appels
-    # très courts et préférerait payer les compilations. Voir la docstring du module.
+    # collect before creating a fresh name. Downside: a caller making MANY very short calls
+    # that would rather pay for the compilations. See the module docstring.
     collect_when_empty = True
 
     def __init__( self ):
         self._lock = threading.Lock()
-        self._free = {}                 # prefix -> set des indices rendus
-        self._next = {}                 # prefix -> le prochain indice jamais distribué
+        self._free = {}                 # prefix -> set of given-back indices
+        self._next = {}                 # prefix -> the next index never handed out
 
     def take( self, prefix ):
         index = self._take( prefix )
         if index is not None:
             return index
 
-        # la réserve est vide : c'est ici, et seulement ici, qu'on s'apprête à payer une
-        # compilation. Un ramassage cyclique rend les axes des appels précédents (le graphe de
-        # shapes est cyclique, ils ne partent pas d'eux-mêmes) -- et s'il n'en rend aucun, c'est
-        # qu'ils sont vraiment vivants, et on crée le nom.
+        # the reserve is empty: this is where, and only where, we are about to pay for a
+        # compilation. A cyclic collection gives back the axes of previous calls (the shapes graph
+        # is cyclic, they do not go away by themselves) -- and if it gives back none, they are
+        # really alive, and we create the name.
         if self.collect_when_empty:
             gc.collect()
             index = self._take( prefix )
@@ -128,7 +127,7 @@ class _NamePool:
             return index
 
     def _take( self, prefix ):
-        """Le plus petit indice libre, ou `None` s'il n'y en a aucun."""
+        """The smallest free index, or `None` if there is none."""
         with self._lock:
             free = self._free.get( prefix )
             if not free:
@@ -142,8 +141,8 @@ class _NamePool:
             self._free.setdefault( prefix, set() ).add( index )
 
     def in_use( self, prefix ):
-        """Combien d'indices de ce préfixe sont dehors -- pour les tests, et pour diagnostiquer une
-        fuite (un axe retenu quelque part) sans avoir à deviner."""
+        """How many indices of this prefix are out -- for tests, and to diagnose a leak (an axis
+        held somewhere) without having to guess."""
         with self._lock:
             return self._next.get( prefix, 0 ) - len( self._free.get( prefix, () ) )
 
@@ -167,8 +166,8 @@ def new_batch_axis( size, prefix = "batch" ):
     axis.name = f"{ prefix }_{ index }"
     axis.is_batch = True    # sorts first in the logical layout of an elementwise result
 
-    # rendu quand l'axe meurt -- un `finalize` et non un `__del__` : il ne retient pas l'axe (il ne
-    # capture que le préfixe et l'indice), donc il ne repousse pas sa mort d'un cycle de GC.
+    # given back when the axis dies -- a `finalize` and not a `__del__`: it does not hold the axis (it
+    # only captures the prefix and the index), so it does not postpone its death by a GC cycle.
     weakref.finalize( axis, _pool.give_back, prefix, index )
 
     return axis

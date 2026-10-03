@@ -80,8 +80,8 @@ public:
 
     friend HD void    operator+=               ( Vector &a, const Vector &b ) { for( PI i = 0; i < a.size(); ++i ) a[ i ] += b[ i ]; }
     friend HD void    operator-=               ( Vector &a, const Vector &b ) { for( PI i = 0; i < a.size(); ++i ) a[ i ] -= b[ i ]; }
-    // `template<class B>` épelé, et non `const auto &b` : un ami template abrégé défini dans une
-    // classe template fait perdre à nvcc (EDG) les membres qui suivent (« has no member _storage »)
+    // `template<class B>` spelled out, and not `const auto &b`: an abbreviated template friend defined in a
+    // class template makes nvcc (EDG) lose the members that follow ("has no member _storage")
     template<class B> friend HD void operator/=( Vector &a, const B &b ) { for( PI i = 0; i < a.size(); ++i ) a[ i ] /= b; }
 
     template<class F> friend HD void _for_each_in_range( const Vector &beg, const Vector &end, Vector &cur, int i, const F &func ) { if ( i == beg.size() ) { func( cur ); return; } for( T v = beg[ i ]; v < end[ i ]; ++v ) { cur[ i ] = v; _for_each_in_range( beg, end, cur, i + 1, func ); } }

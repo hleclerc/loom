@@ -11,6 +11,7 @@ sys.path.insert( 0, str( Path( __file__ ).resolve().parent ) )
 import numpy
 
 from errand import Param, bench, test
+from loom.testing import need
 from loom.testing import check_grad
 
 from splats import Screen, Splats, touching_gaussians, render, render_scene
@@ -159,19 +160,20 @@ if test( "an_image_that_is_not_a_multiple_of_the_tile" ):
 
 
 if test( "the_atomic_adjoint_is_the_one_of_the_rendering" ):
+    need( "grad" )
     # the adjoint ACCUMULATES: a splat is hit by every pixel it covers, hence by different
     # work-items. The opposite of `examples/diffusion`, which was a pure gather.
     shape, nb = ( 48, 48 ), 30
     splats = _scene( nb, shape, seed = 3, scale = 5.0 )
 
     for name in ( "colors", "opacities", "centers", "cov_inv" ):
-        def rend( value, name = name ):
+        def render_fn( value, name = name ):
             s = _scene( nb, shape, seed = 3, scale = 5.0 )
             setattr( s, name, value )
             return render_scene( s, shape )
 
         start = getattr( splats, name ).raw
-        adjoint, finite = check_grad( rend, start, seed = 11 )
+        adjoint, finite = check_grad( render_fn, start, seed = 11 )
         print( f"d/d{name:<10} : adjoint {float( adjoint ):+.9f}   finite diff. {float( finite ):+.9f}" )
 
 

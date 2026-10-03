@@ -4,8 +4,8 @@
 
 namespace sdot {
 
-/// Le groupe de voies d'un kernel coopératif, vu de CUDA : le bloc. Même contrat que `CpuGroup`
-/// (`group_barrier`, `get_local_linear_range`), sur `__syncthreads`.
+/// The group of lanes of a cooperative kernel, as seen from CUDA: the block. Same contract as `CpuGroup`
+/// (`group_barrier`, `get_local_linear_range`), on `__syncthreads`.
 struct CudaGroup {
     HD int get_local_linear_range() const { return size; }
     int size;
@@ -17,9 +17,9 @@ HD_INLINE void group_barrier( const CudaGroup & ) {
 #endif
 }
 
-/// Le sous-groupe : le warp de la voie. `get_local_linear_range` est la largeur RÉELLE du warp
-/// (32, ou ce qu'il reste dans un bloc qui n'en est pas un multiple), `get_group_linear_id` son
-/// rang dans le bloc -- ce qu'`OtPlan1d.cxx::sort_diracs` dérive de `local_index`.
+/// The sub-group: the lane's warp. `get_local_linear_range` is the ACTUAL width of the warp
+/// (32, or what is left in a block that is not a multiple of it), `get_group_linear_id` its
+/// rank in the block -- what `OtPlan1d.cxx::sort_diracs` derives from `local_index`.
 struct CudaSubGroup {
     HD int get_local_linear_id   () const { return lane; }
     HD int get_local_linear_range() const { return size; }

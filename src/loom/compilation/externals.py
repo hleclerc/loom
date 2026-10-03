@@ -1,16 +1,16 @@
-"""Les bibliothèques C++ EXTERNES, en-têtes seuls, que la chaîne de compilation va chercher
-elle-même : un paquet bâti sur loom en déclare une (`register_external`), et son archive est
-téléchargée UNE FOIS dans le cache utilisateur (`cache_root() / "ext"`) au premier noyau qui
-compile -- puis son répertoire entre dans les `-I` de toute compilation (`include_dirs`).
+"""EXTERNAL C++ libraries, header-only, that the build chain fetches by itself: a package built on
+loom declares one (`register_external`), and its archive is downloaded ONCE into the user cache
+(`cache_root() / "ext"`) at the first kernel that compiles -- then its directory goes into the
+`-I` of every compilation (`include_dirs`).
 
-C'est ce qui rend un `#include <Eigen/SparseCholesky>` ou `<amgcl/...>` vrai sur toute machine,
-sans paquet système ni étape à la main : sdot en dépend pour les solveurs linéaires de son
-transport (`sdot/otplan/Lineaire.cpp`), et un catalogue de noyaux se bâtit avec ces mêmes
-versions, épinglées -- une archive et son SHA-256, pas une branche.
+This is what makes a `#include <Eigen/SparseCholesky>` or `<amgcl/...>` valid on any machine,
+with no system package or manual step: sdot depends on it for the linear solvers of its
+transport (`sdot/sdotplan/Linear.cpp`), and a kernel catalogue is built with these same pinned
+versions -- an archive and its SHA-256, not a branch.
 
-Sans réseau (`LOOM_EXTERNALS=0`, ou un téléchargement qui échoue), l'externe manque et on le dit
-UNE fois : la source qui l'attend se garde par `__has_include` et fait avec ce qu'elle a.
-`LOOM_EXT_DIR` place le cache ailleurs (une machine de build, un montage partagé).
+Without network (`LOOM_EXTERNALS=0`, or a download that fails), the external is missing and we say
+so ONCE: the source that expects it guards itself with `__has_include` and makes do with what it
+has. `LOOM_EXT_DIR` puts the cache elsewhere (a build machine, a shared mount).
 """
 
 from pathlib import Path
@@ -43,9 +43,9 @@ _externals = {}
 
 
 def register_external( name, version, url, sha256, include = "" ):
-    """Déclare une bibliothèque : `url` d'une archive (`.tar.gz` / `.zip`) dont le premier niveau
-    est retiré, `sha256` de l'archive, `include` le sous-répertoire à mettre sur le chemin
-    d'inclusion (la racine par défaut). Déclarer deux fois la même est sans effet."""
+    """Declares a library: `url` of an archive (`.tar.gz` / `.zip`) whose top level is stripped,
+    `sha256` of the archive, `include` the subdirectory to put on the include path (the root by
+    default). Declaring the same one twice has no effect."""
     if name not in _externals:
         _externals[ name ] = External( name, version, url, sha256, include )
 
@@ -57,8 +57,8 @@ def ext_root() -> Path:
 
 
 def _fetch( ext: External ):
-    """L'archive, vérifiée, dépliée dans `ext.root` -- atomiquement : un répertoire voisin puis un
-    renommage, pour qu'un second processus ne voie jamais un dépliage à moitié fait."""
+    """The archive, verified, unpacked into `ext.root` -- atomically: a sibling directory then a
+    rename, so that a second process never sees a half-done unpacking."""
     ext_root().mkdir( parents = True, exist_ok = True )
     with tempfile.TemporaryDirectory( dir = ext_root(), prefix = f".{ ext.name }-" ) as tmp:
         tmp = Path( tmp )
@@ -67,7 +67,7 @@ def _fetch( ext: External ):
             shutil.copyfileobj( r, f )
         digest = hashlib.sha256( archive.read_bytes() ).hexdigest()
         if digest != ext.sha256:
-            raise RuntimeError( f"{ ext.name } { ext.version } : SHA-256 inattendu ({ digest }, attendu { ext.sha256 })" )
+            raise RuntimeError( f"{ ext.name } { ext.version } : unexpected SHA-256 ({ digest }, expected { ext.sha256 })" )
         out = tmp / "out"
         out.mkdir()
         if zipfile.is_zipfile( archive ):
@@ -83,27 +83,27 @@ def _fetch( ext: External ):
         try:
             os.rename( top, ext.root )
         except OSError:
-            if not ext.root.exists():                  # pas un autre processus : une vraie erreur
+            if not ext.root.exists():                  # not another process: a real error
                 shutil.move( str( top ), str( ext.root ) )
 
 
 def ensure( ext: External ) -> bool:
-    """Vrai si `ext.include_dir` est là (déjà, ou après téléchargement)."""
+    """True if `ext.include_dir` is there (already, or after download)."""
     if ext.include_dir.is_dir():
         return True
     if not env.flag( "EXTERNALS", True ):
         return False
     try:
         _fetch( ext )
-    except Exception as e:                                # réseau, disque, somme : on le dit, et on continue sans
+    except Exception as e:                                # network, disk, checksum: we say so, and carry on without
         if not ext._reported:
             ext._reported = True
-            print( f"loom: { ext.name } { ext.version } non disponible ({ e }) -- les noyaux qui l'attendent feront sans",
+            print( f"loom: { ext.name } { ext.version } not available ({ e }) -- the kernels that expect it will make do without",
                    file = sys.stderr )
         return False
     return ext.include_dir.is_dir()
 
 
 def external_include_dirs() -> list:
-    """Les `-I` des externes déclarés qui sont là (téléchargés au besoin)."""
+    """The `-I` of the declared externals that are there (downloaded if needed)."""
     return [ ext.include_dir for ext in _externals.values() if ensure( ext ) ]

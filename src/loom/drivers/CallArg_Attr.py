@@ -31,11 +31,11 @@ class CallArg_Attr( CallArg ):
         # argument's -- two names, so the local does not read itself in its own initializer.
         return f"    auto { var_name } = SI( { self._jax_attr_name() } );"
 
-    # ÊTRE MEMBRE D'UN AGRÉGAT, ce qui n'était encore jamais arrivé : un `int` nu était toujours un
-    # argument RACINE, et une racine est déclarée par `cpp_root_decl`. Sous les GROUPES il n'y a
-    # plus de racine que les groupes eux-mêmes, donc tout argument devient un membre -- et un nœud
-    # qui ne sait pas l'être est simplement FILTRÉ (`CallArg_Aggregate._fields`), en silence : le
-    # corps compilait alors contre une struct où son argument n'existait pas.
+    # BEING A MEMBER OF AN AGGREGATE, which had never happened yet: a bare `int` was always a
+    # ROOT argument, and a root is declared by `cpp_root_decl`. Under GROUPS there is no
+    # root left but the groups themselves, so every argument becomes a member -- and a node
+    # that does not know how to be one is simply FILTERED OUT (`CallArg_Aggregate._fields`), silently: the
+    # body then compiled against a struct in which its argument did not exist.
     def cpp_tpl_param( self ):
         return f"class { self.cpp_tpl_name() }"
 

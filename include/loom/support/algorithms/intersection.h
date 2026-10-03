@@ -4,8 +4,8 @@
 
 namespace sdot {
 
-/// Intersection d'ensembles d'indices (p.ex. `CartesianIndices`), repliée terme à terme via la
-/// méthode membre `.intersection`. Générique : fonctionne pour tout ensemble qui la fournit.
+/// Intersection of index sets (e.g. `CartesianIndices`), folded term by term via the
+/// member method `.intersection`. Generic: works for any set that provides it.
 HD auto intersection( auto &&first ) {
     return FORWARD( first );
 }

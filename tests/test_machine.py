@@ -1,28 +1,28 @@
-"""`Machine` : ce qu'un noyau peut savoir de la machine, sous des noms qui ne parlent d'aucune
-machine.
+"""`Machine`: what a kernel can know about the machine, under names that do not refer to any
+particular machine.
 
-Ça manquait pour écrire un noyau portable : la géométrie de lancement était soit codée en dur
-( `const int block = 128` dans `CudaQueue.h` ), soit devinée en Python. Un noyau qui veut choisir sa
-taille de groupe ou son budget de mémoire partagée doit pouvoir les DEMANDER.
+This was missing for writing a portable kernel: the launch geometry was either hard-coded
+( `const int block = 128` in `CudaQueue.h` ), or guessed in Python. A kernel that wants to choose its
+group size or its shared-memory budget must be able to ASK for them.
 
-Quatre champs, et chacun a un sens des deux côtés -- c'est ce qui permet d'écrire le noyau une fois.
-Le test vérifie qu'ils traversent jusque dans un kernel et qu'ils sont plausibles, puis les
-contraintes propres à chaque device.
+Four fields, and each has a meaning on both sides -- that is what allows writing the kernel once.
+The test checks that they make it all the way into a kernel and that they are plausible, then the
+constraints specific to each device.
 """
 import loom
 from loom import Axis, ShapeVar, IntTensor, driver
 from loom.compilation.FfiCode import FfiCode
 from errand import test
 
-_CHAMPS = ( "nb_workers", "sub_group_width", "local_mem_bytes", "suggested_group" )
+_FIELDS = ( "nb_workers", "sub_group_width", "local_mem_bytes", "suggested_group" )
 
 
-# tout le C++ est ici : `Machine` se lit dans le kernel sous les memes noms que sur l'hote.
+# all the C++ is here: `Machine` is read in the kernel under the same names as on the host.
 _CODE = """
-    struct PoserMachine {
+    struct StoreMachine {
         HD void operator()( auto coords, auto &&args ) const {
-            const SI k = coords[ num_champ ];
-            args.outputs.champs( k ) = k == 0 ? args.machine.nb_workers
+            const SI k = coords[ num_field ];
+            args.outputs.fields( k ) = k == 0 ? args.machine.nb_workers
                              : k == 1 ? args.machine.sub_group_width
                              : k == 2 ? args.machine.local_mem_bytes
                              :          args.machine.suggested_group;
@@ -30,50 +30,50 @@ _CODE = """
     };
 
     void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-        queue.run_parallel( PoserMachine(), batch_axes + args.outputs.champs.domain(), args );
+        queue.run_parallel( StoreMachine(), batch_axes + args.outputs.fields.domain(), args );
     }
 """
 
 
 def _machine():
-    """Les quatre champs, tels que le NOYAU les voit ( et non tels que Python les devinerait )."""
-    champs = IntTensor[ Axis( ShapeVar( len( _CHAMPS ) ), name = "num_champ" ) ]()
-    loom.ffi_call( "test_machine", FfiCode( code = _CODE ), champs = loom.out( champs ) )
-    return dict( zip( _CHAMPS, ( int( v ) for v in champs.raw.tolist() ) ) )
+    """The four fields, as the KERNEL sees them ( and not as Python would guess them )."""
+    fields = IntTensor[ Axis( ShapeVar( len( _FIELDS ) ), name = "num_field" ) ]()
+    loom.ffi_call( "test_machine", FfiCode( code = _CODE ), fields = loom.out( fields ) )
+    return dict( zip( _FIELDS, ( int( v ) for v in fields.raw.tolist() ) ) )
 
 
-if test( "les_quatre_champs_traversent" ):
+if test( "the_four_fields_come_through" ):
     m = _machine()
     print( f"{ driver.device } : " + "  ".join( f"{ k }={ v }" for k, v in m.items() ) )
 
-    # rien ne doit être nul : un noyau portable divise par `sub_group_width` ou dimensionne sur
-    # `local_mem_bytes`, et un zéro ferait exploser du code par ailleurs correct.
-    for nom, valeur in m.items():
-        assert valeur >= 1, ( nom, valeur )
+    # nothing must be zero: a portable kernel divides by `sub_group_width` or sizes on
+    # `local_mem_bytes`, and a zero would blow up otherwise correct code.
+    for name, value in m.items():
+        assert value >= 1, ( name, value )
 
-    # un groupe ne peut pas dépasser ce qui peut être en vol
+    # a group cannot exceed what can be in flight
     assert m[ "suggested_group" ] <= m[ "nb_workers" ], m
 
 
-if test( "ce_que_chaque_device_promet" ):
+if test( "what_each_device_promises" ):
     m = _machine()
 
     if getattr( driver.device, "is_cuda_gpu", False ):
-        # la largeur de warp est 32 sur tout ce qui existe ; le test le fige pour qu'un changement
-        # se remarque plutôt que de passer en silence.
+        # the warp width is 32 on everything that exists; the test pins it so that a change
+        # gets noticed rather than going by silently.
         assert m[ "sub_group_width" ] == 32, m
         assert m[ "suggested_group" ] == m[ "sub_group_width" ], m
-        # 48 kio par bloc est le plancher depuis Fermi
+        # 48 KiB per block is the floor since Fermi
         assert m[ "local_mem_bytes" ] >= 48 * 1024, m
-        # SMs x fils par SM : au moins quelques milliers sur une carte qui existe
+        # SMs x threads per SM: at least a few thousand on a card that exists
         assert m[ "nb_workers" ] >= 1024, m
     else:
-        # pas de voies sur un CPU, donc pas de sub-group : tout est à 1, et le budget de mémoire
-        # partagée est NOTIONNEL ( `CpuQueue` prend un `std::vector` sur le tas ).
+        # no lanes on a CPU, hence no sub-group: everything is 1, and the shared-memory
+        # budget is NOTIONAL ( `CpuQueue` takes a `std::vector` on the heap ).
         assert m[ "sub_group_width" ] == 1, m
         assert m[ "suggested_group" ] == 1, m
         assert m[ "local_mem_bytes" ] == 64 * 1024, m
-        # le pool de fils : au moins un, et pas plus que ce que la machine a de coeurs logiques
+        # the thread pool: at least one, and no more than the machine's number of logical cores
         import os
         assert 1 <= m[ "nb_workers" ] <= ( os.cpu_count() or 1 ), m
-    print( f"{ driver.device } : les promesses du device tiennent" )
+    print( f"{ driver.device } : the device keeps its promises" )

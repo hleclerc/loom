@@ -37,7 +37,7 @@ def prod( t, axis = None ):
 
 
 def cumsum( t, axis = None, *, exclusive = False ):
-    """La somme prefixe le long de `axis` -- un SCAN, pas une reduction : voir `Tensor.cumsum`."""
+    """The prefix sum along `axis` -- a SCAN, not a reduction: see `Tensor.cumsum`."""
     return t.cumsum( axis, exclusive = exclusive )
 
 

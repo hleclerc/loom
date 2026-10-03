@@ -6,14 +6,14 @@
 
 namespace sdot {
 
-/// Les opérateurs de réduction que `RedList( op )` accepte. Chacun connaît son identité, c'est ce
-/// qui initialise la ligne de chaque fil.
+/// The reduction operators that `RedList( op )` accepts. Each knows its identity, which is what
+/// initializes each thread's row.
 template<class T> struct plus    { HD T operator()( T a, T b ) const { return a + b; }  HD static T identity() { return T( 0 ); } };
 template<class T> struct maximum { HD T operator()( T a, T b ) const { return a > b ? a : b; } HD static T identity() { return std::numeric_limits<T>::lowest(); } };
 template<class T> struct minimum { HD T operator()( T a, T b ) const { return a < b ? a : b; } HD static T identity() { return std::numeric_limits<T>::max(); } };
 
-/// Ce que le corps reçoit à la place d'une cible de réduction : un accumulateur PRIVÉ (un par fil
-/// sur CPU), combiné dans la cible hôte une fois le kernel fini. `combine( v )` ou `+= v`.
+/// What the body receives in place of a reduction target: a PRIVATE accumulator (one per thread
+/// on CPU), combined into the host target once the kernel is done. `combine( v )` or `+= v`.
 template<class Op,class T>
 struct Reducer {
     HD static T identity( const Op & ) { return Op::identity(); }

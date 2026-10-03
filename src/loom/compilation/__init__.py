@@ -151,9 +151,9 @@ def _resolve_build_dir( override ):
 
 
 def cache_root() -> Path:
-    """Le premier répertoire de cache utilisateur inscriptible : `LOOM_CACHE_DIR` s'il est mis,
-    sinon la convention de la plateforme (`~/.cache/loom`, `~/Library/Caches/loom`,
-    `%LOCALAPPDATA%/loom/cache`), puis `/tmp` en dernier recours."""
+    """The first writable user cache directory: `LOOM_CACHE_DIR` if set, otherwise the platform
+    convention (`~/.cache/loom`, `~/Library/Caches/loom`, `%LOCALAPPDATA%/loom/cache`), then
+    `/tmp` as a last resort."""
     candidates = []
     override = env.var( "CACHE_DIR" )
     if override:
@@ -176,9 +176,9 @@ def cache_root() -> Path:
 
 
 def include_dirs() -> list:
-    """Tous les `-I` d'une compilation : les sources C++ (loom, puis les paquets enregistrés), les
-    en-têtes générés (sous le répertoire de build), et les bibliothèques externes déclarées
-    (`externals.py`, téléchargées au besoin)."""
+    """All the `-I` of a compilation: the C++ sources (loom, then the registered packages), the
+    generated headers (under the build directory), and the declared external libraries
+    (`externals.py`, downloaded if needed)."""
     from .generated_headers import include_root
     from .externals import external_include_dirs
     return [ *include_roots(), include_root(), *external_include_dirs() ]
@@ -191,10 +191,10 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     """Compile & link `src_paths` into a shared library with the compiler of `device`, through
     the build graph (see `build.py`).
 
-    `work_dir` : le repertoire PROPRE de cette bibliotheque. Ce qui n'est a personne d'autre -- la
-    source engendree et son objet -- y vit, et part avec lui quand on l'efface ; les unites de
-    domaine (`sources`) restent dans le graphe commun, puisqu'elles ont des dependants. Sans
-    `work_dir`, tout va dans le graphe commun (le catalogue, les tests C++).
+    `work_dir`: the directory PRIVATE to this library. What belongs to nobody else -- the
+    generated source and its object -- lives there, and goes away with it when it is erased; the
+    domain units (`sources`) stay in the common graph, since they have dependents. Without
+    `work_dir`, everything goes into the common graph (the catalogue, the C++ tests).
 
     Emits a relocatable shared object meant to be `dlopen`ed at runtime (e.g. to expose an XLA
     FFI handler symbol to Jax), linked against the runtime library (`libloom_runtime`: the
@@ -202,10 +202,9 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     make it unique -- typically a content hash of the sources + the compiler's `build_signature`
     (see `JaxFfi`).
 
-    `sources` : des unités de plus, `( chemin, defines )`, compilées une fois par (source,
-    defines, compilateur) et partagées entre tous les noyaux qui les demandent -- le code de
-    domaine qu'on ne veut pas réinstancier dans chaque noyau (une densité, une dimension : des
-    macros choisissent, le `.o` est fait une fois).
+    `sources`: extra units, `( path, defines )`, compiled once per (source, defines, compiler)
+    and shared among all the kernels that ask for them -- the domain code one does not want to
+    reinstantiate in every kernel (a density, a dimension: macros choose, the `.o` is made once).
 
     Rebuilds are ninja's business: a target is remade iff one of ITS inputs (the exact header
     closure, from the compiler's depfile) changed. `SDOT_FORCE_BUILD=1` remakes it regardless.
@@ -213,8 +212,8 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     """
     from .build import Build
     with Build( device, work_dir = work_dir ) as b:
-        # la source engendree n'a aucun dependant : son objet est PROPRE a cette bibliotheque
-        objects = [ b.object( p, extra_flags = extra_flags or [], partage = work_dir is None )
+        # the generated source has no dependent: its object is PRIVATE to this library
+        objects = [ b.object( p, extra_flags = extra_flags or [], shared = work_dir is None )
                     for p in src_paths ]
         objects += [ b.object( p, defines ) for p, defines in sources ]
         lib = b.shared_library( ( work_dir or build_dir() ) / lib_name, objects, [ b.runtime_library() ] )

@@ -6,17 +6,17 @@
 
 namespace sdot {
 
-/// Le groupe de voies d'un kernel coopératif, vu du CPU : `group_size` fils système autour d'un
-/// `std::barrier` (nul quand le groupe est réduit à une voie -- le cas de production sur CPU, où
-/// `group_barrier` ne fait alors rien).
+/// The lane group of a cooperative kernel, seen from the CPU: `group_size` system threads around a
+/// `std::barrier` (null when the group is reduced to one lane -- the production case on CPU, where
+/// `group_barrier` then does nothing).
 ///
-/// Ce que le corps peut en faire est le SOUS-ENSEMBLE commun aux devices : `group_barrier`,
-/// `get_local_linear_range`. La version CUDA (`CudaGroup`) exposera le même contrat sur
+/// What the body can do with it is the SUBSET common to devices: `group_barrier`,
+/// `get_local_linear_range`. The CUDA version (`CudaGroup`) will expose the same contract on
 /// `__syncthreads`.
 struct CpuGroup {
     HD int get_local_linear_range() const { return size; }
 
-    std::barrier<> *barrier; ///< nul si `size == 1`
+    std::barrier<> *barrier; ///< null if `size == 1`
     int             size;
 };
 
@@ -25,9 +25,9 @@ HD inline void group_barrier( const CpuGroup &group ) {
         group.barrier->arrive_and_wait();
 }
 
-/// Le sous-groupe (le warp) d'une voie. Sur CPU chaque voie est son propre sous-groupe : rien
-/// n'y exécute en lockstep, donc `get_local_linear_range() == 1` et la barrière est vide. Un
-/// corps qui coopère par sous-groupe doit dégénérer correctement à cette largeur (voir
+/// The subgroup (the warp) of a lane. On CPU each lane is its own subgroup: nothing runs in
+/// lockstep there, so `get_local_linear_range() == 1` and the barrier is empty. A body that
+/// cooperates per subgroup must degenerate correctly at that width (see
 /// `OtPlan1d.cxx::sort_diracs`).
 struct CpuSubGroup {
     HD int get_local_linear_id   () const { return 0; }

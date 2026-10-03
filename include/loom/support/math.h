@@ -1,12 +1,12 @@
 #pragma once
 
-// LES MATHÉMATIQUES D'UN KERNEL passent par `sdot::` (`sdot::sqrt`, `sdot::exp`, ...), jamais par
-// `std::` directement : c'est le point unique où le device choisit son implémentation. Sur l'hôte
-// c'est `std::` ; dans du code device CUDA ce sont les intrinsèques du toolkit (`::sqrtf`, ...),
-// que `<cmath>` de nvcc expose sous les mêmes noms non qualifiés. Un fichier de `sdot/include`
-// écrit dans `namespace sdot` peut donc appeler `sqrt( x )` tout court.
+// A KERNEL'S MATH goes through `sdot::` (`sdot::sqrt`, `sdot::exp`, ...), never through
+// `std::` directly: it is the single point where the device chooses its implementation. On the host
+// it is `std::`; in CUDA device code it is the toolkit's intrinsics (`::sqrtf`, ...),
+// which nvcc's `<cmath>` exposes under the same unqualified names. A file of `sdot/include`
+// written in `namespace sdot` can therefore simply call `sqrt( x )`.
 //
-// Avec `atomic_add.h`, l'un des deux seuls endroits où un `#if` sur la cible est légitime.
+// Together with `atomic_add.h`, one of the only two places where an `#if` on the target is legitimate.
 
 #include <cmath>
 

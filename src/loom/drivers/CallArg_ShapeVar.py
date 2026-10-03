@@ -243,6 +243,10 @@ class CallArg_ShapeVar( CallArg ):
         from ..drivers.driver import driver
         return driver.array( self.inst.raw, dtype = Dtype.si( 32 ) ).reshape( self._jax_buffer_shape() )
 
+    def out_shape_dtype( self ):
+        import numpy
+        return tuple( int( s ) for s in self._jax_buffer_shape() ), numpy.dtype( numpy.int32 )
+
     def jax_out_spec( self ):
         import jax
         import jax.numpy as jnp

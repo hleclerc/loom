@@ -67,13 +67,13 @@ struct ShapeVarView {
         return make_shape_var_view( view( FORWARD( index )... ), max, errors, id );
     }
 
-    /// remise à zéro d'un compteur de sortie. Passe par la queue (donc par un kernel) : sur un
-    /// device, le buffer n'est pas accessible depuis l'hôte -- ce n'est pas une boucle hôte.
+    /// reset of an output counter. Goes through the queue (hence through a kernel): on a
+    /// device, the buffer is not accessible from the host -- this is not a host loop.
        void fill_with( auto &&queue, auto v ) { view.fill_with( FORWARD( queue ), v ); }
 
-    // comme argument de `run_parallel` : on rend la vue disponible, et on reconstruit la même
-    // `ShapeVarView` autour (`max` et `id` sont des constantes, elles suivent la vue dans le
-    // kernel). Le buffer d'erreurs est lu ET écrit (un compteur atomique) -> MutList.
+    // as an argument of `run_parallel`: we make the view available, and rebuild the same
+    // `ShapeVarView` around it (`max` and `id` are constants, they follow the view into the
+    // kernel). The error buffer is read AND written (an atomic counter) -> MutList.
        auto transfer_cost ( const auto &queue, auto io_category ) const {
         return sdot::transfer_cost( queue, io_category, view )
              + sdot::transfer_cost( queue, MutList(), errors );

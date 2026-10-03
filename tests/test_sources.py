@@ -1,20 +1,20 @@
-"""Les noyaux MULTI-FICHIERS : `FfiCode.per_item( sources = [ ( "x.cpp", { "DEF": ... } ) ] )`.
+"""MULTI-FILE kernels: `FfiCode.per_item( sources = [ ( "x.cpp", { "DEF": ... } ) ] )`.
 
-Une source de domaine est compilée une fois par (source, defines, compilateur) en un `.o` que
-tous les noyaux qui la nomment lient -- le code qu'on ne veut pas réinstancier dans chaque
-unité générée (une densité, une dimension : des macros choisissent). Ce test vérifie que les
-defines font bien des unités DISTINCTES, et que le graphe (ninja) les réutilise.
+A domain source is compiled once per (source, defines, compiler) into a `.o` that
+all the kernels naming it link against -- the code you do not want to reinstantiate in each
+generated unit (a density, a dimension: macros choose). This test checks that the
+defines do make DISTINCT units, and that the graph (ninja) reuses them.
 
-ELLE EST COMPILÉE EN CODE HÔTE, et c'est ce que ce test doit exercer. Une unité séparée n'est pas
-du code device : l'appeler depuis un corps `HD` demanderait la compilation device séparée de CUDA
-(`-rdc=true` des deux côtés, puis `-dlink`), que loom ne fait pas -- et que personne ne lui
-demande. Le seul usager réel de cette facilité, `sdot/otplan/Lineaire.cpp`, l'appelle depuis le
-HANDLER, qui est du code hôte.
+IT IS COMPILED AS HOST CODE, and that is what this test must exercise. A separate unit is not
+device code: calling it from an `HD` body would require CUDA's separate device compilation
+(`-rdc=true` on both sides, then `-dlink`), which loom does not do -- and which nobody asks of it.
+The only real user of this facility, `sdot/sdotplan/Linear.cpp`, calls it from the
+HANDLER, which is host code.
 
-Ce test le faisait depuis un corps `per_item`, donc depuis le device : il compilait sur CPU et
-échouait sur CUDA (« calling a __host__ function from a __host__ __device__ function »), ce qui
-n'était pas un défaut de loom mais du test. Il est écrit sur l'usage réel : `scaled` est appelée
-dans `kernel`, et le foncteur emporte le résultat par CAPTURE.
+This test used to do it from a `per_item` body, hence from the device: it compiled on CPU and
+failed on CUDA ("calling a __host__ function from a __host__ __device__ function"), which
+was not a defect of loom but of the test. It is now written on the real usage: `scaled` is called
+in `kernel`, and the functor carries the result away by CAPTURE.
 """
 from pathlib import Path
 import numpy
@@ -30,8 +30,8 @@ HERE = Path( __file__ ).resolve().parent / "cpp_sources"
 
 _CODE = """
     namespace {
-        /// ce que l'HOTE a calcule, emporte par valeur jusqu'au device
-        struct Poser {
+        /// what the HOST computed, carried by value to the device
+        struct Setter {
             SI v[ 3 ];
             HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
                 args.outputs.res( coords ) = v[ coords[ num ] ];
@@ -39,10 +39,10 @@ _CODE = """
         };
 
         void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
-            // `scaled` vit dans une unite compilee A PART ( `sources = ...` ), en code HOTE.
-            // `kernel` EST du code hote : c'est ici qu'on l'appelle, exactement comme
-            // `OtPlan` appelle `otplan::resoudre`.
-            queue.run_parallel( Poser{ { sdot::scaled( 1 ), sdot::scaled( 2 ), sdot::scaled( 3 ) } },
+            // `scaled` lives in a SEPARATELY compiled unit ( `sources = ...` ), as HOST code.
+            // `kernel` IS host code: this is where we call it, exactly as
+            // `OtPlan` calls `sdotplan::solve`.
+            queue.run_parallel( Setter{ { sdot::scaled( 1 ), sdot::scaled( 2 ), sdot::scaled( 3 ) } },
                                 args.outputs.res.domain(), args, batch_axes );
         }
     }

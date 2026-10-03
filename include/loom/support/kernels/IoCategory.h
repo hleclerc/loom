@@ -11,9 +11,9 @@ struct OutList   { void display( auto &ds ) const { ds << "OutList"; } };
 struct InpList   { void display( auto &ds ) const { ds << "InpList"; } };
 struct MutList   { void display( auto &ds ) const { ds << "MutList"; } };
 
-/// Catégorie « réduction » : porte l'opérateur (p.ex. `plus<double>()`, voir `Reducer.h`). L'argument
-/// qui suit dans `run_parallel` est la cible hôte : la queue donne au corps un accumulateur privé,
-/// initialisé à l'identité, et combine dans la cible une fois le kernel terminé.
+/// "Reduction" category: carries the operator (e.g. `plus<double>()`, see `Reducer.h`). The argument
+/// that follows in `run_parallel` is the host target: the queue gives the body a private accumulator,
+/// initialized to the identity, and combines it into the target once the kernel is done.
 template<class Op>
 struct RedList {
     Op   op;
@@ -50,8 +50,8 @@ template<class T> constexpr bool is_io_category =
     std::is_same_v<T,MutList>   || std::is_same_v<T,InpList>  || is_red_list<T> ||
     is_io_policy<T>;
 
-/// Cible de réduction « mappée » par `run_parallel` : op + pointeur vers la variable hôte
-/// résultat. Produite à la place de `kernel_form` quand la catégorie courante est un `RedList`.
+/// Reduction target "mapped" by `run_parallel`: op + pointer to the host result variable.
+/// Produced in place of `kernel_form` when the current category is a `RedList`.
 template<class Op, class T>
 struct ReductionTarget {
     Op  op;

@@ -1,5 +1,6 @@
 from loom import ShapeVar, ShapeArray, Axis, AxisList, Tensor, Aggregate, driver, RealTensor, IntTensor, BoolTensor
 from errand import test
+from loom.testing import need
 from loom.util import info
 import numpy
 
@@ -20,7 +21,7 @@ if test( "basic" ):
     c = Cell( nb_dims = nb_dims )
 
     c.vertex_positions = [ [ 1, 2 ] ]
-    # Vérifier que le dtype est bien extracté
+    # Check that the dtype is properly extracted
 
     info( c.nb_vertices.value )
 
@@ -159,9 +160,9 @@ if test( "axis_parsing" ):
 #     def __init__(self, params: Any):
 #         self.params = params
 
-#     # Permet la syntaxe MonTypeTemplate[int] ou MonTypeTemplate["X"]
+#     # Allows the syntax MyTemplateType[int] or MyTemplateType["X"]
 #     def __class_getitem__(cls, item, **kw ):
-#         # En production, vous pouvez retourner un objet proxy ou une instance spécialisée
+#         # In production, you can return a proxy object or a specialized instance
 #         return cls(params=item)
 
 # @aggregate
@@ -619,6 +620,7 @@ if test( "element_type_is_the_class" ):
 
 
 if test( "a_count_that_lives_on_the_device_is_refused_on_the_host" ):
+    need( "trace" )
     # The case the host/device split exists for: a kernel WRITES a count, so under a `jit` that
     # count is a tracer. Nothing can un-trace it, so `value` refuses it right there -- instead of
     # handing back something that fails later in whatever tried to size a buffer with it.
@@ -797,16 +799,16 @@ if test( "every_operation_has_both_forms" ):
                  RealTensor[ i ]( [ 0.0, 0.5 ] ).arcsin() )
 
 
-if test( "un_agregat_se_detache_en_entier" ):
-    # `loom.stop_gradient` PREND L'AGREGAT : il detache les tenseurs et PARTAGE tout le reste. Sans
-    # ca chaque appelant recopiait ses champs un par un -- du code qui perime le jour ou un champ
-    # s'ajoute, et qui restate des comptes qui peuvent alors se contredire.
+if test( "an_aggregate_detaches_entirely" ):
+    # `loom.stop_gradient` TAKES THE AGGREGATE: it detaches the tensors and SHARES everything else.
+    # Without that, every caller copied its fields one by one -- code that goes stale the day a field
+    # is added, and that restates counts which can then contradict each other.
     import loom
     from loom import CtShapeVar
 
     class Points( Aggregate ):
         pos     : RealTensor[ "num_point", "num_dim" ]
-        poids   : RealTensor[ "num_point" ]
+        weight   : RealTensor[ "num_point" ]
 
         num_point : Axis[ "nb_points" ]
         num_dim   : Axis[ "nb_dims" ]
@@ -816,27 +818,27 @@ if test( "un_agregat_se_detache_en_entier" ):
 
     p = Points( nb_dims = 2 )
     p.pos   = [ [ 0.0, 1.0 ], [ 2.0, 3.0 ], [ 4.0, 5.0 ] ]
-    p.poids = [ 1.0, 2.0, 3.0 ]
+    p.weight = [ 1.0, 2.0, 3.0 ]
 
     q = loom.stop_gradient( p )
 
-    # les valeurs sont les memes, les tampons sont d'autres objets
+    # the values are the same, the buffers are other objects
     assert numpy.asarray( q.pos.value ).tolist() == numpy.asarray( p.pos.value ).tolist()
-    assert numpy.asarray( q.poids.value ).tolist() == [ 1.0, 2.0, 3.0 ]
+    assert numpy.asarray( q.weight.value ).tolist() == [ 1.0, 2.0, 3.0 ]
     assert q.pos is not p.pos
 
-    # les comptes et les axes sont LES MEMES OBJETS : un compte restate est un compte qui peut
-    # se contredire, et un axe est une reference
+    # the counts and the axes are THE SAME OBJECTS: a restated count is a count that can
+    # contradict itself, and an axis is a reference
     assert q.nb_points is p.nb_points
     assert q.nb_dims is p.nb_dims
     assert q.num_dim is p.num_dim
     assert int( q.nb_points ) == 3 and int( q.nb_dims ) == 2
 
-    # les dimensions du detache sont nommees comme celles de l'original
+    # the dimensions of the detached one are named like those of the original
     assert q.pos.shape == [ 3, 2 ], q.pos.shape
     assert q.pos.name == "pos"
 
-    info( "un agregat se detache en entier" )
+    info( "an aggregate is detached as a whole" )
 
 
 if test( "a_result_keeps_its_extents_after_its_operand_is_gone" ):
@@ -1067,9 +1069,9 @@ if test( "a_dimension_can_be_shared_across_aggregates" ):
         pass
 
 
-if test( "fabriques" ):
-    # LES FABRIQUES : un tenseur bati depuis ses AXES, sans forme a repeter -- et sans jamais
-    # passer par `driver.array`, dont le dtype se devine depuis un litteral (et se devine mal).
+if test( "factories" ):
+    # THE FACTORIES: a tensor built from its AXES, with no shape to repeat -- and without ever
+    # going through `driver.array`, whose dtype is guessed from a literal (and guessed badly).
     print( "driver :", type( driver._checked_driver_instance() ).__name__ )
 
     n = ShapeVar( 4 )
@@ -1077,58 +1079,58 @@ if test( "fabriques" ):
     m = ShapeVar( 3 )
     y = Axis( m ); y.name = "y"
 
-    # la CLASSE est la declaration de type : un iota d'entiers est entier, point.
-    rangs = IntTensor[ x ].iota()
-    assert numpy.asarray( rangs.value ).tolist() == [ 0, 1, 2, 3 ]
-    assert not rangs.dtype.floating_point
+    # the CLASS is the type declaration: an iota of integers is integer, period.
+    ranks = IntTensor[ x ].iota()
+    assert numpy.asarray( ranks.value ).tolist() == [ 0, 1, 2, 3 ]
+    assert not ranks.dtype.floating_point
 
-    # sans axe et en rang > 1 : le rang PLAT, en ordre C -- « qui suis-je ? » d'un work-item
-    plat = IntTensor[ y, x ].iota()
-    assert numpy.asarray( plat.value ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
+    # without an axis and at rank > 1: the FLAT rank, in C order -- the "who am I?" of a work-item
+    flat = IntTensor[ y, x ].iota()
+    assert numpy.asarray( flat.value ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
 
-    # avec un axe : la COORDONNEE le long de cet axe, diffusee sur les autres
-    colonnes = IntTensor[ y, x ].iota( x )
-    assert numpy.asarray( colonnes.value ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
-    lignes = IntTensor[ y, x ].iota( y )
-    assert numpy.asarray( lignes.value ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
+    # with an axis: the COORDINATE along that axis, broadcast over the others
+    columns = IntTensor[ y, x ].iota( x )
+    assert numpy.asarray( columns.value ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
+    rows = IntTensor[ y, x ].iota( y )
+    assert numpy.asarray( rows.value ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
 
-    # zeros / ones / full, a la forme que les axes donnent
+    # zeros / ones / full, in the shape the axes give
     assert numpy.asarray( RealTensor[ y, x ].zeros().value ).tolist() == [ [ 0.0 ] * 4 ] * 3
     assert numpy.asarray( RealTensor[ y, x ].ones().value ).tolist() == [ [ 1.0 ] * 4 ] * 3
     assert numpy.asarray( RealTensor[ x ].full( 2.5 ).value ).tolist() == [ 2.5 ] * 4
 
-    # linspace : bornes INCLUSES, le long de l'axe nomme
+    # linspace: bounds INCLUDED, along the named axis
     assert numpy.asarray( RealTensor[ x ].linspace( 0, 1 ).value ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
     grille = numpy.asarray( RealTensor[ y, x ].linspace( 0, 1, x ).value ).tolist()
     assert grille == [ [ 0.0, 1 / 3, 2 / 3, 1.0 ] ] * 3
 
-    # un tirage reproductible, et qui reste dans [ 0, 1 [
+    # a reproducible draw, which stays within [ 0, 1 [
     a = RealTensor[ y, x ].random( seed = 7 )
     b = RealTensor[ y, x ].random( seed = 7 )
     va, vb = numpy.asarray( a.value ), numpy.asarray( b.value )
     assert va.shape == ( 3, 4 ) and ( va == vb ).all()
     assert ( 0 <= va ).all() and ( va < 1 ).all()
 
-    # « le long de quel axe ? » n'a pas de reponse par defaut en rang > 1 : on le DIT
+    # "along which axis?" has no default answer at rank > 1: we SAY it
     try:
         RealTensor[ y, x ].linspace( 0, 1 )
-        assert False, "un linspace de rang 2 doit nommer son axe"
+        assert False, "a rank-2 linspace must name its axis"
     except ValueError:
         pass
 
-    # un tirage uniforme est un REEL : le demander en entier est une erreur, pas un arrondi
+    # a uniform draw is a REAL: asking for it as an integer is an error, not a rounding
     try:
         IntTensor[ x ].random()
-        assert False, "un tirage uniforme entier n'a pas de sens ici"
+        assert False, "an integer uniform draw makes no sense here"
     except TypeError:
         pass
 
 
-if test( "une_taille_d_axe_peut_etre_une_formule" ):
-    # UNE FORMULE, et pas une affine : `D ( D + 1 ) / 2` est le nombre de coefficients
-    # independants d'une matrice symetrique D x D. Ce n'est pas lineaire en D, donc ca ne
-    # s'inverse pas -- et ca n'a pas a l'etre : la formule CALCULE un compte a partir d'autres,
-    # au lieu d'en DEDUIRE un d'une taille observee.
+if test( "an_axis_size_can_be_a_formula" ):
+    # A FORMULA, and not an affine: `D ( D + 1 ) / 2` is the number of independent coefficients
+    # of a symmetric D x D matrix. It is not linear in D, so it cannot be inverted
+    # -- and it does not have to be: the formula COMPUTES a count from others,
+    # instead of DEDUCING one from an observed size.
     from loom import CtShapeVar
 
     class Sym( Aggregate ):
@@ -1144,46 +1146,46 @@ if test( "une_taille_d_axe_peut_etre_une_formule" ):
     assert Sym( nb_dim = 3 ).num_coeff.max == 6
     assert Sym( nb_dim = 4 ).num_coeff.max == 10
 
-    # et le tenseur prend bien cette taille-la
+    # and the tensor does take that size
     s = Sym( nb_dim = 3 )
     s.coeffs = [ [ 0.0 ] * 6, [ 1.0 ] * 6 ]
     assert s.coeffs.shape == [ 2, 6 ], s.coeffs.shape
     assert int( s.nb_items ) == 2
 
-    # LA FORMULE EST EVALUEE A LA DEMANDE, et il le faut : dans un agregat les champs sont batis
-    # dans l'ordre des annotations, donc l'axe existe AVANT que le ctor ait prescrit `nb_dim`.
+    # THE FORMULA IS EVALUATED ON DEMAND, and it has to be: in an aggregate the fields are built
+    # in the order of the annotations, so the axis exists BEFORE the ctor has prescribed `nb_dim`.
 
-    # l'affine, elle, s'inverse toujours -- les deux chemins coexistent
-    class Bornes( Aggregate ):
+    # the affine, for its part, can always be inverted -- the two paths coexist
+    class Bounds( Aggregate ):
         v       : RealTensor[ "num_bound" ]
         num_bound : Axis[ "nb_rows + 1" ]
         nb_rows : ShapeVar
 
-    b = Bornes()
+    b = Bounds()
     b.v = [ 0.0, 2.0, 2.0, 5.0 ]
     assert int( b.nb_rows ) == 3
 
-    # un resultat non entier est une erreur de declaration, pas un arrondi silencieux
-    class Impair( Aggregate ):
+    # a non-integer result is a declaration error, not a silent rounding
+    class Odd( Aggregate ):
         w       : RealTensor[ "num_x" ]
         num_x   : Axis[ "nb_dim / 2" ]
         nb_dim  : CtShapeVar
 
     try:
-        Impair( nb_dim = 5 ).num_x.max
-        assert False, "2.5 n'est pas un compte"
+        Odd( nb_dim = 5 ).num_x.max
+        assert False, "2.5 is not a count"
     except ValueError:
         pass
 
 
-if test( "une_formule_suit_ses_symboles_dimension_par_dimension" ):
-    # UNE FORMULE PAR DIMENSION. Les symboles entrent TELS QUELS, donc une formule sur un compte
-    # par segment ( une taille d'image par dimension ) en rend un aussi -- c'est l'arithmetique de
-    # numpy qui porte la forme. C'est ce qui permet a une famille d'axes entiere de se CALCULER a
-    # partir d'une autre : la grille de tuiles qui couvre une image ( `examples/splats` ).
+if test( "a_formula_follows_its_symbols_dimension_by_dimension" ):
+    # ONE FORMULA PER DIMENSION. The symbols go in AS IS, so a formula on a per-segment count
+    # ( one image size per dimension ) yields one too -- it is numpy arithmetic that carries the
+    # shape. This is what allows a whole family of axes to be COMPUTED from another: the grid of
+    # tiles covering an image ( `examples/splats` ).
     from loom import CtShapeVar
 
-    class Grille( Aggregate ):
+    class Grid( Aggregate ):
         num_pixel : AxisList[ "num_dim", "nb_pixels" ]
         num_tile  : AxisList[ "num_dim", "( nb_pixels + 15 ) // 16" ]
 
@@ -1192,36 +1194,36 @@ if test( "une_formule_suit_ses_symboles_dimension_par_dimension" ):
         nb_pixels : ShapeVar[ "num_dim" ]
         nb_dims   : CtShapeVar
 
-    g = Grille( nb_dims = 2, nb_pixels = ( 256, 300 ) )
+    g = Grid( nb_dims = 2, nb_pixels = ( 256, 300 ) )
     assert g.num_pixel.max_list() == [ 256, 300 ]
-    assert g.num_tile.max_list() == [ 16, 19 ], g.num_tile.max_list()        # 300 = 18 tuiles + 12
+    assert g.num_tile.max_list() == [ 16, 19 ], g.num_tile.max_list()        # 300 = 18 tiles + 12
 
-    # et un tenseur declare dessus prend cette forme-la, une dimension par membre deroule
+    # and a tensor declared on it takes that shape, one dimension per unrolled member
     counts = IntTensor[ g.num_tile ]()
     assert counts.shape == [ 16, 19 ], counts.shape
 
-    # en 3D sans rien changer d'autre
-    g3 = Grille( nb_dims = 3, nb_pixels = ( 64, 65, 1 ) )
+    # in 3D with nothing else changed
+    g3 = Grid( nb_dims = 3, nb_pixels = ( 64, 65, 1 ) )
     assert g3.num_tile.max_list() == [ 4, 5, 1 ], g3.num_tile.max_list()
 
-    # `static_count` reste UN nombre -- le maximum, qui est ce qui dimensionne
+    # `static_count` remains ONE number -- the maximum, which is what sizes things
     assert g.nb_pixels.static_count() == 300
     assert list( g.nb_pixels.static_raw() ) == [ 256, 300 ]
 
-    info( "une formule par dimension" )
+    info( "one formula per dimension" )
 
 
-if test( "un_compte_est_un_nombre" ):
-    # `int( sv )` et `sv` la ou une taille est attendue : sans ca, tout site qui dimensionne
-    # quelque chose ecrivait `int( sv.value )`.
+if test( "a_count_is_a_number" ):
+    # `int( sv )` and `sv` where a size is expected: without that, every site that sizes
+    # something wrote `int( sv.value )`.
     n = ShapeVar( 7 )
     assert int( n ) == 7
     assert list( range( n ) ) == list( range( 7 ) )
     assert [ 0 ] * n == [ 0 ] * 7
 
-    # un compte non resolu dit POURQUOI, au lieu de rendre None quelque part plus loin
+    # an unresolved count says WHY, instead of returning None somewhere further on
     try:
         int( ShapeVar() )
-        assert False, "un compte non resolu ne vaut aucun entier"
+        assert False, "an unresolved count is worth no integer"
     except ValueError:
         pass

@@ -12,9 +12,9 @@ T_VT void __print_with_mutex( std::ostream &os, std::string_view arg_names, cons
     m.lock();
 
     // write
-    int cpt = 0;
+    int counter = 0;
     auto get_item = [&]( const auto &arg_value ) {
-        if ( cpt++ )
+        if ( counter++ )
             os << "\t";
         display( os << "\033[90m" << read_arg_name( arg_names ) << ":\033[0m ", arg_value );
     };

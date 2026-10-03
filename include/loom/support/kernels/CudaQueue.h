@@ -21,50 +21,50 @@
 
 namespace sdot {
 
-// ── la forme libre, declaree ailleurs ─────────────────────────────────────────────────────
-/// déclarée par `run_parallel.h` ( qui nous inclut ) : la forme LIBRE, que la méthode ci-dessous
-/// appelle. Redéclarée ici pour que la méthode puisse la nommer sans dépendre de l'ordre des
-/// inclusions.
+// ── the free form, declared elsewhere ─────────────────────────────────────────────────────
+/// declared by `run_parallel.h` ( which includes us ): the FREE form, which the method below
+/// calls. Redeclared here so that the method can name it without depending on the order of
+/// the includes.
 auto run_parallel( auto &&queue_list, auto &&second, auto &&...rest );
 
-/// Le contexte d'exécution CUDA : un FLUX, et les deux formes de lancement qu'un kernel peut
-/// demander (`submit_kernel`, `submit_kernel_grouped`) -- le pendant de `CpuQueue.h`, même
-/// contrat, trouvé par ADL depuis `run_parallel`, qui ne sait rien du device.
+/// The CUDA execution context: a STREAM, and the two launch forms that a kernel can
+/// request (`submit_kernel`, `submit_kernel_grouped`) -- the counterpart of `CpuQueue.h`, same
+/// contract, found by ADL from `run_parallel`, which knows nothing about the device.
 ///
-/// Le flux est celui que XLA nous donne pour l'appel (`ffi::PlatformStream`, voir `JaxFfi`) : ce
-/// que XLA a lancé avant nous sur ce flux est fini quand nous commençons, et ce que nous y lançons
-/// est fini quand XLA lit nos sorties -- l'ordre est celui du flux, sans synchronisation. Un
-/// `QueueEvent` attend quand même le flux à sa destruction (« synchrone par défaut », voir
-/// `QueueEvent.h`) : c'est ce qui rend les réductions et les relectures hôte correctes ; un appelant
-/// qui enchaîne des lancements et n'a rien à relire peut `detach()`.
+/// The stream is the one XLA gives us for the call (`ffi::PlatformStream`, see `JaxFfi`): what
+/// XLA launched before us on this stream is finished when we start, and what we launch on it
+/// is finished when XLA reads our outputs -- the order is that of the stream, without synchronization. A
+/// `QueueEvent` still waits for the stream on its destruction ("synchronous by default", see
+/// `QueueEvent.h`): this is what makes reductions and host re-reads correct; a caller
+/// that chains launches and has nothing to re-read can `detach()`.
 ///
-/// Sur GPU la répartition est en FOULÉES (`index += nb_threads`), pas en tranches : des fils
-/// voisins lisent des items voisins, c'est ce qui coalesce les accès.
+/// On GPU the distribution is STRIDED (`index += nb_threads`), not in slices: neighbouring
+/// threads read neighbouring items, which is what coalesces the accesses.
 struct CudaQueue {
     using DefaultKernelMemorySpace = CudaKernelMemorySpace;
 
     explicit CudaQueue( cudaStream_t stream ) : stream( stream ) {}
     CudaQueue() : stream( 0 ) {}
 
-    /// ce qu'un noyau peut savoir de cette carte ( voir `Machine.h` ). Interroge le driver UNE
-    /// fois : les attributs ne changent pas, et un appel par noyau serait du temps perdu.
+    /// what a kernel can know about this card ( see `Machine.h` ). Queries the driver ONCE:
+    /// the attributes do not change, and one call per kernel would be wasted time.
     Machine machine() const;
 
 
-    /// LANCER : `queue.run_parallel( Foncteur(), domaine, args )`.
+    /// LAUNCH: `queue.run_parallel( Functor(), domain, args )`.
     ///
-    /// Trois choses, et pas une liste de paires ( io, valeur ) : `args` traverse en UN morceau, son
-    /// `kernel_form` engendré portant la politique d'io de chaque argument. Le foncteur reçoit donc
-    /// `( item, args )`, où `args` est la forme KERNEL -- mêmes données, sans la queue.
+    /// Three things, and not a list of ( io, value ) pairs: `args` goes through in ONE piece, its generated
+    /// `kernel_form` carrying the io policy of each argument. The functor therefore receives
+    /// `( item, args )`, where `args` is the KERNEL form -- same data, without the queue.
     ///
-    /// La forme libre `sdot::run_parallel( queue, domaine, func, io, valeur, ... )` reste là pour
-    /// qui veut une autre politique ou un sous-ensemble.
+    /// The free form `sdot::run_parallel( queue, domain, func, io, value, ... )` remains for
+    /// whoever wants another policy or a subset.
     auto run_parallel( auto &&func, auto &&items, auto &&args ) {
         return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ), MutList(), FORWARD( args ) );
     }
 
-    /// la meme, en passant UNE valeur de plus au foncteur -- typiquement `batch_axes`, dont le corps
-    /// a besoin pour isoler ses axes propres ( `coords.axes - batch_axes` ).
+    /// the same, passing ONE more value to the functor -- typically `batch_axes`, which the body
+    /// needs to isolate its own axes ( `coords.axes - batch_axes` ).
     auto run_parallel( auto &&func, auto &&items, auto &&args, auto &&extra ) {
         return sdot::run_parallel( *this, FORWARD( items ), FORWARD( func ),
                                    MutList(), FORWARD( args ), InpList(), FORWARD( extra ) );
@@ -80,10 +80,10 @@ inline void cuda_check( cudaError_t err, const char *what ) {
         throw std::runtime_error( std::string( "CUDA: " ) + what + ": " + cudaGetErrorString( err ) );
 }
 
-/// les attributs de la carte, lus UNE fois. `nb_workers` est le nombre de fils qui peuvent etre
-/// residents en meme temps ( SMs x fils par SM ) : c'est ce sur quoi dimensionner un scratch PAR
-/// FIL. `suggested_group` est la largeur de warp, decoupage naturel d'un algorithme cooperatif --
-/// et non le `block = 128` du lancement plat, qui est un detail interne a ce fichier.
+/// the attributes of the card, read ONCE. `nb_workers` is the number of threads that can be
+/// resident at the same time ( SMs x threads per SM ): it is what a PER-THREAD scratch should
+/// be sized on. `suggested_group` is the warp width, the natural split of a cooperative algorithm --
+/// and not the `block = 128` of the flat launch, which is an implementation detail of this file.
 inline const Machine &cuda_machine() {
     static const Machine m = [] {
         int dev = 0;
@@ -107,7 +107,7 @@ inline const Machine &cuda_machine() {
 
 inline Machine CudaQueue::machine() const { return cuda_machine(); }
 
-// ── relecture / écriture hôte d'un élément en mémoire globale (`Ptr::value` / `Ptr::set`) ──
+// ── host re-read / write of an element in global memory (`Ptr::value` / `Ptr::set`) ──
 template<class T>
 void copy( Ptr<T,CpuHostMemorySpace> dst, Ptr<const T,CudaGlobalMemorySpace> src, SI n ) {
     cuda_check( cudaMemcpy( dst.raw, src.raw, sizeof( T ) * n, cudaMemcpyDeviceToHost ), "memcpy device -> host" );
@@ -121,10 +121,10 @@ void copy( Ptr<T,CudaGlobalMemorySpace> dst, Ptr<const T,CpuHostMemorySpace> src
     cuda_check( cudaMemcpy( dst.raw, src.raw, sizeof( T ) * n, cudaMemcpyHostToDevice ), "memcpy host -> device" );
 }
 
-// ── réductions : un accumulateur en registres par fil, combiné atomiquement à la fin ──────────
+// ── reductions: a per-thread accumulator in registers, combined atomically at the end ──────────
 namespace detail::CudaQueueLaunch {
-    /// `target = op( target, value )` atomique, par CAS sur la représentation 32 ou 64 bits --
-    /// générique sur l'opérateur, ce que `atomicAdd` seul ne donne pas (`maximum` sur un double).
+    /// atomic `target = op( target, value )`, by CAS on the 32 or 64-bit representation --
+    /// generic over the operator, which `atomicAdd` alone does not give (`maximum` on a double).
     template<class Op,class T>
     __device__ void atomic_combine( T *target, T value, const Op &op ) {
         if constexpr ( sizeof( T ) == 4 ) {
@@ -138,7 +138,7 @@ namespace detail::CudaQueueLaunch {
                 old = atomicCAS( addr, assumed, bits );
             } while ( old != assumed );
         } else {
-            static_assert( sizeof( T ) == 8, "atomic_combine : 32 ou 64 bits" );
+            static_assert( sizeof( T ) == 8, "atomic_combine: 32 or 64 bits" );
             unsigned long long *addr = reinterpret_cast<unsigned long long *>( target );
             unsigned long long old = *addr, assumed;
             do {
@@ -162,8 +162,8 @@ namespace detail::CudaQueueLaunch {
         T *target;
     };
 
-    /// une cible de réduction côté device : le scalaire qui reçoit les contributions, et sa
-    /// relecture / libération une fois le kernel fini
+    /// a device-side reduction target: the scalar that receives the contributions, and its
+    /// re-read / release once the kernel is finished
     template<class Op,class T>
     struct DeviceTarget {
         Op  op;
@@ -174,10 +174,10 @@ namespace detail::CudaQueueLaunch {
     template<class Op,class T>
     DeviceTarget<Op,T> device_target_for( const ReductionTarget<Op,T> &target, cudaStream_t stream ) {
         T *dev;
-        cuda_check( cudaMallocAsync( ( void ** ) &dev, sizeof( T ), stream ), "malloc (réduction)" );
+        cuda_check( cudaMallocAsync( ( void ** ) &dev, sizeof( T ), stream ), "malloc (reduction)" );
         const T identity = Op::identity();
-        cuda_check( cudaMemcpyAsync( dev, &identity, sizeof( T ), cudaMemcpyHostToDevice, stream ), "memcpy (identité)" );
-        cuda_check( cudaStreamSynchronize( stream ), "sync (identité)" ); // `identity` est sur la pile
+        cuda_check( cudaMemcpyAsync( dev, &identity, sizeof( T ), cudaMemcpyHostToDevice, stream ), "memcpy (identity)" );
+        cuda_check( cudaStreamSynchronize( stream ), "sync (identity)" ); // `identity` is on the stack
         return { target.op, target.host, dev };
     }
 
@@ -211,8 +211,8 @@ namespace detail::CudaQueueLaunch {
         }, targets );
     }
 
-    /// le pendant coopératif de `call` : le rang plat s'y ajoute de la même façon, et un foncteur
-    /// qui ne le prend pas continue de marcher.
+    /// the cooperative counterpart of `call`: the flat rank is added to it in the same way, and a functor
+    /// that does not take it keeps working.
     template<class Func,class Item,class... Rest>
     __device__ void call_grouped( Func &func, Item item, SI flat_index, Rest &&...rest ) {
         if constexpr ( requires { func( item, flat_index, rest... ); } )
@@ -234,8 +234,8 @@ namespace detail::CudaQueueLaunch {
     }
 }
 
-/// Lancement plat : `nb_threads` fils, en foulées sur les items ; les réductions par fil en
-/// registres, combinées atomiquement dans un scalaire device relu par le finalizer de l'événement.
+/// Flat launch: `nb_threads` threads, strided over the items; per-thread reductions in
+/// registers, combined atomically into a device scalar re-read by the event's finalizer.
 template<class Deps,class Func,class ItemList,class Targets,class... Args>
 auto submit_kernel( const CudaQueue &queue, const Deps &deps, Func &&func, ItemList &&item_list,
                     int nb_items, int nb_threads, Targets reduction_targets, Args &&...args ) {
@@ -247,30 +247,30 @@ auto submit_kernel( const CudaQueue &queue, const Deps &deps, Func &&func, ItemL
 
     const int block = 128, grid = ( nb_threads + block - 1 ) / block;
     flat_kernel<<<grid, block, 0, stream>>>( func, item_list, nb_items, nb_threads, targets, args... );
-    cuda_check( cudaGetLastError(), "lancement" );
+    cuda_check( cudaGetLastError(), "launch" );
 
     QueueEvent ev( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync" ); } );
     std::apply( [&]( auto &...t ) {
         ( ev.finalizers.push_back( [t]{
-            cuda_check( cudaMemcpy( t.host, t.dev, sizeof( *t.host ), cudaMemcpyDeviceToHost ), "memcpy (réduction)" );
+            cuda_check( cudaMemcpy( t.host, t.dev, sizeof( *t.host ), cudaMemcpyDeviceToHost ), "memcpy (reduction)" );
             cudaFree( t.dev );
         } ), ... );
     }, targets );
     return ev;
 }
 
-/// Lancement coopératif : un BLOC de `group_size` voies par item concurrent, `local_elems` mots
-/// `int32` de mémoire partagée (`local_scratch`), `group_barrier` sur `__syncthreads`.
+/// Cooperative launch: one BLOCK of `group_size` lanes per concurrent item, `local_elems` `int32`
+/// words of shared memory (`local_scratch`), `group_barrier` on `__syncthreads`.
 template<class Deps,class Func,class ItemList,class Targets,class... Args>
 auto submit_kernel_grouped( const CudaQueue &queue, const Deps &deps, Func &&func, ItemList &&item_list,
                             int nb_items, int nb_groups, int group_size, int local_elems, Targets, Args &&...args ) {
     using namespace detail::CudaQueueLaunch;
-    static_assert( std::tuple_size_v<Targets> == 0, "les réductions ne sont pas supportées dans un kernel de groupe" );
+    static_assert( std::tuple_size_v<Targets> == 0, "reductions are not supported in a group kernel" );
     deps.wait_all();
     cudaStream_t stream = queue.stream;
     grouped_kernel<<<nb_groups, group_size, sizeof( std::int32_t ) * std::max( local_elems, 1 ), stream>>>( func, item_list, nb_items, nb_groups, args... );
-    cuda_check( cudaGetLastError(), "lancement (groupes)" );
-    return QueueEvent( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync (groupes)" ); } );
+    cuda_check( cudaGetLastError(), "launch (groups)" );
+    return QueueEvent( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync (groups)" ); } );
 }
 
 } // namespace sdot

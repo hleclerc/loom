@@ -6,16 +6,16 @@
 
 namespace sdot {
 
-// ── UN ENSEMBLE D'AXES ────────────────────────────────────────────────────────────────────────
+// ── A SET OF AXES ─────────────────────────────────────────────────────────────────────────────
 //
-/// Les axes d'un domaine ou d'un multi-indice, comme un ENSEMBLE : on les soustrait, on les
-/// parcourt. C'est ce qui permet d'ecrire
+/// The axes of a domain or of a multi-index, as a SET: they can be subtracted, they can be
+/// traversed. This is what makes it possible to write
 ///
 ///     const auto main_axes = coords.axes - batch_axes;
 ///
-/// donc de separer les axes PROPRES d'un noyau de ceux qu'un `vmap` lui a ajoutes -- et donc
-/// d'ecrire un stencil qui ne sait pas qu'il est batche. L'ensemble est vide de donnees : il n'existe
-/// qu'a la compilation, et `for_each` s'y deroule en un pli.
+/// and therefore to separate a kernel's OWN axes from those a `vmap` added to it -- and therefore
+/// to write a stencil that does not know it is batched. The set is empty of data: it only exists
+/// at compile time, and `for_each` unrolls over it as a fold.
 template<class... Axes>
 struct AxisSet {
     SCInt ct_size = sizeof...( Axes );
@@ -25,7 +25,7 @@ namespace detail {
     template<class A,class Set> constexpr bool axis_in_set = false;
     template<class A,class... B> constexpr bool axis_in_set<A,AxisSet<B...>> = ( std::is_same_v<A,B> || ... );
 
-    /// les axes de `Rest...` qui ne sont pas dans `Sub`, accumules dans `Acc`
+    /// the axes of `Rest...` that are not in `Sub`, accumulated in `Acc`
     template<class Sub,class Acc,class... Rest> struct AxisDiff;
     template<class Sub,class... Keep> struct AxisDiff<Sub,AxisSet<Keep...>> { using type = AxisSet<Keep...>; };
     template<class Sub,class... Keep,class Head,class... Tail>
@@ -35,10 +35,10 @@ namespace detail {
             typename AxisDiff<Sub,AxisSet<Keep...,Head>,Tail...>::type>;
     };
 
-    /// l'axe porte par un element. Deux formes d'entree : un multi-indice ( des `AxisIndex`, dont
-    /// on prend l'`axis_type` ) ou des NOMS d'axes deja nus ( ce que porte un `CartesianIndices` ).
-    /// Les confondre etait un defaut silencieux : `batch_axes` se reduisait a `UnnamedAxis`, donc
-    /// `coords.axes - batch_axes` ne retirait rien et le stencil parcourait l'axe de batch.
+    /// the axis carried by an element. Two input forms: a multi-index ( `AxisIndex` values, from which
+    /// we take the `axis_type` ) or bare axis NAMES ( what a `CartesianIndices` carries ).
+    /// Confusing them was a silent defect: `batch_axes` collapsed to `UnnamedAxis`, so
+    /// `coords.axes - batch_axes` removed nothing and the stencil traversed the batch axis.
     template<class T> struct AxisOf { using type = std::conditional_t<is_axis<T>,T,UnnamedAxis>; };
     template<class A,class I,bool O> struct AxisOf<AxisIndex<A,I,O>> { using type = A; };
 
@@ -46,62 +46,62 @@ namespace detail {
     template<class... T> struct AxesOfTuple<Tuple<T...>> { using type = AxisSet<typename AxisOf<T>::type...>; };
 }
 
-/// LA DIFFERENCE : les axes de `a` qui ne sont pas dans `b`.
+/// THE DIFFERENCE: the axes of `a` that are not in `b`.
 template<class... A,class... B>
 HD constexpr auto operator-( AxisSet<A...>, AxisSet<B...> ) {
     return typename detail::AxisDiff<AxisSet<B...>,AxisSet<>,A...>::type{};
 }
 
-/// LA DIFFERENCE AVEC UN SEUL AXE : `image.axes - num_channel`, qui est la facon dont un corps qui
-/// ne connait pas sa dimension dit « tous les axes sauf celui-la ». Un axe n'est pas un `AxisSet`,
-/// d'ou le `requires` : rien a departager avec la soustraction d'ensembles ci-dessus.
+/// THE DIFFERENCE WITH A SINGLE AXIS: `image.axes - num_channel`, which is how a body that
+/// does not know its dimension says "all the axes but that one". An axis is not an `AxisSet`,
+/// hence the `requires`: nothing to disambiguate from the set subtraction above.
 template<class... A,class B> requires ( is_axis<B> )
 HD constexpr auto operator-( AxisSet<A...> a, B ) {
     return a - AxisSet<B>{};
 }
 
-/// pour chaque axe. Un PLI, pas une boucle : les axes n'existent qu'a la compilation, donc le corps
-/// est deroule et `axis` est un type different a chaque tour ( c'est ce qui permet `coords + axis` ).
+/// for each axis. A FOLD, not a loop: the axes only exist at compile time, so the body
+/// is unrolled and `axis` is a different type at each turn ( this is what makes `coords + axis` possible ).
 template<class... Axes,class F>
 HD constexpr void for_each( AxisSet<Axes...>, F &&f ) {
     ( f( Axes{} ), ... );
 }
 
-/// LE MEME PLI, AVEC LA POSITION : `f( axis, d )`, `d` comptant de 0.
+/// THE SAME FOLD, WITH THE POSITION: `f( axis, d )`, `d` counting from 0.
 ///
-/// C'est ce qu'il faut pour franchir la frontiere entre les axes -- qui n'existent qu'a la
-/// compilation -- et un calcul ecrit en `for ( d = 0; d < D; ++d )`, qui est la facon naturelle
-/// d'ecrire une geometrie en D dimensions. Un corps y recopie ses coordonnees dans un tableau et
-/// n'a plus jamais a nommer un axe :
+/// This is what is needed to cross the boundary between the axes -- which only exist at
+/// compile time -- and a computation written as `for ( d = 0; d < D; ++d )`, which is the natural way
+/// to write a geometry in D dimensions. A body copies its coordinates into an array there and
+/// never has to name an axis again:
 ///
 ///     SI x[ D ];
 ///     for_each_indexed( main_axes, [&]( auto axis, int d ) { x[ d ] = coords[ axis ]; } );
 ///
-/// L'ordre est garanti : un pli sur `,` evalue de gauche a droite.
+/// The order is guaranteed: a fold over `,` evaluates left to right.
 template<class... Axes,class F>
 HD constexpr void for_each_indexed( AxisSet<Axes...>, F &&f ) {
     int index = 0;
     ( f( Axes{}, index++ ), ... );
 }
 
-/// vrai s'il existe un axe pour lequel `f` est vraie.
+/// true if there is an axis for which `f` is true.
 template<class... Axes,class F>
 HD constexpr bool any_of( AxisSet<Axes...>, F &&f ) {
     return ( f( Axes{} ) || ... );
 }
 
-// ── UN MULTI-INDICE NOMME ─────────────────────────────────────────────────────────────────────
+// ── A NAMED MULTI-INDEX ───────────────────────────────────────────────────────────────────────
 //
-/// CE QU'UN ITEM EST : des coordonnees qui savent le nom de leur axe.
+/// WHAT AN ITEM IS: coordinates that know the name of their axis.
 ///
-///     coords[ y ]          la coordonnee le long de `y`
-///     coords + y           les memes, decalees de +1 le long de `y` ( voisinage d'un stencil )
-///     coords.axes          l'ensemble des axes portes
-///     tenseur( coords )    indexe par NOM, et un tenseur qui n'a pas l'axe l'ignore
+///     coords[ y ]          the coordinate along `y`
+///     coords + y           the same, shifted by +1 along `y` ( neighbourhood of a stencil )
+///     coords.axes          the set of carried axes
+///     tensor( coords )     indexes by NAME, and a tensor that does not have the axis ignores it
 ///
-/// C'est ce qui remplace un `Tuple` nu passe de main en main : un corps qui veut un entier le
-/// demande par nom, au lieu de compter les positions. Un tenseur accepte les DEUX ( voir
-/// `TensorView::operator()` ) -- le `Tuple` reste utilisable pour qui l'a deja.
+/// This is what replaces a bare `Tuple` passed from hand to hand: a body that wants an integer
+/// asks for it by name, instead of counting positions. A tensor accepts BOTH ( see
+/// `TensorView::operator()` ) -- the `Tuple` stays usable for whoever already has one.
 template<class Tup>
 struct Coords {
     using Values = Tup;
@@ -109,12 +109,12 @@ struct Coords {
 
     SCInt  ct_size = Tup::ct_size;
 
-    /// les axes qu'on porte. Sans donnees, donc gratuit.
+    /// the axes we carry. Without data, hence free.
     static constexpr Axes axes = {};
 
-    /// la coordonnee, par NOM d'axe ( `coords[ y ]` ) ou par POSITION ( `coords[ 0_c ]` ).
-    /// Les deux, parce que les deux ont un sens : le nom quand on parle d'un axe, la position quand
-    /// le domaine est anonyme ( `indices_over( n )` ).
+    /// the coordinate, by axis NAME ( `coords[ y ]` ) or by POSITION ( `coords[ 0_c ]` ).
+    /// Both, because both make sense: the name when talking about an axis, the position when
+    /// the domain is anonymous ( `indices_over( n )` ).
     HD constexpr auto operator[]( auto axis_ou_position ) const {
         if constexpr ( is_axis<DECAYED_TYPE_OF( axis_ou_position )> )
             return coord( values, axis_ou_position );
@@ -131,7 +131,7 @@ template<class T> struct IsCoords                 : std::false_type {};
 template<class T> struct IsCoords<Coords<T>>      : std::true_type  {};
 
 namespace detail {
-    /// les memes coordonnees, celle de `Axis` decalee de `d`
+    /// the same coordinates, with that of `Axis` shifted by `d`
     template<class Axis>
     HD constexpr auto shift_coord( const auto &values, Axis, SI d ) {
         return map( values, [&]( auto e ) {
@@ -144,8 +144,8 @@ namespace detail {
     }
 }
 
-/// LE VOISINAGE : `coords + y` est `coords` avec sa coordonnee `y` augmentee de 1. Les autres ne
-/// bougent pas -- y compris les axes de batch, ce qui est exactement ce qu'on veut d'un stencil.
+/// THE NEIGHBOURHOOD: `coords + y` is `coords` with its coordinate `y` increased by 1. The others do not
+/// move -- including the batch axes, which is exactly what we want from a stencil.
 template<class Tup,class Axis> requires ( is_axis<Axis> )
 HD constexpr auto operator+( const Coords<Tup> &c, Axis a ) { return coords_of( detail::shift_coord( c.values, a, +1 ) ); }
 

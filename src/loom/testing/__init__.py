@@ -1,9 +1,9 @@
-"""Ce que loom prête à qui l'éprouve -- et plus le harnais, qui est `errand`.
+"""What loom lends to whoever puts it to the test -- and no longer the harness, which is `errand`.
 
-Un fichier de travail déclare ses entrées avec `errand` :
+A working file declares its entries with `errand`:
 
     from errand import test, bench, experiment, Param
-    from loom.testing import check_grad          # si besoin
+    from loom.testing import check_grad          # if needed
 
     if test( "my test" ):
         assert 0 == 0
@@ -11,20 +11,21 @@ Un fichier de travail déclare ses entrées avec `errand` :
     if p := bench( "my bench", nb_diracs = Param( 1000, help = "nb diracs" ) ):
         p.results[ "cost" ] = run_bench( p.nb_diracs )
 
-Ce module n'héberge plus que ce qui est PROPRE À LOOM : vérifier un gradient. Tout le reste
--- l'enregistrement en deux phases, les paramètres, `p.out_dir`, `result.yaml`, les
-environnements, les matrices -- vivait ici par accident d'histoire et vit maintenant dans
-`errand`, qui ne sait rien de loom et qu'un autre projet peut donc utiliser.
+This module now hosts only what is SPECIFIC TO LOOM: checking a gradient. Everything else
+-- the two-phase registration, the parameters, `p.out_dir`, `result.yaml`, the
+environments, the matrices -- lived here by historical accident and now lives in
+`errand`, which knows nothing about loom and which another project can therefore use.
 
-Ce qui a disparu, et par quoi :
+What disappeared, and what replaces it:
 
 * `test`/`bench`/`experiment`/`Param`/`Args` -> `errand`
 * `driver_is( "torch" )`                     -> `errand.has_tag( "driver=torch" )`
-* `out_dir()`                                -> `errand.out_dir()`, ou `p.out_dir`
-* `info`/`infox`/`new_batch_axis` posés dans `builtins` -> importés comme tout le monde
-  ( `from loom.util import info` ). Un nom qui apparaît sans avoir été importé est une
-  dette qu'on paie en cherchant d'où il vient.
+* `out_dir()`                                -> `errand.out_dir()`, or `p.out_dir`
+* `info`/`infox`/`new_batch_axis` injected into `builtins` -> imported like everything else
+  ( `from loom.util import info` ). A name that appears without having been imported is a
+  debt paid by searching for where it comes from.
 """
 from .grad_check import check_grad
+from .need import need, need_autodiff
 
-__all__ = [ "check_grad" ]
+__all__ = [ "check_grad", "need", "need_autodiff" ]

@@ -1,15 +1,21 @@
 """Skip a test, with a notification, when the driver in use lacks a capability."""
 
-_WHAT = { "grad": "autodiff", "vmap": "vmap", "trace": "a tracing jit", "jax": "jax itself" }
+_WHAT = { "grad": "autodiff", "vmap": "vmap", "trace": "a tracing jit", "jax": "jax itself", "cpu": "the CPU device" }
 
 def need( capability: str ):
     """Call at the top of a test body: skips the test (reported as SKIP) if the active driver cannot do `capability`.
 
-    `capability` is "grad" (autodiff: `grad`/`vjp`), "vmap", or "trace" (a `jit` that traces its
-    arguments into tracers). Only the numpy driver ( forward-only, `jit` is the identity ) lacks them today. `errand` is imported lazily: this module may be imported
+    `capability` is "grad" (autodiff: `grad`/`vjp`), "vmap", "trace" (a `jit` that traces its
+    arguments into tracers), "jax" (the test calls jax directly) or "cpu" (host code: the driver's
+    device must be the CPU). Only the numpy driver ( forward-only, `jit` is the identity ) lacks them today. `errand` is imported lazily: this module may be imported
     by an interpreter that is not the one the entry runs in.
     """
     from loom import driver
+    if capability == "cpu":
+        if not driver.device.is_cpu:
+            from errand import skip
+            skip( f"needs the CPU device -- the driver runs on { driver.device }", hint = "run with a CPU environment" )
+        return
     framework = str( driver.framework )
     # torch differentiates and maps, but its `jit` is the identity: nothing is traced into tracers
     if capability == "jax":         # the test calls `jax` directly: nothing to fall back on

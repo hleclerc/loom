@@ -26,6 +26,7 @@ import loom
 from loom import Axis, ShapeVar, RealTensor, driver
 from loom.compilation.FfiCode import FfiCode
 from errand import test
+from loom.testing import need
 
 import numpy
 
@@ -92,6 +93,7 @@ def _call( values ):
 
 
 if test( "allocates_the_exact_size" ):
+    need( "cpu" )
     # three DIFFERENT useful sizes for a single source: if the capacity had to be prescribed,
     # a bound would be needed here -- hence waste, or truncation.
     cas = ( ( [ 1.0, -2.0, 3.0 ], 4.0, 2 ),
@@ -119,6 +121,7 @@ if test( "allocates_the_exact_size" ):
 
 
 if test( "under_jit" ):
+    need( "cpu" )
     # THE point of the spike. An OUTPUT whose shape depends on the data is impossible under `jit` and will
     # stay so. An INTERNAL size would work: the shape of the buffer is not in the XLA program,
     # it only exists when the handler runs. This test checks it where it is served, and otherwise

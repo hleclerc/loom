@@ -39,6 +39,36 @@ def env_cxxflags() -> list:
     return shlex.split( env.var( "CXXFLAGS", "" ) )
 
 
+# ── OpenMP ───────────────────────────────────────────────────────────────────────────────────────
+# Some of the code a kernel pulls in is parallel on its own ( the AMGCL linear solvers of the transport ):
+# without `-fopenmp` it silently runs on ONE thread -- measured: 4x slower on 2D/3D Newton solves, 2.2x on
+# the whole 2D uniform solve. So OpenMP is on whenever the compiler can do it ( g++, a clang with libomp );
+# Apple's clang cannot, and the code then falls back to its sequential choices ( `_OPENMP` is not defined ).
+# `LOOM_OPENMP=0` turns it off ( e.g. to keep the OpenMP runtime out of a process that has another one ).
+
+_openmp_cache = {}
+
+
+def openmp_flags( cxx: str | None, sysroot: list = () ) -> list:
+    """`[ "-fopenmp" ]` when `cxx` compiles, links AND runs a program that uses it, else `[]`. Probed once per
+    compiler."""
+    if cxx is None or env.var( "OPENMP", "" ).strip().lower() in ( "0", "false", "no", "off" ):
+        return []
+    if cxx not in _openmp_cache:
+        import subprocess, tempfile
+        src = b"#include <omp.h>\nint main() { int n = 0;\n#pragma omp parallel reduction(+:n)\n n += 1; return n > 0 ? 0 : 1; }\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = str( Path( tmp ) / "probe" )
+            try:
+                ok = subprocess.run( [ cxx, "-fopenmp", "-x", "c++", "-", "-o", exe, *sysroot ], input = src,
+                                     capture_output = True, timeout = 60 ).returncode == 0 \
+                     and subprocess.run( [ exe ], capture_output = True, timeout = 60 ).returncode == 0
+            except ( OSError, subprocess.SubprocessError ):
+                ok = False
+        _openmp_cache[ cxx ] = [ "-fopenmp" ] if ok else []
+    return _openmp_cache[ cxx ]
+
+
 # ── macOS: an SDK the linker can read ────────────────────────────────────────────────────────────
 # The default SDK ( `xcrun --show-sdk-path` ) can be newer than the installed `ld`: its `.tbd`s
 # name an architecture this `ld` does not know ( `tapi error: ... unknown architecture` ), and
@@ -262,7 +292,8 @@ class HostCxx( Compiler ):
 
     def flags( self ) -> list:
         return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
-                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ), *env_cxxflags() ]
+                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
+                 *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *env_cxxflags() ]
 
     @property
     def build_signature( self ) -> str:
@@ -285,9 +316,9 @@ class HostCxx( Compiler ):
             "cxx":             ( [ self.cxx, *self.flags(), "{includes}", "{defines}", "{extra}",
                                    "-MMD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
                                  True, "c++ $in $defines" ),
-            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *sysroot_flags( self.cxx ), *bsymbolic, "{soname}",
+            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *bsymbolic, "{soname}",
                                    "-o", "{out}", "{in}", "{libs}" ], False, "link $out" ),
-            "link_executable": ( [ self.cxx, "-pthread", *sysroot_flags( self.cxx ), "-o", "{out}", "{in}", "{libs}" ],
+            "link_executable": ( [ self.cxx, "-pthread", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), "-o", "{out}", "{in}", "{libs}" ],
                                  False, "link $out" ),
         }
 

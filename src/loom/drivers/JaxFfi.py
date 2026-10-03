@@ -151,6 +151,10 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     )
 
     _loaded[ name ] = lib
+    # the kernel-only timing ( `LOOM_KERNEL_TIMING`, CUDA ) asks each library for its totals
+    if device.is_cuda_gpu:
+        from ..devices import kernel_timing
+        kernel_timing.register( name, code_name, lib )
     return name
 
 

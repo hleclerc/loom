@@ -16,8 +16,12 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace sdot {
 
@@ -119,6 +123,160 @@ void copy( Ptr<T,CpuHostMemorySpace> dst, Ptr<T,CudaGlobalMemorySpace> src, SI n
 template<class T>
 void copy( Ptr<T,CudaGlobalMemorySpace> dst, Ptr<const T,CpuHostMemorySpace> src, SI n ) {
     cuda_check( cudaMemcpy( dst.raw, src.raw, sizeof( T ) * n, cudaMemcpyHostToDevice ), "memcpy host -> device" );
+}
+
+// ── kernel-only timing ( `LOOM_KERNEL_TIMING=1` ) ──────────────────────────────────────────────
+/// What a benchmark needs and the wall clock of a call cannot give: the time the CARD spent in our
+/// kernels, without the host side of the call ( XLA dispatch, the handler, the allocations, the
+/// copies ). Off by default: the switch is read ONCE, at the first launch of this library.
+///
+/// On, each launch is bracketed by two `cudaEvent`s recorded on the call's stream -- the time between
+/// them is the kernel alone, even when the stream was busy before ( the first event fires when the
+/// stream reaches it ). Nothing waits at launch: the pairs are kept PENDING and resolved when the
+/// host reads the totals ( `loom_kernel_timing_read`, which synchronizes on them ). Each kernel
+/// instantiation of this library has a SLOT, which also carries what the compiler made of it --
+/// registers, local memory ( spills and stack ), the occupancy at the launch's block size --, read
+/// once with `cudaFuncGetAttributes` / `cudaOccupancyMaxActiveBlocksPerMultiprocessor`.
+///
+/// The C functions at the end are looked up per library by `loom/devices/kernel_timing.py` ( one
+/// generated library = one loom call; every library has its own copy of this registry ).
+namespace detail::CudaQueueTiming {
+    struct Slot {
+        const char *kind;                    ///< "flat" or "grouped"
+        double      ms           = 0;        ///< accumulated, resolved pairs only
+        long long   count        = 0;        ///< resolved launches
+        int         regs         = 0;        ///< registers per thread
+        int         local_bytes  = 0;        ///< local memory per thread ( spills, stack arrays )
+        int         static_shared= 0;        ///< static shared memory per block
+        int         block        = 0;        ///< threads per block of the last launch
+        int         grid         = 0;        ///< blocks of the last launch
+        int         blocks_per_sm= 0;        ///< resident blocks per SM at that block size
+        int         max_threads_per_sm = 0;  ///< the card's
+        int         nb_sm        = 0;        ///< the card's
+    };
+
+    struct Pending {
+        cudaEvent_t start, stop;
+        int         slot;
+    };
+
+    inline bool enabled_by_env() {
+        const char *v = std::getenv( "LOOM_KERNEL_TIMING" );
+        return v && *v && std::strcmp( v, "0" ) && std::strcmp( v, "false" ) && std::strcmp( v, "no" ) && std::strcmp( v, "off" );
+    }
+
+    struct Registry {
+        bool                       enabled = enabled_by_env();
+        std::vector<Slot>          slots;
+        std::vector<const void *>  kernels;   ///< the kernel of each slot
+        std::vector<Pending>       pending;
+        std::mutex                 mutex;
+
+        void resolve() {
+            for ( Pending &p : pending ) {
+                float ms = 0;
+                if ( cudaEventSynchronize( p.stop ) == cudaSuccess && cudaEventElapsedTime( &ms, p.start, p.stop ) == cudaSuccess ) {
+                    slots[ p.slot ].ms += ms;
+                    slots[ p.slot ].count += 1;
+                }
+                cudaEventDestroy( p.start );
+                cudaEventDestroy( p.stop );
+            }
+            pending.clear();
+        }
+    };
+
+    inline Registry &registry() {
+        static Registry r;
+        return r;
+    }
+
+    /// the slot of ONE kernel ( by its address ), its attributes read on the first call
+    inline int slot_of( const void *kernel, const char *kind, int block, int dynamic_shared ) {
+        Registry &r = registry();
+        std::lock_guard<std::mutex> lock( r.mutex );
+        int slot = -1;
+        for ( int i = 0; i < int( r.kernels.size() ); ++i )
+            if ( r.kernels[ i ] == kernel )
+                slot = i;
+        if ( slot < 0 ) {
+            Slot s;
+            s.kind = kind;
+            cudaFuncAttributes attr;
+            if ( cudaFuncGetAttributes( &attr, kernel ) == cudaSuccess ) {
+                s.regs          = attr.numRegs;
+                s.local_bytes   = int( attr.localSizeBytes );
+                s.static_shared = int( attr.sharedSizeBytes );
+            }
+            int dev = 0;
+            cudaGetDevice( &dev );
+            cudaDeviceGetAttribute( &s.max_threads_per_sm, cudaDevAttrMaxThreadsPerMultiProcessor, dev );
+            cudaDeviceGetAttribute( &s.nb_sm, cudaDevAttrMultiProcessorCount, dev );
+            slot = int( r.slots.size() );
+            r.slots.push_back( s );
+            r.kernels.push_back( kernel );
+        }
+        Slot &s = r.slots[ slot ];
+        if ( s.block != block ) {
+            s.block = block;
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor( &s.blocks_per_sm, kernel, block, dynamic_shared );
+        }
+        return slot;
+    }
+
+    /// bracket ONE launch: `launch()` between two events of `stream`
+    template<class KernelPtr>
+    void timed_launch( KernelPtr kernel, const char *kind, int grid, int block, int dynamic_shared, cudaStream_t stream, auto &&launch ) {
+        Registry &r = registry();
+        if ( ! r.enabled ) {
+            launch();
+            return;
+        }
+        const int slot = slot_of( ( const void * ) kernel, kind, block, dynamic_shared );
+        Pending p{ nullptr, nullptr, slot };
+        cuda_check( cudaEventCreate( &p.start ), "event (timing)" );
+        cuda_check( cudaEventCreate( &p.stop ), "event (timing)" );
+        cuda_check( cudaEventRecord( p.start, stream ), "event record (timing)" );
+        launch();
+        cuda_check( cudaEventRecord( p.stop, stream ), "event record (timing)" );
+        std::lock_guard<std::mutex> lock( r.mutex );
+        r.slots[ slot ].grid = grid;
+        r.pending.push_back( p );
+    }
+}
+
+/// the C side of the timing, per library ( see above ). `loom_kernel_timing_read( slot, ms, ints )`:
+/// `ints` receives 10 values, `count, regs, local_bytes, static_shared, block, grid, blocks_per_sm,
+/// max_threads_per_sm, nb_sm, is_grouped`; returns the number of slots ( call it with `slot = -1` to
+/// only get that number ). It waits for the pending launches first.
+extern "C" __attribute__(( used, visibility( "default" ) )) inline int loom_kernel_timing_enabled() {
+    return detail::CudaQueueTiming::registry().enabled;
+}
+
+extern "C" __attribute__(( used, visibility( "default" ) )) inline int loom_kernel_timing_read( int slot, double *ms, long long *ints ) {
+    auto &r = detail::CudaQueueTiming::registry();
+    std::lock_guard<std::mutex> lock( r.mutex );
+    r.resolve();
+    if ( slot >= 0 && slot < int( r.slots.size() ) ) {
+        const auto &s = r.slots[ slot ];
+        *ms = s.ms;
+        const long long v[] = { s.count, s.regs, s.local_bytes, s.static_shared, s.block, s.grid, s.blocks_per_sm,
+                                s.max_threads_per_sm, s.nb_sm, std::strcmp( s.kind, "grouped" ) == 0 };
+        for ( int i = 0; i < 10; ++i )
+            ints[ i ] = v[ i ];
+    }
+    return int( r.slots.size() );
+}
+
+/// zeroes the totals ( after waiting for the pending launches, so that none lands in the next window )
+extern "C" __attribute__(( used, visibility( "default" ) )) inline void loom_kernel_timing_reset() {
+    auto &r = detail::CudaQueueTiming::registry();
+    std::lock_guard<std::mutex> lock( r.mutex );
+    r.resolve();
+    for ( auto &s : r.slots ) {
+        s.ms = 0;
+        s.count = 0;
+    }
 }
 
 // ── reductions: a per-thread accumulator in registers, combined atomically at the end ──────────
@@ -246,7 +404,11 @@ auto submit_kernel( const CudaQueue &queue, const Deps &deps, Func &&func, ItemL
     auto targets = std::apply( [&]( auto &...t ) { return std::make_tuple( device_target_for( t, stream )... ); }, reduction_targets );
 
     const int block = 128, grid = ( nb_threads + block - 1 ) / block;
-    flat_kernel<<<grid, block, 0, stream>>>( func, item_list, nb_items, nb_threads, targets, args... );
+    // the instantiation `<<< >>>` would deduce, named so that the timing can ask for its attributes
+    auto kernel = &flat_kernel<std::decay_t<Func>, std::decay_t<ItemList>, decltype( targets ), std::decay_t<Args>...>;
+    detail::CudaQueueTiming::timed_launch( kernel, "flat", grid, block, 0, stream, [&] {
+        kernel<<<grid, block, 0, stream>>>( func, item_list, nb_items, nb_threads, targets, args... );
+    } );
     cuda_check( cudaGetLastError(), "launch" );
 
     QueueEvent ev( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync" ); } );
@@ -268,7 +430,11 @@ auto submit_kernel_grouped( const CudaQueue &queue, const Deps &deps, Func &&fun
     static_assert( std::tuple_size_v<Targets> == 0, "reductions are not supported in a group kernel" );
     deps.wait_all();
     cudaStream_t stream = queue.stream;
-    grouped_kernel<<<nb_groups, group_size, sizeof( std::int32_t ) * std::max( local_elems, 1 ), stream>>>( func, item_list, nb_items, nb_groups, args... );
+    const int shared = int( sizeof( std::int32_t ) * std::max( local_elems, 1 ) );
+    auto kernel = &grouped_kernel<std::decay_t<Func>, std::decay_t<ItemList>, std::decay_t<Args>...>;
+    detail::CudaQueueTiming::timed_launch( kernel, "grouped", nb_groups, group_size, shared, stream, [&] {
+        kernel<<<nb_groups, group_size, shared, stream>>>( func, item_list, nb_items, nb_groups, args... );
+    } );
     cuda_check( cudaGetLastError(), "launch (groups)" );
     return QueueEvent( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync (groups)" ); } );
 }

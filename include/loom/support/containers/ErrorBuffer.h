@@ -12,9 +12,13 @@
 namespace sdot {
 
 /// What went wrong. The KIND is what tells the host how to read the two numbers that come with a
-/// record: for a capacity overflow, `id` is the ShapeVar and `value` the count it asked for.
+/// record: for a capacity overflow, `id` is the ShapeVar and `value` the count it asked for; for a
+/// FAILURE ( something running the call again would not fix: a cell past a hard limit, a degenerate
+/// input ), `id` is a code of the call's own and `value` a detail ( an index, a count ) -- the host
+/// raises with the message the call gave for that code ( `failures = { code: message }` ).
 struct ErrorKind {
     static constexpr std::int32_t capacity_overflow = 1;
+    static constexpr std::int32_t failure           = 2;
 };
 
 /// Where device code says that something went wrong.

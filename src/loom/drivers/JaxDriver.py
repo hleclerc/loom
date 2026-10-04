@@ -21,6 +21,7 @@ from .JaxFfi import call_body, call as ffi_call
 # import numpy
 # import re
 
+import functools
 import os
 import numpy
 import jax.core as jax_core
@@ -355,7 +356,7 @@ class JaxDriver:
         return jnp.clip( a, lo, hi )
 
 
-    def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, **args ):
+    def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, failures = None, **args ):
         """Runs one or two `FfiCode`s on the values passed as kwargs.
 
         THIS IS `loom.ffi_call`: there is no other form of call. The vocabulary of the arguments
@@ -383,8 +384,10 @@ class JaxDriver:
         launches a single item -- or as many as the batch axes of its arguments make.
 
         Three names remain reserved here, and they are settings of the call, not data:
-        `nb_items`, `batch_alignment` (the alignment of the batch dimension) and
-        `has_dynamic_capacity`.
+        `nb_items`, `batch_alignment` (the alignment of the batch dimension),
+        `has_dynamic_capacity` and `failures` ( `{ code: message }`: what an `ErrorKind::failure`
+        record of that code means -- `{value}` in the message is the record's value; the call then
+        raises `KernelFailure` with it, eager or traced ).
 
         A capacity can turn out too small -- only the kernel knows how many items it produces.
         It says so (it records the count that did not fit, see
@@ -407,6 +410,7 @@ class JaxDriver:
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
             ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
+            ca.errors.call_name, ca.errors.failure_messages = name, dict( failures or {} )
             ffi_call( code, ca, self.device, prefix )
 
             overflows = ca.capacity_overflows()
@@ -423,7 +427,8 @@ class JaxDriver:
                 # by default because it cannot be decided a priori from the call args alone; only the
                 # caller knows whether a count is prescribed or produced.
                 if has_dynamic_capacity:
-                    jax.debug.callback( _raise_on_error, ca.errors.raw )
+                    jax.debug.callback( functools.partial( _raise_on_error, call_name = name, messages = dict( failures or {} ) ),
+                                        ca.errors.raw )
                 return returned( returns )
 
             if not overflows:
@@ -1489,13 +1494,20 @@ class JaxDriver:
     #     return final if is_list else final[ 0 ]
 
 
-def _raise_on_error( errors ):
+def _raise_on_error( errors, call_name = "", messages = {} ):
     """The error buffer, checked at RUN time -- what is left when trace time cannot see it.
 
     Growing a capacity means running again, and that is a Python loop: it needs the count that did
     not fit, which under a trace only exists once the kernel has run. So inside a `jit` or a
     `vmap` a capacity has to be given generously -- and when it was not, this is what says so,
-    rather than letting truncated results through."""
+    rather than letting truncated results through. A FAILURE record ( `ErrorKind::failure` ) is
+    raised with the message the call gave for its code ( `failures` )."""
+    from .CallArg_Errors import KernelFailure, failure_message
+    nb = min( int( errors[ 0 ] ), ( len( errors ) - 1 ) // 3 )
+    records = [ tuple( int( v ) for v in errors[ 1 + 3 * i : 4 + 3 * i ] ) for i in range( nb ) ]
+    message = failure_message( call_name, records, messages )
+    if message is not None:
+        raise KernelFailure( message )
     if int( errors[ 0 ] ) != 0:
         raise RuntimeError(
             "the kernel reported an error (a capacity too small, typically) from inside a traced "

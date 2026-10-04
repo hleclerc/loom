@@ -466,7 +466,7 @@ class TorchDriver:
         return None
 
     # -- the call --
-    def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, **args ):
+    def call( self, name, *kernels, nb_items = None, batch_alignment = None, has_dynamic_capacity = True, failures = None, **args ):
         """Runs an `FfiCode` on the values passed as kwargs -- the same thing as `JaxDriver.call`
         (see `loom/calls.py` for the argument vocabulary). Kernels run on the CPU (`TorchFfi`); when
         a backward kernel is given and an input requires grad, the call is a `torch.autograd.Function`.
@@ -489,6 +489,7 @@ class TorchDriver:
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
             ca = CallArgsAnalysis( kwargs, self.device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
+            ca.errors.call_name, ca.errors.failure_messages = name, dict( failures or {} )
             ffi_call( code, ca, self.device, prefix )
 
             overflows = ca.capacity_overflows()

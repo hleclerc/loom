@@ -14,6 +14,29 @@ MAX_RECORDS = 8
 
 # error kinds, as C++ writes them (support/containers/ErrorBuffer.h)
 CAPACITY_OVERFLOW = 1
+FAILURE           = 2
+
+
+class KernelFailure( RuntimeError ):
+    """A kernel said that something went wrong that running it again would not fix (an
+    `ErrorKind::failure` record): the message is the one the call gave for that code."""
+
+
+def failure_message( call_name, records, messages ):
+    """The text of the failure records `[ ( kind, id, value ) ]` -- `None` if there are none. A record
+    of a kind the host does not know is reported too: silently returning what a kernel said was wrong
+    is the one thing not to do."""
+    lines = []
+    for kind, id, value in records:
+        if kind == CAPACITY_OVERFLOW:
+            continue
+        if kind == FAILURE and id in messages:
+            lines.append( messages[ id ].format( value = value ) )
+        else:
+            lines.append( f"error kind { kind }, code { id }, value { value }" )
+    if not lines:
+        return None
+    return f"{ call_name }: " + "; ".join( dict.fromkeys( lines ) )
 
 
 class CallArg_Errors( CallArg ):
@@ -36,6 +59,10 @@ class CallArg_Errors( CallArg ):
         self.max_records = MAX_RECORDS
         self.shape = [ 1 + 3 * self.max_records ]   # [ nb_records, ( kind, id, value )... ]
         self.raw = None
+        # what the call says a failure code means ( `driver.call( ..., failures = { code: message } )` ),
+        # and its name, for the message
+        self.failure_messages = {}
+        self.call_name = getattr( call_args_analysis, "name", "" ) or ""
 
     def is_ffi_buffer( self ):
         return True
@@ -69,10 +96,15 @@ class CallArg_Errors( CallArg ):
             return None
 
         nb_records = min( int( raw[ 0 ] ), self.max_records )
+        records = [ tuple( int( v ) for v in raw[ 1 + 3 * num : 4 + 3 * num ] ) for num in range( nb_records ) ]
+
+        # a FAILURE is not a capacity: running again would not fix it, so it is raised here
+        message = failure_message( self.call_name, records, self.failure_messages )
+        if message is not None:
+            raise KernelFailure( message )
 
         wanted_of = {}
-        for num in range( nb_records ):
-            kind, id, value = ( int( v ) for v in raw[ 1 + 3 * num : 4 + 3 * num ] )
+        for kind, id, value in records:
             if kind == CAPACITY_OVERFLOW:
                 wanted_of[ id ] = max( wanted_of.get( id, 0 ), value )
 

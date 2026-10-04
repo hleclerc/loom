@@ -404,6 +404,40 @@ if test( "capacity_overflow" ):
     assert cell.vertex_positions.capacity == ( 5, 2 )
     assert [ row[ 0 ] for row in cell.vertex_positions.raw.tolist() ] == [ 0, 1, 2, 3, 4 ]
 
+if test( "a_failure_record_raises_with_the_message_of_the_call" ):
+    # what running again would not fix ( a cell past a hard limit, a degenerate input ) is an `ErrorKind::failure`
+    # record: `id` a code of the call's own, `value` a detail. The host raises `KernelFailure` with the message the call
+    # gave for that code ( `failures = { code: message }` ) -- eagerly, and from inside a trace too. A record of an
+    # unknown kind is reported rather than ignored.
+    from loom.drivers.CallArg_Errors import KernelFailure
+
+    def run( x, wanted ):
+        res = RealTensor[ Axis( ShapeVar( 4 ), name = "num_fail" ) ]()
+        loom.ffi_call(
+            "test_call_failure",
+            FfiCode.inline( "if ( SI( args.inputs.wanted ) ) args.errors.record( SI( args.inputs.wanted ), 7, 42 );\n"
+                            "    args.outputs.res.fill_with( queue, 1.0 );" ),
+            x = x, wanted = IntTensor( wanted ), res = loom.out( res ),
+            failures = { 7: "the seed {value} is past the limit" } )
+        return res.raw
+
+    assert float( run( 1.0, 0 ).sum() ) == 4
+    for kind, text in ( ( 2, "test_call_failure: the seed 42 is past the limit" ), ( 5, "test_call_failure: error kind 5, code 7, value 42" ) ):
+        try:
+            run( 1.0, kind )
+            raise AssertionError( "a failure went through" )
+        except KernelFailure as e:
+            assert str( e ) == text, str( e )
+    if driver.framework == "jax":
+        import jax
+        try:
+            jax.block_until_ready( jax.jit( lambda x: run( x, 2 ) )( 1.0 ) )
+            raise AssertionError( "a traced failure went through" )
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert "the seed 42 is past the limit" in str( e ), str( e )
+
 
 if test( "der" ):
     need( "grad" )

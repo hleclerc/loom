@@ -301,6 +301,12 @@ class JaxDriver:
     def is_traced( self, x ):
         return isinstance( x, jax_core.Tracer )
 
+    # what runs inside this context with CONCRETE inputs is EVALUATED, even under a trace ( `jax.jit` ): the calls of a
+    # host-driven construction ( the BSP tree, level by level, reading each level back ) whose inputs are constants of the
+    # trace. A traced input still gives a tracer -- the caller checks its inputs first.
+    def concrete_eval( self ):
+        return jax.ensure_compile_time_eval()
+
     # detaches `x` from the gradient tape: a value computed FROM a perturbed input but that itself
     # carries no meaningful gradient (e.g. `Image.cell_cum_mass`, a routing helper -- see
     # `distributions/Image.py::_update_cell_cum_mass`). Applied where such a value is COMPUTED, not

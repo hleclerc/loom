@@ -426,12 +426,15 @@ class Nvcc( Compiler ):
         res = dict( self.host.commands() )
         bsymbolic = [] if sys.platform == "darwin" else [ "-Xlinker", "-Bsymbolic" ]
         ccbin = f"-ccbin={ self.host.cxx }"
+        # the `.cpp` units are compiled by the host compiler with its OpenMP flag ( `openmp_flags` ): the link must
+        # bring the runtime too, which nvcc does not know about -- through the host compiler, as its own link does
+        omp = [ a for f in openmp_flags( self.host.cxx, sysroot_flags( self.host.cxx ) ) for a in ( "-Xcompiler", f ) ]
         res[ "nvcc" ]            = ( [ self.nvcc, *self.flags(), "{includes}", "{defines}", "{extra}",
                                        "-MD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
                                      True, "nvcc $in $defines" )
-        res[ "link_shared" ]     = ( [ self.nvcc, ccbin, "-shared", *bsymbolic, "{soname}",
+        res[ "link_shared" ]     = ( [ self.nvcc, ccbin, "-shared", *omp, *bsymbolic, "{soname}",
                                        "-o", "{out}", "{in}", "{libs}" ], False, "link $out" )
-        res[ "link_executable" ] = ( [ self.nvcc, ccbin, "-o", "{out}", "{in}", "{libs}" ],
+        res[ "link_executable" ] = ( [ self.nvcc, ccbin, *omp, "-o", "{out}", "{in}", "{libs}" ],
                                      False, "link $out" )
         return res
 

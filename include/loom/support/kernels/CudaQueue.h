@@ -229,7 +229,12 @@ namespace detail::CudaQueueTiming {
     template<class KernelPtr>
     void timed_launch( KernelPtr kernel, const char *kind, int grid, int block, int dynamic_shared, cudaStream_t stream, auto &&launch ) {
         Registry &r = registry();
-        if ( ! r.enabled ) {
+        // not while the stream is CAPTURED into a CUDA graph ( a body that replays a fixed sequence of launches ): the
+        // events would be graph nodes, never resolved here -- the replays are not counted
+        cudaStreamCaptureStatus capturing = cudaStreamCaptureStatusNone;
+        if ( r.enabled )
+            cudaStreamIsCapturing( stream, &capturing );
+        if ( ! r.enabled || capturing != cudaStreamCaptureStatusNone ) {
             launch();
             return;
         }
@@ -458,6 +463,19 @@ void launch_kernel( const CudaQueue &queue, void ( *kernel )( KArgs... ), int gr
         kernel<<<grid, block, dynamic_shared, queue.stream>>>( KArgs( args )... );
     } );
     cuda_check( cudaGetLastError(), "launch (custom kernel)" );
+}
+
+namespace detail::CudaQueueTiming {
+    /// the slot of the graph launches ( never launched itself: its address names the slot )
+    static __global__ void graph_marker() {}
+}
+
+/// a CUDA graph ( a sequence of launches captured once with `cudaStreamBeginCapture`, replayed whole ) on the call's
+/// stream, timed like a launch ( slot kind "graph": the launches captured into it are not timed one by one )
+inline void launch_graph( const CudaQueue &queue, cudaGraphExec_t exec ) {
+    detail::CudaQueueTiming::timed_launch( &detail::CudaQueueTiming::graph_marker, "graph", 1, 1, 0, queue.stream, [&] {
+        cuda_check( cudaGraphLaunch( exec, queue.stream ), "graph launch" );
+    } );
 }
 
 /// how many blocks of `block` threads of `kernel` the whole card holds at once ( resident blocks

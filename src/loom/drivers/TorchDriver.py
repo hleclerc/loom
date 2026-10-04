@@ -354,6 +354,11 @@ class TorchDriver:
     def is_traced( self, x ):
         return False
 
+    # see `JaxDriver.concrete_eval`: nothing is traced here, so there is nothing to escape
+    def concrete_eval( self ):
+        import contextlib
+        return contextlib.nullcontext()
+
     # see `JaxDriver.checkpoint`: `func` re-evaluated in the backward instead of taping its
     # intermediates. Torch spells it as a CALL wrapper rather than a decorator, so we adapt it to
     # the same "function -> function" verb. `use_reentrant = False` is the non-deprecated

@@ -185,6 +185,11 @@ class NumpyDriver:
     def is_traced( self, x ):
         return False
 
+    # see `JaxDriver.concrete_eval`: nothing is traced here, so there is nothing to escape
+    def concrete_eval( self ):
+        import contextlib
+        return contextlib.nullcontext()
+
     def stop_gradient( self, x ):
         return x
 

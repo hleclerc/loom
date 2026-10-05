@@ -291,13 +291,10 @@ def _render_call( code, ca, device ):
         queue_decl += "\n    " + device.cpp_scratch_decl()
         # the WHY is lost along the way: `ScratchAllocator::Allocate` emits the reason into a
         # `DiagnosticEngine` that `Handler::Call` only consults on a DECODING failure, and returns
-        # `nullopt` without it. The message therefore carries by far the most frequent cause, which
-        # is also the only one ever observed: the platform has no allocator at all.
+        # `nullopt` without it. The message is therefore `Scratch`'s: the size refused, what the call
+        # had taken, and what the body said of itself ( `scratch.why` ).
         body += ( '\n        if ( scratch.failed )\n'
-                  '            return ffi::Error( ffi::ErrorCode::kResourceExhausted,\n'
-                  '                "loom: XLA refused a scratch allocation -- typically "\n'
-                  '                "\\"No device memory allocator available on this platform\\", "\n'
-                  '                "which is what the CPU backend answers" );' )
+                  '            return ffi::Error( ffi::ErrorCode::kResourceExhausted, scratch.refusal_message() );' )
 
     from ..tensor.AbstractAxis import AbstractAxis
     source = _CALL_TEMPLATE.format(

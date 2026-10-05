@@ -3,6 +3,7 @@
 #include "../containers/TensorView.h"
 #include "../common_types.h"
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace sdot {
@@ -34,6 +35,16 @@ namespace sdot {
 /// is the intended behavior. A body that bounds on its intention writes through a null
 /// pointer: that is exactly the segfault that revealed the CPU's refusal, so the mistake is
 /// easy to make and worth stating here.
+///
+/// A REFUSAL IS FINAL for the call: once the pool said no, the next requests are refused HERE,
+/// without asking it again. On a GPU the pool is XLA's BFC allocator, which does not say no at
+/// once: it waits ( `AllocatorRetry`, ~10 s ) for memory that other streams may free -- and a body
+/// that takes a dozen buffers before it checks them waited a dozen times ( a 1e7-seed solve spent
+/// twenty minutes there before it raised ). The call has failed anyway; asking again only adds a wait.
+///
+/// The refusal's MESSAGE ( `refusal_message`, what the generated handler reports ): the size refused,
+/// what the call had already taken, and `why` -- what the body says of itself ( what it computes,
+/// for how many items, what to do ), which it may set at any time before it returns.
 template<class _MemorySpace>
 struct Scratch {
     using        MemorySpace = _MemorySpace;
@@ -62,14 +73,32 @@ struct Scratch {
     auto         view        ( SI n ) {
         T *ptr = nullptr;
         if ( n > 0 ) { // 0 is not allocated: nothing to ask for, hence nothing to refuse
-            ptr = reinterpret_cast<T *>( alloc_fn( ctx, n * SI( sizeof( T ) ), SI( alignof( T ) ) ) );
+            const SI nb_bytes = n * SI( sizeof( T ) );
+            if ( ! failed ) // a refusal is final: the pool is not asked again ( see above )
+                ptr = reinterpret_cast<T *>( alloc_fn( ctx, nb_bytes, SI( alignof( T ) ) ) );
             if ( ptr == nullptr ) {
+                if ( ! failed )
+                    refused = nb_bytes;
                 failed = true;
                 n = 0;
-            } else if ( free_fn )
-                blocks.push_back( ptr );
+            } else {
+                taken += nb_bytes;
+                if ( free_fn )
+                    blocks.push_back( ptr );
+            }
         }
         return tensor_view<MemorySpace>( ptr, tuple( n ) );
+    }
+
+    /// what the handler reports when `failed`
+    std::string  refusal_message() const {
+        auto mb = []( SI b ) { return std::to_string( ( b + ( 1 << 19 ) ) >> 20 ) + " MB"; };
+        std::string res = "loom: the scratch pool refused " + mb( refused ) + " ( " + std::to_string( refused ) +
+                          " bytes ), after " + mb( taken ) + " taken by this call";
+        if ( ! why.empty() )
+            return res + ". " + why;
+        return res + ". On a GPU the pool is XLA's ( at most `XLA_PYTHON_CLIENT_MEM_FRACTION` of the card, 0.75 by "
+                     "default ); on the CPU backend, XLA's pool answers \"No device memory allocator available on this platform\"";
     }
 
     AllocFn             alloc_fn;
@@ -77,6 +106,9 @@ struct Scratch {
     void               *ctx;
     std::vector<void *> blocks;          ///< empty when the pool frees by itself
     bool                failed = false; ///< at least one refusal ( read by the generated handler )
+    SI                  taken = 0;      ///< the bytes given to this call
+    SI                  refused = 0;    ///< the size of the request refused ( the first one: the others were not asked )
+    std::string         why;            ///< the body's word on a refusal ( see `refusal_message` )
 };
 
 /// the scratch of a HOST handler: `aligned_alloc`, freed on exit. See the docstring above

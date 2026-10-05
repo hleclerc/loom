@@ -187,7 +187,8 @@ def include_dirs() -> list:
 from .externals import register_external as register_external
 
 
-def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = (), work_dir = None ):
+def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = (), work_dir = None,
+                  include_overlay = None ):
     """Compile & link `src_paths` into a shared library with the compiler of `device`, through
     the build graph (see `build.py`).
 
@@ -206,6 +207,10 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     and shared among all the kernels that ask for them -- the domain code one does not want to
     reinstantiate in every kernel (a density, a dimension: macros choose, the `.o` is made once).
 
+    `include_overlay`: an include root searched FIRST by `src_paths` (not by the domain units) --
+    the generated headers this kernel rendered, written into its own directory (see
+    `generated_headers.py`), so it never compiles against another call's version of them.
+
     Rebuilds are ninja's business: a target is remade iff one of ITS inputs (the exact header
     closure, from the compiler's depfile) changed. `SDOT_FORCE_BUILD=1` remakes it regardless.
     Returns the path to the built library.
@@ -213,7 +218,8 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     from .build import Build
     with Build( device, work_dir = work_dir ) as b:
         # the generated source has no dependent: its object is PRIVATE to this library
-        objects = [ b.object( p, extra_flags = extra_flags or [], shared = work_dir is None )
+        objects = [ b.object( p, extra_flags = extra_flags or [], shared = work_dir is None,
+                              include_first = [ include_overlay ] if include_overlay else [] )
                     for p in src_paths ]
         objects += [ b.object( p, defines ) for p, defines in sources ]
         lib = b.shared_library( ( work_dir or build_dir() ) / lib_name, objects, [ b.runtime_library() ] )

@@ -137,6 +137,16 @@ def _batch_indices_decl( ca ):
 
 
 def _render_call( code, ca, device ):
+    """`_render_source`, plus the generated headers the rendering asked for ( `{ rel_path: content }` ):
+    the kernel compiles against THOSE, from an include overlay of its own, never against the shared
+    tree another call may have rewritten meanwhile (see `compilation/generated_headers.py`)."""
+    from ..compilation.generated_headers import collecting_headers
+    with collecting_headers() as headers:
+        res = _render_source( code, ca, device )
+    return ( *res, headers )
+
+
+def _render_source( code, ca, device ):
     """The complete FFI handler source for this code bound to these buffers, and the attributes
     it expects.
 

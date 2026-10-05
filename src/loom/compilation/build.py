@@ -288,9 +288,13 @@ class Build:
     def _rule( self, name ) -> str:
         return f"{ name }_{ self.sig }"
 
-    def object( self, src: Path, defines: dict = None, extra_flags: list = (), shared = True ) -> Path:
+    def object( self, src: Path, defines: dict = None, extra_flags: list = (), shared = True,
+                include_first: list = () ) -> Path:
         """The object of a source compiled with these `defines` -- one unit per (source, defines,
         compiler).
+
+        `include_first`: `-I` roots searched BEFORE the common ones -- a kernel's own overlay of
+        generated headers (see `generated_headers.py`), which must win over the shared tree.
 
         `shared` (the default): the unit has dependents, the same `.o` serves all the kernels that
         ask for it, so it lives in the COMMON graph. `shared = False`: the object belongs to nobody
@@ -298,12 +302,13 @@ class Build:
         src = Path( src ).resolve()
         defines = dict( defines or {} )
         extra_flags = list( extra_flags )
+        include_first = [ str( d ) for d in include_first ]
         graph = self.common if shared else self.own
-        name = f"{ src.stem }_{ _short_hash( self.sig, src, sorted( defines.items() ), extra_flags ) }.o"
+        name = f"{ src.stem }_{ _short_hash( self.sig, src, sorted( defines.items() ), extra_flags, *include_first ) }.o"
         obj = ( graph.root / "obj" / name ) if graph is self.common else ( graph.root / name )
         graph.add_edge(
             obj, self._rule( self.compiler.rule_for( src ) ), [ src ],
-            includes = " ".join( f"-I { _ninja_escape( d ) }" for d in include_dirs() ),
+            includes = " ".join( f"-I { _ninja_escape( d ) }" for d in [ *include_first, *include_dirs() ] ),
             defines  = " ".join( f"-D{ k }={ v }" if v is not None else f"-D{ k }" for k, v in defines.items() ),
             extra    = " ".join( extra_flags ),
         )

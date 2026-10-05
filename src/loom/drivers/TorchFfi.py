@@ -38,8 +38,8 @@ def _run( code, ca, device, prefix ):
     if not device.is_cpu:
         raise NotImplementedError( f"the torch driver has no kernel launch on { device } yet (CPU only)" )
 
-    source, inputs, outputs, attrs, sources = _render_call( code, ca, device )
-    entry = _load( source, device, prefix, sources, code.name, call_signature( ca ) )
+    source, inputs, outputs, attrs, sources, headers = _render_call( code, ca, device )
+    entry = _load( source, device, prefix, sources, code.name, call_signature( ca ), headers )
 
     # kept alive by these lists until the kernel is done: the frame only holds addresses
     in_arrays = [ _host( b.jax_input_array() ) for b in inputs ]

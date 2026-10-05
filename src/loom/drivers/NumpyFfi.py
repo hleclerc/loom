@@ -25,6 +25,7 @@ from ..compilation import include_roots, journal, make_library
 from ..compilation.build import kernels_root
 from ..util.encode_base_62 import encode_base_62
 from .FfiSource import call_signature, _render_call, _resolve_source
+from ..compilation.generated_headers import headers_key, write_overlay
 
 _HANDLER_SYMBOL = "sdot_ffi_entry"
 _MAX_RANK = 8       # `XLA_FFI_Buffer::dims`
@@ -52,11 +53,13 @@ def _lib_suffix() -> str:
     return ".dylib" if sys.platform == "darwin" else ".so"
 
 
-def _load( source: str, device, prefix: str, sources, code_name, signature ):
+def _load( source: str, device, prefix: str, sources, code_name, signature, headers = None ):
     """The handler of this source, compiled (or reused from disk) and loaded."""
     # the key is what changes the binary: the source, how it is compiled -- and WHICH FFI it is
     # compiled against, so a numpy kernel never collides with a Jax one of the same text.
-    name = "np_" + prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|numpy_ffi" )
+    # and the generated headers it was rendered with (`JaxFfi.compile_and_register`)
+    name = "np_" + prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|numpy_ffi"
+                                            + headers_key( headers ) )
     if name in _loaded:
         journal.record_reuse()
         return _loaded[ name ]
@@ -74,6 +77,7 @@ def _load( source: str, device, prefix: str, sources, code_name, signature ):
         extra_flags = [ "-isystem", shim_include_dir() ],
         sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
         work_dir = work_dir,
+        include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
     )
     lib = ctypes.CDLL( str( lib_path ) )
     entry = getattr( lib, _HANDLER_SYMBOL )
@@ -96,8 +100,8 @@ def _as_buffer( array: numpy.ndarray ) -> _Buffer:
 
 def _run( code, ca, device, prefix ):
     """Run `code` on the buffers of `ca`: `( output CallArgs, result arrays )`, nothing written back."""
-    source, inputs, outputs, attrs, sources = _render_call( code, ca, device )
-    entry = _load( source, device, prefix, sources, code.name, call_signature( ca ) )
+    source, inputs, outputs, attrs, sources, headers = _render_call( code, ca, device )
+    entry = _load( source, device, prefix, sources, code.name, call_signature( ca ), headers )
 
     # contiguous, and kept alive by this list until the kernel is done: the frame only holds addresses
     in_arrays = [ numpy.ascontiguousarray( b.jax_input_array() ) for b in inputs ]

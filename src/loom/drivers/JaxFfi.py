@@ -6,7 +6,8 @@ registered with `jax.ffi.register_ffi_target`. The returned target name feeds
 `jax.ffi.ffi_call`, which inserts the call into the XLA program (works eager and under
 `jax.jit`, on CPU and — later — CUDA).
 
-Two caches, both keyed by a content hash of (source + the compiler's build signature):
+Two caches, both keyed by a content hash of (source + the generated headers it was rendered with +
+the compiler's build signature):
 * disk : the compiled `.so`/`.dylib` (handled by `make_library`; a changed source yields a
          new hash, hence a new file and a rebuild).
 * RAM  : `_loaded` keeps the `ctypes` handle mapped and marks the target as already
@@ -32,6 +33,7 @@ import numpy
 
 from ..compilation import build_dir, journal, make_library
 from ..compilation.build import kernels_root
+from ..compilation.generated_headers import headers_key, write_overlay
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
 from .BackwardCall import call_backward
@@ -86,12 +88,16 @@ def render_source( body: str ) -> str:
 
 
 def compile_and_register( source: str, device, prefix: str = "", sources = (),
-                          code_name = None, signature = None ) -> str:
+                          code_name = None, signature = None, headers = None ) -> str:
     """Compile *source* (plus the `sources` units it links, see `make_library`), load and
     register it, and return its Jax FFI target name.
 
     Idempotent and cached: repeated calls with the same source + device reuse the compiled
     library and the existing registration.
+
+    `headers`: the generated headers the source was rendered with ( `{ rel_path: content }`, see
+    `_render_call` ). They are part of what is compiled, hence of the name, and are written into
+    the kernel's own directory, first on its `-I` path (`generated_headers.write_overlay`).
     """
 
     if not prefix:
@@ -105,7 +111,8 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     # library twice on a two-GPU node.) How it is compiled = the compiler's `build_signature`:
     # the flags, and the machine when `-march=native` is among them -- a compilation setting
     # changes the binary as much as the source does, and a GPU architecture belongs there too.
-    name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }" )
+    name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }"
+                                    + headers_key( headers ) )
     if name in _loaded:
         journal.record_reuse()
         return name
@@ -114,7 +121,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     # source, compiled for a CPU level this machine can run -- nothing to compile, nothing to
     # check. Recording (a catalogue being built) sees every source that goes by.
     from ..compilation import catalogue
-    catalogue.record( source, sources, device )
+    catalogue.record( source, sources, device, headers )
     found = catalogue.lookup( source, sources, device )
     started = time.monotonic()
     if found is not None:
@@ -141,6 +148,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
             extra_flags = _ffi_include_flags(),
             sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
             work_dir = work_dir,
+            include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
         )
         lib = ctypes.CDLL( str( lib_path ) )
         handler = getattr( lib, _HANDLER_SYMBOL )
@@ -180,9 +188,10 @@ def _make_op( code, ca, device, prefix ):
     """
     @jax.custom_batching.custom_vmap
     def op( *arrays ):
-        source, _, outputs, attrs, sources = _render_call( code, ca, device )
+        source, _, outputs, attrs, sources, headers = _render_call( code, ca, device )
         target = compile_and_register( source, device, prefix, sources,
-                                       code_name = code.name, signature = call_signature( ca ) )
+                                       code_name = code.name, signature = call_signature( ca ),
+                                       headers = headers )
         results = jax.ffi.ffi_call( target, [ b.jax_out_spec() for b in outputs ] )(
             *arrays, **{ name: numpy.int64( value ) for name, _, value in attrs }
         )

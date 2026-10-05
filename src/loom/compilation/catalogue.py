@@ -109,16 +109,17 @@ def lookup( source: str, sources, device ):
 
 # ── recording ───────────────────────────────────────────────────────────────
 
-def record( source: str, sources, device ):
+def record( source: str, sources, device, headers = None ):
     """Drops this source into `SDOT_CATALOGUE_RECORD` (if set), with what is needed to
     recompile it elsewhere: `<h>.<cpp|cu>`, `<h>.json` (device, domain sources), and the
-    generated headers of the current build (copied whole, they are small and deterministic)."""
+    generated headers it was rendered with (`headers`, `{ rel_path: content }`): in its own
+    overlay `<h>.include/` -- the same name may hold another struct for another kernel, see
+    `generated_headers.py` -- and merged into the common `include/` too, for what a kernel did not
+    render itself (a header a hand-written one includes)."""
     root = env.var( "CATALOGUE_RECORD" )
     if not root:
         return
-    from . import build_dir
-    from .generated_headers import include_root
-    import shutil
+    from .generated_headers import write_overlay
 
     root = Path( root ) / device.catalogue_kind()
     root.mkdir( parents = True, exist_ok = True )
@@ -128,14 +129,9 @@ def record( source: str, sources, device ):
     if not src.exists():
         src.write_text( source )
         ( root / f"{ h }.json" ).write_text( json.dumps( { "sources": [ list( s ) for s in sources ] }, indent = 1 ) )
-    # the generated headers: the same tree, merged (write-if-changed, as originally)
-    gen_src = include_root()
-    gen_dst = Path( env.var( "CATALOGUE_RECORD" ) ) / "include"
-    for p in gen_src.rglob( "*.h" ):
-        q = gen_dst / p.relative_to( gen_src )
-        if not ( q.exists() and q.read_bytes() == p.read_bytes() ):
-            q.parent.mkdir( parents = True, exist_ok = True )
-            shutil.copyfile( p, q )
+    if headers:
+        write_overlay( root / f"{ h }.include", headers )
+        write_overlay( Path( env.var( "CATALOGUE_RECORD" ) ) / "include", headers )
 
 
 # ── compiling a catalogue ───────────────────────────────────────────────────
@@ -162,7 +158,10 @@ def build( record_root, out_root, device, tag: str ):
             meta = json.loads( src.with_suffix( ".json" ).read_text() )
             sources = [ ( p, [ tuple( kv ) for kv in d ] ) for p, d in meta[ "sources" ] ]
             k = key( src.read_text(), sources, tag )
-            objects.append( b.object( src, { "SDOT_FFI_ENTRY": entry_symbol( k ) }, extra_flags = extra ) )
+            # its own generated headers first (a recording made before they were kept has none)
+            overlay = src.with_suffix( ".include" )
+            objects.append( b.object( src, { "SDOT_FFI_ENTRY": entry_symbol( k ) }, extra_flags = extra,
+                                      include_first = [ overlay ] if overlay.is_dir() else [] ) )
             objects += [ b.object( _resolve_source( p ), dict( d ) ) for p, d in sources ]
             kernels[ k ] = entry_symbol( k )
         lib = b.shared_library( out / device.compiler.library_file_name( "sdot_kernels" ), list( dict.fromkeys( objects ) ) )

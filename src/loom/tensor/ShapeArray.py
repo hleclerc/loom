@@ -28,9 +28,9 @@ class ShapeArray:
     __slots__ = ( "raw", "names" )
 
     def __init__( self, value, names = None ) -> None:
-        from ..drivers.driver import driver
+        from ..drivers import framework_defaults
 
-        if driver.is_traced( value ):
+        if framework_defaults.ops( value ).is_traced( value ):
             raise TypeError(
                 "a count cannot be read on the host here: it lives on the device (it is traced), "
                 "which is what happens to a count a KERNEL wrote once you are under a `jit`. "
@@ -39,7 +39,8 @@ class ShapeArray:
                 "is known before the trace." )
         # a count is an integer, always: `dtype = int` also turns a 0-d device array into a plain
         # host one, which is the whole point of this type.
-        self.raw = numpy.asarray( value, dtype = int )
+        from ..drivers import framework_defaults
+        self.raw = numpy.asarray( framework_defaults.ops( value ).to_numpy( value ), dtype = int )
         # one name per dimension, for display -- the `dep_axes` a ragged count varies along.
         self.names = list( names ) if names is not None else [ None ] * self.raw.ndim
 

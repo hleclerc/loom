@@ -55,7 +55,7 @@ class Aggregate:
     A kwarg either SHARES an `Attribute` (the same object lands in both aggregates)
     or PRESCRIBES a value. Nothing else: notably, a capacity is NOT set here -- it
     is a decision about one allocation, so it is given to the call that allocates
-    (`driver.call( ..., capacities = { ... } )`). A key matching no field here is
+    (`loom.ffi_call( ..., capacities = { ... } )`). A key matching no field here is
     not an error as long as some nested aggregate could consume it.
 
     Reads: `c.field` is a plain read of the instance `__dict__` -- so it hands back

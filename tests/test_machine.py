@@ -10,7 +10,8 @@ The test checks that they make it all the way into a kernel and that they are pl
 constraints specific to each device.
 """
 import loom
-from loom import Axis, ShapeVar, IntTensor, driver
+import loom
+from loom import Axis, ShapeVar, IntTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
 
@@ -44,7 +45,7 @@ def _machine():
 
 if test( "the_four_fields_come_through" ):
     m = _machine()
-    print( f"{ driver.device } : " + "  ".join( f"{ k }={ v }" for k, v in m.items() ) )
+    print( f"{ loom.resolved_device() } : " + "  ".join( f"{ k }={ v }" for k, v in m.items() ) )
 
     # nothing must be zero: a portable kernel divides by `sub_group_width` or sizes on
     # `local_mem_bytes`, and a zero would blow up otherwise correct code.
@@ -58,7 +59,7 @@ if test( "the_four_fields_come_through" ):
 if test( "what_each_device_promises" ):
     m = _machine()
 
-    if getattr( driver.device, "is_cuda_gpu", False ):
+    if getattr( loom.resolved_device(), "is_cuda_gpu", False ):
         # the warp width is 32 on everything that exists; the test pins it so that a change
         # gets noticed rather than going by silently.
         assert m[ "sub_group_width" ] == 32, m
@@ -76,4 +77,4 @@ if test( "what_each_device_promises" ):
         # the thread pool: at least one, and no more than the machine's number of logical cores
         import os
         assert 1 <= m[ "nb_workers" ] <= ( os.cpu_count() or 1 ), m
-    print( f"{ driver.device } : the device keeps its promises" )
+    print( f"{ loom.resolved_device() } : the device keeps its promises" )

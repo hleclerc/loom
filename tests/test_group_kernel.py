@@ -14,7 +14,8 @@ here, at a spot that names it.
 import numpy
 
 import loom
-from loom import driver
+from loom.testing import host
+import loom
 from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
 from errand import test
@@ -47,7 +48,7 @@ def _sum_over_lanes( group_size ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return int( numpy.asarray( res.value ).reshape( -1 )[ 0 ] )
+    return int( host( res.value ).reshape( -1 )[ 0 ] )
 
 
 if test( "a_group_of_one_degenerates_to_the_plain_kernel" ):
@@ -79,7 +80,7 @@ def _runtime_subgroup_width( group_size ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return int( numpy.asarray( res.value ).reshape( -1 )[ 0 ] )
+    return int( host( res.value ).reshape( -1 )[ 0 ] )
 
 
 if test( "the_runtime_subgroup_width_matches_what_the_device_claims" ):
@@ -91,7 +92,7 @@ if test( "the_runtime_subgroup_width_matches_what_the_device_claims" ):
     # `Device.subgroup_size` is the HARDWARE width (32 on CUDA), hence an UPPER BOUND: a
     # work-group of 4 items does not have a sub-group of 32. The expectation is `min( group_size, claimed )`
     # -- which is indeed what `OtPlan1d`'s sizing assumes, `num_sg = ceil( gs / sgs )`.
-    claimed = driver.device.subgroup_size
+    claimed = loom.resolved_device().subgroup_size
     for gs in ( 1, 2, 4, 8 ):
         got = _runtime_subgroup_width( gs )
         expected = min( gs, claimed )
@@ -110,7 +111,7 @@ def _probe( group_size, expr, tag ):
             local_mem_elems = f"return { group_size };" ),
         res = loom.out( res ),
     )
-    return numpy.asarray( res.value ).reshape( -1 ).tolist()
+    return host( res.value ).reshape( -1 ).tolist()
 
 
 if test( "the_lane_to_subgroup_mapping_is_linear" ):

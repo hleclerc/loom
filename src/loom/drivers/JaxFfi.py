@@ -31,8 +31,8 @@ import jax
 import jax.numpy as jnp
 import numpy
 
-from ..compilation import build_dir, journal, make_library
-from ..compilation.build import kernels_root
+from ..compilation import build_dir, include_roots, journal, make_library
+from ..compilation.build import KernelDir
 from ..compilation.generated_headers import headers_key, write_overlay
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
@@ -111,7 +111,9 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     # library twice on a two-GPU node.) How it is compiled = the compiler's `build_signature`:
     # the flags, and the machine when `-march=native` is among them -- a compilation setting
     # changes the binary as much as the source does, and a GPU architecture belongs there too.
-    name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }"
+    # The C++ ROOTS belong to it too: the closure of headers is not in the text (ninja knows it), and
+    # two checkouts sharing the cache directory must not share a kernel that includes different ones.
+    name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|{ include_roots() }"
                                     + headers_key( headers ) )
     if name in _loaded:
         journal.record_reuse()
@@ -134,22 +136,23 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
         # ONE DIRECTORY PER KERNEL: the generated source, its object and its library live there,
         # and are removed in one go when no longer wanted -- see the docstring of `build.py`. The
         # name is already a hash of the content, so it identifies the directory unambiguously.
-        work_dir = kernels_root() / name
-        work_dir.mkdir( parents = True, exist_ok = True )
+        # A new kernel is built in a private directory and published by a rename (`KernelDir`).
+        kernel_dir = KernelDir( name )
+        with kernel_dir as work_dir:
+            # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes
+            # would look like a change to it (one recompilation per process, for nothing).
+            src_path = work_dir / f"kernel{ device.compiler.source_suffix() }"
+            if not ( src_path.exists() and src_path.read_text() == source ):
+                src_path.write_text( source )
 
-        # write-if-changed: the build graph decides on dates, and a rewrite of identical bytes
-        # would look like a change to it (one recompilation per process, for nothing).
-        src_path = work_dir / f"kernel{ device.compiler.source_suffix() }"
-        if not ( src_path.exists() and src_path.read_text() == source ):
-            src_path.write_text( source )
-
-        lib_path = make_library(
-            name + _lib_suffix(), [ src_path ], device,
-            extra_flags = _ffi_include_flags(),
-            sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
-            work_dir = work_dir,
-            include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
-        )
+            make_library(
+                name + _lib_suffix(), [ src_path ], device,
+                extra_flags = _ffi_include_flags(),
+                sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
+                work_dir = work_dir,
+                include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
+            )
+        lib_path = kernel_dir.final / ( name + _lib_suffix() )
         lib = ctypes.CDLL( str( lib_path ) )
         handler = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )

@@ -1,8 +1,9 @@
 import loom
-from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, driver, RealTensor, IntTensor
+import loom
+from loom import CtShapeVar, ShapeVar, Axis, Tensor, Aggregate, RealTensor, IntTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
-from loom.testing import need
+from loom.testing import need, host
 
 # An `@aggregate` instance is built BEFORE the call and passed as a plain kwarg. Inputs and
 # outputs are DISJOINT (as in XLA): a kernel never writes what it reads, so there is no
@@ -297,7 +298,7 @@ if test( "vmap" ):
     need( "vmap" )
     # a `vmap` maps the call over a new axis, and the KERNEL is what runs it: the batched call is
     # one launch of one (re)compiled kernel over N items, not N calls. The body does not change --
-    # `batch_index` was already there, empty. Nothing here is Jax-specific: `driver.vmap` is what
+    # `batch_index` was already there, empty. Nothing here is Jax-specific: `loom.vmap` is what
     # the driver in use provides (Jax today, Torch later), and the test only ever sees driver
     # arrays.
     class Cell5( Aggregate ):
@@ -333,12 +334,12 @@ if test( "vmap" ):
         return cell.vertex_positions.raw
 
     # unmapped: one cell, the batch multi-index is empty and indexing by it is a no-op.
-    one = positions_of( driver.array( [ 1, 2 ] ) )
+    one = positions_of( loom.array( [ 1, 2 ] ) )
     assert one.tolist()[ 0 ] == [ 1, 2 ]
 
     # mapped: three cells at once. Each item reads ITS row of `scale` -- the input gained a batch
     # axis and the kernel selects it by name -- and writes ITS slice of the output.
-    many = driver.vmap( positions_of )( driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] ) )
+    many = loom.vmap( positions_of )( loom.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] ) )
     assert many.shape == ( 3, 4, 2 )   # 3 batch items x the capacity this call asked for x dim
     assert [ item.tolist()[ 0 ] for item in many ] == [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ]
 
@@ -405,6 +406,7 @@ if test( "capacity_overflow" ):
     assert [ row[ 0 ] for row in cell.vertex_positions.raw.tolist() ] == [ 0, 1, 2, 3, 4 ]
 
 if test( "a_failure_record_raises_with_the_message_of_the_call" ):
+    need( "cpu" )       # the body is host code: it records into the error buffer where it runs
     # what running again would not fix ( a cell past a hard limit, a degenerate input ) is an `ErrorKind::failure`
     # record: `id` a code of the call's own, `value` a detail. The host raises `KernelFailure` with the message the call
     # gave for that code ( `failures = { code: message }` ) -- eagerly, and from inside a trace too. A record of an
@@ -428,7 +430,7 @@ if test( "a_failure_record_raises_with_the_message_of_the_call" ):
             raise AssertionError( "a failure went through" )
         except KernelFailure as e:
             assert str( e ) == text, str( e )
-    if driver.framework == "jax":
+    if loom.resolved_framework() == "jax":
         import jax
         try:
             jax.block_until_ready( jax.jit( lambda x: run( x, 2 ) )( 1.0 ) )
@@ -472,10 +474,10 @@ if test( "der" ):
         return out.raw
 
     # forward: 2 * 17 + 100 = 134
-    assert float( fwd_of( driver.array( 17.0 ) ) ) == 134
+    assert float( fwd_of( loom.array( 17.0 ) ) ) == 134
 
     # backward: d( 2 * inp + 100 ) / d inp = 2
-    g = driver.grad( fwd_of )( driver.array( 17.0 ) )
+    g = loom.grad( fwd_of )( loom.array( 17.0 ) )
     assert float( g ) == 2
 
 
@@ -507,7 +509,7 @@ if test( "der_symbolic_zero" ):
         return out_a.raw   # `out_b` is never used: its cotangent is a symbolic zero
 
     # d( 2 * inp ) / d inp = 2 -- the `3 * grad_for_out_b` term drops (ZeroTensor)
-    g = driver.grad( only_a )( driver.array( 5.0 ) )
+    g = loom.grad( only_a )( loom.array( 5.0 ) )
     assert float( g ) == 2
 
 
@@ -537,7 +539,7 @@ if test( "der_non_perturbed" ):
         inp = RealTensor()
         inp.set( x )
         bias = RealTensor()
-        bias.set( driver.array( 100.0 ) )   # a constant: not a function of `x`, so non-perturbed
+        bias.set( loom.array( 100.0 ) )   # a constant: not a function of `x`, so non-perturbed
         out = RealTensor()
         loom.ffi_call(
             "test_call_der_np",
@@ -549,10 +551,10 @@ if test( "der_non_perturbed" ):
         )
         return out.raw
 
-    assert float( loss( driver.array( 5.0 ) ) ) == 105
+    assert float( loss( loom.array( 5.0 ) ) ) == 105
 
     # d( inp + bias ) / d inp = 1 -- `bias` is never perturbed, so `grad_for_bias` is a NoneTensor
-    g = driver.grad( loss )( driver.array( 5.0 ) )
+    g = loom.grad( loss )( loom.array( 5.0 ) )
     assert float( g ) == 1
 
 
@@ -587,10 +589,10 @@ if test( "der_shape_var" ):
         )
         return out.raw.sum()    # loss = 2*vec[0] + 3*vec[1]
 
-    assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
+    assert float( loss( loom.array( [ 1.0, 1.0 ] ) ) ) == 5
 
     # d loss / d vec = [ 2, 3 ], and the gradient buffer is sized like `vec` (capacity 2)
-    g = driver.grad( loss )( driver.array( [ 1.0, 1.0 ] ) )
+    g = loom.grad( loss )( loom.array( [ 1.0, 1.0 ] ) )
     assert [ float( v ) for v in g ] == [ 2, 3 ]
 
 
@@ -628,10 +630,10 @@ if test( "der_aggregate" ):
         )
         return out.raw          # loss = 2*data[0] + 3*data[1]
 
-    assert float( loss( driver.array( [ 1.0, 1.0 ] ) ) ) == 5
+    assert float( loss( loom.array( [ 1.0, 1.0 ] ) ) ) == 5
 
     # d loss / d cell.data = [ 2, 3 ], returned through `grad_for_cell.data`
-    g = driver.grad( loss )( driver.array( [ 1.0, 1.0 ] ) )
+    g = loom.grad( loss )( loom.array( [ 1.0, 1.0 ] ) )
     assert [ float( v ) for v in g ] == [ 2, 3 ]
 
 
@@ -665,7 +667,7 @@ if test( "batch_alignment_forced" ):
     """ )
     def run( alignment ):
         cell = Cell7( nb_dims = 2, batch_axes = [ new_batch_axis( 3 ) ] )
-        cell.scale = driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] )
+        cell.scale = loom.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] )
         loom.ffi_call(
             "test_call_batch_align",
             kernel,
@@ -713,9 +715,9 @@ if test( "physical_axis_reorder" ):
     assert L.buffer_shape == [ 2, 2 ] and L.strides == [ 1, 2 ] and not L.is_identity
 
     m = RealTensor[ row, col ]()
-    m.storage = Storage.of( driver.array( [ [ 1, 3 ], [ 2, 4 ] ] ),   # the physical (col-major) buffer
+    m.storage = Storage.of( loom.array( [ [ 1, 3 ], [ 2, 4 ] ] ),   # the physical (col-major) buffer
                             ReferenceShape.from_dense_shape( [ 2, 2 ] ), L )
-    assert numpy.asarray( m.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
+    assert host( m.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]   # reads back logical
 
     out = RealTensor[ row, col ]()
     loom.ffi_call(
@@ -726,7 +728,7 @@ if test( "physical_axis_reorder" ):
     )
 
     # the kernel read the permuted input by name and copied it: the logical value is preserved.
-    assert numpy.asarray( out.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
+    assert host( out.value ).tolist() == [ [ 1, 2 ], [ 3, 4 ] ]
 
 
 if test( "fill_crosses_as_a_storageless_FillTensor" ):
@@ -765,7 +767,7 @@ if test( "fill_crosses_as_a_storageless_FillTensor" ):
         out = loom.out( out ),
     )
 
-    assert numpy.asarray( out.value ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
+    assert host( out.value ).tolist() == [ 25.0, 50.0, 4.0, 0.0 ]
 
 
 if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
@@ -806,7 +808,7 @@ if test( "a_plain_count_crosses_by_value_not_through_a_buffer" ):
     )
 
     assert cnt.nb_out.value == 3
-    assert numpy.asarray( cnt.out.value ).tolist() == [ 0.0, 10.0, 20.0 ]
+    assert host( cnt.out.value ).tolist() == [ 0.0, 10.0, 20.0 ]
 
 
 if test( "a_bare_output_is_seeded" ):
@@ -837,7 +839,7 @@ if test( "a_bare_output_is_seeded" ):
             out = loom.out( out ),
         )
 
-        vals = numpy.asarray( out.raw ).reshape( -1 ).tolist()
+        vals = host( out.raw ).reshape( -1 ).tolist()
         assert vals[ 0 ] == 1
         assert all( math.isnan( v ) for v in vals[ 1 : ] ), vals
     finally:
@@ -926,7 +928,7 @@ if test( "a_raw_value_goes_in_as_it_is" ):
         output_value = loom.out( output_value ),
     )
 
-    assert numpy.asarray( output_value.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
+    assert host( output_value.raw ).tolist() == [ [ 10, 11, 12 ], [ 13, 14, 15 ] ]
 
     # ... EXCEPT as an output: the tensor would be built by the call, so the result would have nowhere
     # to go back to. It is said out loud, instead of being written into the void.
@@ -946,12 +948,12 @@ if test( "a_raw_value_goes_in_as_it_is" ):
 if test( "the_role_is_said_on_the_value" ):
     # THE ARGUMENT VOCABULARY OF `ffi_call`. The role is carried by the value, not by a
     # list of paths on the side -- so it cannot designate anything other than it, and the names
-    # that `driver.call` used to reserve are handed back to the kernel.
+    # that `loom.ffi_call` used to reserve are handed back to the kernel.
     import numpy
     import loom
 
     # `output_attributes` IS HERE A KERNEL ARGUMENT, and it lives at `args.inputs.output_attributes`.
-    # That is the test: this name used to be stolen by `driver.call`, and writing it there would have declared an empty list of
+    # That is the test: this name used to be stolen by `loom.ffi_call`, and writing it there would have declared an empty list of
     # outputs. Under groups the first level only contains the groups, so nothing
     # can be stolen anymore.
     add_shift = FfiCode( code = """
@@ -981,7 +983,7 @@ if test( "the_role_is_said_on_the_value" ):
     # `loom.out` RETURNS THE OBJECT THAT WAS GIVEN -- it was already ours, the result was
     # written back into it. That is what allows `return loom.ffi_call( ... )` instead of build, call, return.
     assert returned is output_value
-    assert numpy.asarray( output_value.raw ).tolist() == expected
+    assert host( output_value.raw ).tolist() == expected
 
 
 if test( "a_mutable_argument_returns_its_new_value" ):
@@ -1011,19 +1013,19 @@ if test( "a_mutable_argument_returns_its_new_value" ):
     # WHAT COMES BACK IS OF THE SAME KIND AS WHAT WAS GIVEN. A raw array...
     raw = loom.ffi_call( "test_role_mut", add_shift, v = loom.mutable( input_value ), shift = 10.0 )
     assert not isinstance( raw, Tensor )
-    assert numpy.asarray( raw ).tolist() == expected
+    assert host( raw ).tolist() == expected
 
     # ... a loom tensor.
     tensor = loom.ffi_call( "test_role_mut", add_shift,
                              v = loom.mutable( RealTensor( input_value ) ), shift = 10.0 )
     assert isinstance( tensor, Tensor )
-    assert numpy.asarray( tensor.raw ).tolist() == expected
+    assert host( tensor.raw ).tolist() == expected
 
     # a chain: that is what `mutable` buys, and the result must be that of the repeated steps
     v = input_value
     for _ in range( 3 ):
         v = loom.ffi_call( "test_role_mut", add_shift, v = loom.mutable( v ), shift = 10.0 )
-    assert numpy.asarray( v ).tolist() == [ [ 30, 31, 32 ], [ 33, 34, 35 ] ]
+    assert host( v ).tolist() == [ [ 30, 31, 32 ], [ 33, 34, 35 ] ]
 
     # THE DERIVED NAMES GO INTO THE SAME NAMESPACE: a collision would make the kernel read the
     # wrong buffer, silently. It is rejected.
@@ -1067,7 +1069,7 @@ if test( "writes_and_reads_say_the_same_thing_from_both_ends" ):
     for g in ( via_writes, via_reads ):
         # `loom.out` returns the object: there was no need to build it on a separate line
         assert isinstance( g, Grid )
-        assert numpy.asarray( g.values.value ).tolist() == [ 10.0, 11.0, 12.0, 13.0 ]
+        assert host( g.values.value ).tolist() == [ 10.0, 11.0, 12.0, 13.0 ]
         assert int( g.count ) == 4
         # and `size` was NOT zeroed: that is the whole point of the split
         assert int( g.size ) == 4

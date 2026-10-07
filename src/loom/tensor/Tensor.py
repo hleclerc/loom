@@ -1,10 +1,13 @@
 from typing import TYPE_CHECKING
 
+import copy
+
 import numpy
 from numpy.typing import ArrayLike
 
 from ..devices.Device import Device
-from ..drivers.driver import driver
+from ..drivers import framework_defaults
+from ..drivers.promotion import promote
 from ..util.Attribute import Attribute, resolve_attribute
 from .AbstractAxis import AbstractAxis
 from .Axis import Axis
@@ -96,7 +99,7 @@ class Tensor( Attribute ):
 
           * the KIND ( real / integer / boolean ) is a FACT about the value -- it is read
             (`_natural_dtype`), and it picks the class;
-          * the SIZE is a POLICY ( `driver.ftype`, `driver.itype` ) -- it is NOT read,
+          * the SIZE is a POLICY ( `loom.resolved_dtype()`, `loom.resolved_itype()` ) -- it is NOT read,
             otherwise a `numpy.float64` would pin fp64 on a driver set to fp32. This is
             exactly what `RealTensor( u )` already did: `cls( value )` declares no
             size, so the driver decides, and `set` converts.
@@ -140,6 +143,9 @@ class Tensor( Attribute ):
     def __init__( self, value = None, /, *, axes = None, template_args = (), template_kwargs = {}, scope = None ) -> None:
         self.device = Device.factory( template_kwargs.get( "device", None ) )
         self.dtype = _declared_dtype( type( self ), template_kwargs )
+        # a dtype that was NAMED is a contract the value is converted to; an unnamed one is only the
+        # default, and gives way to the dtype of a buffer that is bound (see `set`)
+        self._dtype_pinned = template_kwargs.get( "dtype", None ) is not None or template_kwargs.get( "size", None ) is not None
 
         # WHERE THE AXES COME FROM, in order:
         #
@@ -215,7 +221,7 @@ class Tensor( Attribute ):
         # second `normalized_version` (a `c * fill` must stay a fill), and the backward RESIDUAL rank.
         # Until then `full` MATERIALIZES: `[ n ]` weights are 80MB, already small (the [nb_angles, n]
         # blow-up is fixed by the shared `[ num_dirac ]` shape upstream).
-        res.storage = Storage.of( driver.full( shape, fill, dtype = res.dtype ),
+        res.storage = Storage.of( framework_defaults.full( shape, fill, dtype = res.dtype ),
                                   ReferenceShape.from_dense_shape( shape ) )
         return res
 
@@ -233,7 +239,7 @@ class Tensor( Attribute ):
             reference_shape = ReferenceShape.from_dense_shape( res.shape )
         # the scalar is materialized as a rank-0 BUFFER: that is what the FFI binds (a `FillTensor`
         # is storageless in its extents, not in its value), and it is what carries our dtype.
-        res.storage = Fill( driver.array( scalar, dtype = res.dtype, device = res.device ), reference_shape )
+        res.storage = Fill( framework_defaults.array( scalar, dtype = res.dtype, device = res.device ), reference_shape )
         return res
 
     # ---- the factories: a tensor built FROM ITS AXES, with no shape to repeat ----------------------
@@ -241,9 +247,9 @@ class Tensor( Attribute ):
     # `Parametrized.__getattr__`, which passes them the declaration's `template_args` -- so the
     # shape comes from the axes, as for any tensor built on them.
     #
-    # This is WHERE a value is built, and not via `driver.array( ..., dtype = driver.itype )`:
+    # This is WHERE a value is built, and not via `loom.array( ..., dtype = loom.resolved_itype() )`:
     # the CLASS is the type declaration, so the dtype is never guessed from a Python literal
-    # (`driver.array( [ 0, 1, 2 ] )` returns floats -- see `loom/examples/diffusion`).
+    # (`loom.array( [ 0, 1, 2 ] )` returns floats -- see `loom/examples/diffusion`).
     # `driver` is the low layer; what we put forward are these classes.
 
     @classmethod
@@ -279,12 +285,12 @@ class Tensor( Attribute ):
     @classmethod
     def zeros( cls, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
         res, shape = cls._built_on( template_args, template_kwargs, scope )
-        return res._adopt( driver.zeros( shape, dtype = res.dtype ) )
+        return res._adopt( framework_defaults.zeros( shape, dtype = res.dtype ) )
 
     @classmethod
     def ones( cls, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
         res, shape = cls._built_on( template_args, template_kwargs, scope )
-        return res._adopt( driver.ones( shape, dtype = res.dtype ) )
+        return res._adopt( framework_defaults.ones( shape, dtype = res.dtype ) )
 
     @classmethod
     def iota( cls, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
@@ -302,9 +308,9 @@ class Tensor( Attribute ):
             nb = 1
             for extent in shape:
                 nb *= extent
-            return res._adopt( driver.reshape( driver.arange( nb, dtype = res.dtype ), shape ) )
+            return res._adopt( framework_defaults.ops().reshape( framework_defaults.arange( nb, dtype = res.dtype ), shape ) )
         pos = res._axis_position( axis )
-        return res._adopt( res._spread( driver.arange( shape[ pos ], dtype = res.dtype ), pos, shape ) )
+        return res._adopt( res._spread( framework_defaults.arange( shape[ pos ], dtype = res.dtype ), pos, shape ) )
 
     @classmethod
     def linspace( cls, start, stop, axis = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
@@ -312,7 +318,7 @@ class Tensor( Attribute ):
         default) and broadcast over the others: `RealTensor[ y, x ].linspace( 0, 1, x )`."""
         res, shape = cls._built_on( template_args, template_kwargs, scope )
         pos = res._axis_position( axis )
-        return res._adopt( res._spread( driver.linspace( start, stop, shape[ pos ], dtype = res.dtype ),
+        return res._adopt( res._spread( framework_defaults.linspace( start, stop, shape[ pos ], dtype = res.dtype ),
                                         pos, shape ) )
 
     @classmethod
@@ -382,19 +388,19 @@ class Tensor( Attribute ):
     @classmethod
     def random( cls, seed = None, *, template_args = (), template_kwargs = {}, scope = None ) -> "Tensor":
         """A uniform draw on `[ 0, 1 [`. `seed = None` takes the next one of a process-wide
-        counter -- passing a seed is what makes a test reproducible (see `driver.random`)."""
+        counter -- passing a seed is what makes a test reproducible (see `loom.random`)."""
         res, shape = cls._built_on( template_args, template_kwargs, scope )
         if not res.dtype.floating_point:
             raise TypeError( f"{ type( res ).__name__ }.random: a uniform draw is a REAL value -- "
                              f"declare a RealTensor, or scale one yourself" )
-        return res._adopt( driver.random( shape, dtype = res.dtype, seed = seed ) )
+        return res._adopt( framework_defaults.random( shape, dtype = res.dtype, seed = seed ) )
 
     def _spread( self, vector, pos, shape ):
         """`vector` (1D, along axis `pos`) broadcast over the whole `shape`."""
         if len( shape ) == 1:
             return vector
-        view = driver.reshape( vector, [ extent if d == pos else 1 for d, extent in enumerate( shape ) ] )
-        return view + driver.zeros( shape, dtype = self.dtype )
+        view = framework_defaults.ops( vector ).reshape( vector, [ extent if d == pos else 1 for d, extent in enumerate( shape ) ] )
+        return view + framework_defaults.zeros( shape, dtype = self.dtype )
 
     def append_axis( self, axis ):
         """A new tensor sharing our buffer, with `axis` appended as one extra TRAILING axis --
@@ -471,12 +477,30 @@ class Tensor( Attribute ):
         # buffer is then a plain dense array, or -- when the value is jagged -- an ASSEMBLED padded
         # one whose per-dim capacity is (for now) the max size.
         reference_shape = ReferenceShape.from_value( value )
+        if self._adopts( value ):
+            # a BUFFER is already materialized, in whatever framework and at whatever size its owner
+            # chose: we take it as is and declare what it holds. Converting it to the driver's
+            # defaults would copy it for nothing, and would drag it into a framework that is not its own.
+            self.dtype = Dtype.of( value )
+            self.storage = Storage.of( value, reference_shape )
+            return
         self._check_convertible( _natural_dtype( value ) )
         if reference_shape.is_ragged():
             raw = _assemble( value, reference_shape.capacities(), self.dtype, self.device )
         else:
-            raw = driver.array( value, dtype = self.dtype, device = self.device )
+            raw = framework_defaults.array( value, dtype = self.dtype, device = self.device )
         self.storage = Storage.of( raw, reference_shape )
+
+    def _adopts( self, value ):
+        """Does `value` go in as it is? Yes when it is a BUFFER (an array of any framework -- not a
+        list or a scalar, whose dtype is a conversion decision) of OUR kind, and we named no dtype of
+        our own. A buffer of another kind (ints bound to a real tensor) is still converted, and a
+        pinned dtype still converts to what it names."""
+        if self._dtype_pinned or isinstance( value, numpy.generic ) or not _is_buffer( value ):
+            return False
+        kind = Dtype.of( value ).kind
+        kinds = type( self ).dtype_kinds
+        return kind in kinds if kinds is not None else kind == self.dtype.kind
 
     def set_raw( self, raw, layout = None ):
         """Bind the buffer a kernel produced (a driver tensor). Sizes stay unobserved: an
@@ -499,13 +523,13 @@ class Tensor( Attribute ):
     def _as_declared( self, raw ):
         """`raw` retyped to our declared dtype. A widening conversion (bool/int -> real, a size
         change) is silent; a LOSING one is refused rather than performed behind the user's back."""
-        if raw is None or driver.is_symbolic_zero( raw ):
+        if raw is None or framework_defaults.ops( raw ).is_symbolic_zero( raw ):
             return raw                        # no storage to retype (a symbolic zero carries its own)
         have = Dtype.of( raw )
         if self.dtype.same_as( have ):
             return raw
         self._check_convertible( have )
-        return driver.astype( raw, self.dtype )
+        return framework_defaults.ops( raw ).astype( raw, framework_defaults.concrete( self.dtype ) )
 
     def _check_convertible( self, have ):
         """Raise if a value of dtype `have` cannot become our declared dtype without losing what it
@@ -754,17 +778,17 @@ class Tensor( Attribute ):
 
     # ---- array protocol: makes `numpy.asarray(t)`, `int(t)`, `list(t)`, `assert t == x` work ----
     def __array__( self, dtype = None ):
-        arr = numpy.asarray( self.value )
+        arr = self._ops().to_numpy( self.value )
         return arr.astype( dtype ) if dtype is not None else arr
 
     def __int__( self ):
-        return int( numpy.asarray( self.value ) )
+        return int( self._ops().to_numpy( self.value ) )
 
     def __float__( self ):
-        return float( numpy.asarray( self.value ) )
+        return float( self._ops().to_numpy( self.value ) )
 
     def __bool__( self ):
-        return bool( numpy.asarray( self.value ) )
+        return bool( self._ops().to_numpy( self.value ) )
 
     def __len__( self ):
         if self.rank == 0:
@@ -784,7 +808,57 @@ class Tensor( Attribute ):
     # per-batch value spreads over a full batched tensor with no reshape. Needs each ARRAY dim to map
     # to a DISTINCT axis object; a bare `Tensor( array )` (no axes) or a multi-dim `AxisList` (one
     # object over several dims) falls back to positional broadcasting. `@` is not here: it contracts.
+    # ---- WHICH framework an operation runs on --------------------------------------------------
+    # An operation follows its OPERANDS, not the default framework: that one only says what to build
+    # when nothing was specified. The common case -- every operand held by the same framework -- costs
+    # one comparison of names per operand. A buffer that traces decides; else the default wins if it is
+    # there (see `drivers/promotion.py`); the others cross by DLPack, never by a hidden copy. numpy
+    # and the values that hold no buffer (a zero, a fill) vote for nothing: every framework reads them.
+    def _ops( self, *others ):
+        """The driver that carries the operations on us and `others`: that of the first operand held by
+        a framework of its own, else the default one."""
+        for t in ( self, *others ):
+            if isinstance( t, Tensor ):
+                name = t.storage.framework
+                if name is not None and name != "numpy":
+                    return framework_defaults.ops_named( name )
+        return framework_defaults.ops_named( None )
+
+    def _clashes( self, others ):
+        """Are some operands held by DIFFERENT frameworks of their own?"""
+        mine = self.storage.framework
+        for o in others:
+            if isinstance( o, Tensor ):
+                theirs = o.storage.framework
+                if theirs != mine and mine not in _NO_VOTE and theirs not in _NO_VOTE:
+                    return True
+        return False
+
+    def _promoted( self, others ):
+        """`[ self, *others ]` with every tensor on ONE framework (what `_clashes` found them not to
+        be). Non-tensors go through untouched."""
+        tracing, plain = set(), set()
+        for t in ( self, *others ):
+            if isinstance( t, Tensor ) and t.storage.framework is not None:
+                ( tracing if t.storage.traces else plain ).add( t.storage.framework )
+        default = framework_defaults.framework().module_name
+        target = promote( tracing, plain, default ) or default
+        return [ t._in_framework( target ) if isinstance( t, Tensor ) else t for t in ( self, *others ) ]
+
+    def _in_framework( self, target ):
+        """A tensor with our axes and our value held by the framework `target` (us, when it already is
+        -- or when the value is numpy / has no buffer, which every framework reads)."""
+        name = self.storage.framework
+        if name in _NO_VOTE or name == target:
+            return self
+        res = copy.copy( self )
+        res.storage = self.storage.to_framework( target )
+        return res
+
     def _binary( self, other, op ):
+        if self._clashes( ( other, ) ):
+            me, other = self._promoted( ( other, ) )
+            return me._binary( other, op )
         # a raw (non-`Tensor`) operand carries its OWN dtype (e.g. a numpy float64 constant computed
         # host-side), which would otherwise promote the op's result away from `self.dtype` (jax's
         # numpy-style promotion, notably FP32 + F64 -> F64 once x64 is enabled) -- coerced upfront so
@@ -794,8 +868,9 @@ class Tensor( Attribute ):
         # rather than merely its precision -- `idx == 0.5` would compare against 0, and `idx / 2`
         # would be asked to answer in integers. There the backend's own promotion is the right
         # answer, and the result's dtype is read off the buffer it produces (see `_result_dtype`).
-        if self.dtype.floating_point and not isinstance( other, Tensor ) and not driver.is_symbolic_zero( other ):
-            other = driver.array( other, dtype = self.dtype, device = self.device )
+        ops = self._ops( other )
+        if self.dtype.floating_point and not isinstance( other, Tensor ) and not ops.is_symbolic_zero( other ):
+            other = ops.array( other, framework_defaults.concrete( self.dtype ), self.device )
         la = self._ref_layout()
         if la is not None:
             if isinstance( other, Tensor ):
@@ -837,7 +912,8 @@ class Tensor( Attribute ):
         over all of them. `None` when an operand cannot be mapped by reference (a bare array with
         several dimensions and no distinct axis per dimension) -- the caller then falls back to
         positional broadcasting."""
-        operands = [ self ] + [ o if isinstance( o, Tensor ) else Tensor.wrap( driver.array( o ) )
+        ops = self._ops( *others )
+        operands = [ self ] + [ o if isinstance( o, Tensor ) else Tensor.wrap( ops.array( o, framework_defaults.concrete() ) )
                                 for o in others ]
         if layouts is None:
             layouts = [ t._ref_layout() for t in operands ]
@@ -870,11 +946,15 @@ class Tensor( Attribute ):
         The three operands are aligned by axis IDENTITY like any elementwise op, so a per-row
         condition selects across a full matrix with no reshaping. Either branch may be a plain
         scalar, which broadcasts."""
-        res = self._ref_apply( [ a, b ], driver.where )
+        if self._clashes( ( a, b ) ):
+            me, a, b = self._promoted( ( a, b ) )
+            return me.where( a, b )
+        ops = self._ops( a, b )
+        res = self._ref_apply( [ a, b ], ops.where )
         if res is not None:
             return res
         unwrap = lambda v: v.value if isinstance( v, Tensor ) else v
-        return self._wrap( driver.where( self.value, unwrap( a ), unwrap( b ) ), self._dim_names() )
+        return self._wrap( ops.where( self.value, unwrap( a ), unwrap( b ) ), self._dim_names() )
 
     def _wrap_axes( self, raw, dim_axes ):
         """A detached tensor around `raw` whose dimensions ARE `dim_axes` -- the very axis OBJECTS, so
@@ -917,8 +997,11 @@ class Tensor( Attribute ):
         # matmul CONTRACTS dimensions -- it is not a per-axis map, so it must not go through the
         # ref-aligned path. Positional, and the contracted layout has no meaningful surviving axis
         # identity, so none is carried. Prefer `dot` (contraction BY REFERENCE) over `@`.
+        if self._clashes( ( o, ) ):
+            me, o = self._promoted( ( o, ) )
+            return me @ o
         b = o.value if isinstance( o, Tensor ) else o
-        return self._wrap( self.value @ b, None )
+        return self._wrap( self._ops( o ).matmul( self.value, b ), None )
 
     def dot( self, other, over ):
         """Contract with `other` over the SHARED axis `over` -- the reference-based analogue of a
@@ -936,18 +1019,20 @@ class Tensor( Attribute ):
     def _map( self, op ):
         return self._wrap_axes( op( self.value ), self._dim_axes() )
 
-    def sqrt  ( self ): return self._map( driver.sqrt )
-    def arcsin( self ): return self._map( driver.arcsin )
+    def sqrt  ( self ): return self._map( self._ops().sqrt )
+    def arcsin( self ): return self._map( self._ops().arcsin )
+    def exp   ( self ): return self._map( self._ops().exp )
 
     def clip( self, lo = None, hi = None ):
         """Values clamped to `[ lo, hi ]` (either bound may be `None` = unbounded)."""
-        return self._map( lambda a: driver.clip( a, lo, hi ) )
+        ops = self._ops()
+        return self._map( lambda a: ops.clip( a, lo, hi ) )
 
     def stop_gradient( self ):
         """Detached from the gradient tape (`driver.stop_gradient`) -- same values, no derivative
         flows back through them. Used where a quantity is needed for its VALUE only, its derivative
         being supplied by another (better conditioned) route."""
-        return self._map( driver.stop_gradient )
+        return self._map( self._ops().stop_gradient )
 
     def __eq__( self, o ): return self._binary( o, lambda a, b: a == b )
     def __ne__( self, o ): return self._binary( o, lambda a, b: a != b )
@@ -972,7 +1057,7 @@ class Tensor( Attribute ):
                 axes = tuple( axes[ 0 ] )
             perm = tuple( self._axis_pos( a ) for a in axes )
         dims = self._dim_axes()
-        return self._wrap_axes( driver.transpose( self.value, perm ),
+        return self._wrap_axes( self._ops().transpose( self.value, perm ),
                                 [ dims[ p ] for p in perm if p < len( dims ) ] )
 
     @property
@@ -988,7 +1073,7 @@ class Tensor( Attribute ):
         data  = self.value
         holes = self._hole_mask()
         if holes is not None:
-            data = driver.where( holes, identity, data )
+            data = self._ops().where( holes, identity, data )
         if axis is None:
             return self._wrap_axes( op( data ), [] )
         keys = axis if isinstance( axis, ( tuple, list ) ) else ( axis, )
@@ -1021,17 +1106,17 @@ class Tensor( Attribute ):
         data = self.value
         holes = self._hole_mask()
         if holes is not None:
-            data = driver.where( holes, 0, data )
-        res = self._wrap_axes( driver.cumsum( data, axis = pos ), self._dim_axes() )
+            data = self._ops().where( holes, 0, data )
+        res = self._wrap_axes( self._ops().cumsum( data, axis = pos ), self._dim_axes() )
         # the axes are the SAME objects, so the subtraction aligns by identity, not by shape
         return res - self if exclusive else res
 
-    def sum ( self, axis = None ): return self._reduce( driver.sum,  axis, 0 )
-    def prod( self, axis = None ): return self._reduce( driver.prod, axis, 1 )
-    def max ( self, axis = None ): return self._reduce( driver.max,  axis, -numpy.inf )
-    def min ( self, axis = None ): return self._reduce( driver.min,  axis,  numpy.inf )
-    def all ( self, axis = None ): return self._reduce( driver.all,  axis, True )
-    def any ( self, axis = None ): return self._reduce( driver.any,  axis, False )
+    def sum ( self, axis = None ): return self._reduce( self._ops().sum,  axis, 0 )
+    def prod( self, axis = None ): return self._reduce( self._ops().prod, axis, 1 )
+    def max ( self, axis = None ): return self._reduce( self._ops().max,  axis, -numpy.inf )
+    def min ( self, axis = None ): return self._reduce( self._ops().min,  axis,  numpy.inf )
+    def all ( self, axis = None ): return self._reduce( self._ops().all,  axis, True )
+    def any ( self, axis = None ): return self._reduce( self._ops().any,  axis, False )
 
     def mean( self, axis = None ):
         # holes filled with 0 make the SUM correct; divide by the count of REAL cells, not the box.
@@ -1043,11 +1128,11 @@ class Tensor( Attribute ):
         holes = self._hole_mask()
         valid = numpy.ones( tuple( self.shape ), dtype = int ) if holes is None else ( ~holes ).astype( int )
         if axis is None:
-            return self._wrap_axes( driver.array( int( valid.sum() ), dtype = int ), [] )
+            return self._wrap_axes( self._ops().array( int( valid.sum() ), framework_defaults.concrete( int ), self.device ), [] )
         keys = axis if isinstance( axis, ( tuple, list ) ) else ( axis, )
         pos  = tuple( self._axis_pos( k ) for k in keys )
         survivors = [ a for d, a in enumerate( self._dim_axes() ) if d not in pos ]
-        return self._wrap_axes( driver.array( valid.sum( axis = pos ), dtype = int ), survivors )
+        return self._wrap_axes( self._ops().array( valid.sum( axis = pos ), framework_defaults.concrete( int ), self.device ), survivors )
 
     def _hole_mask( self ):
         """A boolean array over the bounding box (`shape`), True at each PADDING position -- the
@@ -1112,7 +1197,7 @@ class Tensor( Attribute ):
         if self.raw is None:
             return header
 
-        raw = numpy.asarray( self.raw )
+        raw = self._ops().to_numpy( self.raw )
         # an unrolled AxisList is always fully dense (no reservation, no padding);
         # otherwise mask out padding cell by cell, from the axes' LIVE extents.
         tree = raw.tolist() if self._has_unroll() else _display_tree( raw, self.axes )
@@ -1167,6 +1252,16 @@ def _natural_dtype( value ):
     return None
 
 
+# the frameworks that vote for nothing in an operation: a value with no buffer (a zero, a fill) and
+# numpy, which every framework reads
+_NO_VOTE = ( None, "numpy" )
+
+
+def _is_buffer( value ):
+    """An array that already holds its data, of any framework (numpy, jax, torch, cupy)."""
+    return hasattr( value, "dtype" ) and hasattr( value, "shape" ) and not isinstance( value, type )
+
+
 def _wrapped_dtype( raw, claimed = None ):
     """The dtype to give a tensor built AROUND an existing buffer: the buffer's own. `claimed` (a
     dtype the caller passed anyway) is CHECKED against it, not believed -- wrapping is where a
@@ -1202,7 +1297,7 @@ def _aligned_to( arr, dims, order ):
     reference (a missing -- hence size-1 -- axis broadcasts). Matched by IDENTITY (`dims` distinct)."""
     pos = { ax.coordinate: i for i, ax in enumerate( dims ) }
     present = [ ax for ax in order if ax.coordinate in pos ]
-    arr = driver.transpose( arr, [ pos[ ax.coordinate ] for ax in present ] )
+    arr = framework_defaults.ops( arr ).transpose( arr, [ pos[ ax.coordinate ] for ax in present ] )
     return arr[ tuple( slice( None ) if ax.coordinate in pos else None for ax in order ) ]
 
 
@@ -1307,15 +1402,15 @@ def _assemble( value, caps, dtype, device ):
     block up to `caps` (extension), then `stack` the blocks (assembly). No in-place
     mutation, so it stays valid for Jax tracers / autodiff. Pad value is 0."""
     if not isinstance( value, _containers ):
-        leaf = driver.array( value, dtype = dtype, device = device )
+        leaf = framework_defaults.array( value, dtype = dtype, device = device )
         pad_width = [ ( 0, caps[ i ] - leaf.shape[ i ] ) for i in range( len( caps ) ) ]
-        return driver.pad( leaf, pad_width ) if any( a for _, a in pad_width ) else leaf
+        return framework_defaults.ops( leaf ).pad( leaf, pad_width ) if any( a for _, a in pad_width ) else leaf
 
     children = [ _assemble( v, caps[ 1: ], dtype, device ) for v in value ]
     if len( children ) < caps[ 0 ]:
-        block = driver.zeros( caps[ 1: ], dtype = dtype )
+        block = framework_defaults.zeros( caps[ 1: ], dtype = dtype )
         children = children + [ block ] * ( caps[ 0 ] - len( children ) )
-    return driver.stack( children, axis = 0 )
+    return framework_defaults.ops( children[ 0 ] ).stack( children, axis = 0 )
 
 
 def _dense_shape_of( value ):

@@ -1,0 +1,37 @@
+/*
+ * loom's colours. A loom is where two sets of threads cross, so the palette is
+ * two inks -- a teal and an indigo -- and the home page's title is where they meet.
+ */
+:root {
+  --vp-c-brand-1: #0f766e;
+  --vp-c-brand-2: #0d9488;
+  --vp-c-brand-3: #14b8a6;
+  --vp-c-brand-soft: rgba( 20, 184, 166, 0.14 );
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: -webkit-linear-gradient( 120deg, #14b8a6 30%, #6366f1 );
+  --vp-home-hero-image-background-image: linear-gradient( -45deg, #14b8a655 50%, #6366f155 50% );
+  --vp-home-hero-image-filter: blur( 48px );
+}
+
+.dark {
+  --vp-c-brand-1: #2dd4bf;
+  --vp-c-brand-2: #14b8a6;
+  --vp-c-brand-3: #0d9488;
+  --vp-c-brand-soft: rgba( 45, 212, 191, 0.18 );
+}
+
+.VPHero .tagline {
+  max-width: 46rem;
+}
+
+/* C++ next to Python is the whole subject here; keep both readable side by side. */
+.vp-doc div[class*="language-"] pre {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* A table of names is read by scanning the left column. */
+.vp-doc table td:first-child {
+  white-space: nowrap;
+}

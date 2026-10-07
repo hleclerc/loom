@@ -14,11 +14,11 @@ _vmap_rules: dict = {}
 def _make_ir_attr( v ):
     # Attribute widths must match the handler's Attr<...> decode type, i.e. the driver's
     # normalized int / float widths (e.g. SI32 / FP32 on Metal, SI64 / FP64 on CPU).
-    from .driver import driver
+    from . import framework_defaults
     if isinstance( v, ( int, numpy.integer ) ):
-        return ir.IntegerAttr.get( ir.IntegerType.get_signless( driver.itype.size ), int( v ) )
+        return ir.IntegerAttr.get( ir.IntegerType.get_signless( framework_defaults.itype().size ), int( v ) )
     if isinstance( v, ( float, numpy.floating ) ):
-        float_type = { 16: ir.F16Type, 32: ir.F32Type, 64: ir.F64Type }[ driver.ftype.size ]
+        float_type = { 16: ir.F16Type, 32: ir.F32Type, 64: ir.F64Type }[ framework_defaults.ftype().size ]
         return ir.FloatAttr.get( float_type.get(), float( v ) )
     raise NotImplementedError( f"Unsupported FFI attribute type: { type( v ) }" )
 

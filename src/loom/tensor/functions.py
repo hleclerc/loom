@@ -72,6 +72,10 @@ def arcsin( t ):
     return t.arcsin()
 
 
+def exp( t ):
+    return t.exp()
+
+
 def abs( t ):
     return t.__abs__()
 

@@ -27,5 +27,6 @@ What disappeared, and what replaces it:
 """
 from .grad_check import check_grad
 from .need import need, need_autodiff
+from .host import host
 
-__all__ = [ "check_grad", "need", "need_autodiff" ]
+__all__ = [ "check_grad", "need", "need_autodiff", "host" ]

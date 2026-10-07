@@ -15,5 +15,9 @@ class JaxFramework( Framework ):
             return False
 
     def make_instance( self, device, ftype, itype ):
-        from .JaxDriver import JaxDriver
-        return JaxDriver( self, device, ftype, itype )
+        from .Settings import Settings
+        return Settings( self, device, ftype, itype )
+
+    def _make_operations( self ):
+        from .JaxOperations import JaxOperations
+        return JaxOperations()

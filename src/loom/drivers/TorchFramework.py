@@ -15,5 +15,9 @@ class TorchFramework( Framework ):
             return False
 
     def make_instance( self, device, ftype, itype ):
-        from .TorchDriver import TorchDriver
-        return TorchDriver( self, device, ftype, itype )
+        from .Settings import Settings
+        return Settings( self, device, ftype, itype )
+
+    def _make_operations( self ):
+        from .TorchOperations import TorchOperations
+        return TorchOperations()

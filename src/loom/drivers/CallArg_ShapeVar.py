@@ -74,6 +74,13 @@ class CallArg_ShapeVar( CallArg ):
         # for good if we need none.
         self.error_id = -1
 
+    # the count itself travels as an FFI attribute, not in the source: all the source reads of it is
+    # whether the host KNOWS it (`as_scalar`). Skipped, or the key would change with every value.
+    _render_key_skip = CallArg._render_key_skip + ( "_static_count", )
+
+    def _render_key_extra( self ):
+        return ( self._static_count is not None, )
+
     @property
     def as_scalar( self ):
         """Whether this count crosses BY VALUE rather than through a buffer (see the class doc).
@@ -240,8 +247,8 @@ class CallArg_ShapeVar( CallArg ):
         return self.cpp_view()
 
     def jax_input_array( self ):
-        from ..drivers.driver import driver
-        return driver.array( self.inst.raw, dtype = Dtype.si( 32 ) ).reshape( self._jax_buffer_shape() )
+        from . import framework_defaults
+        return framework_defaults.array( self.inst.raw, dtype = Dtype.si( 32 ) ).reshape( self._jax_buffer_shape() )
 
     def out_shape_dtype( self ):
         import numpy

@@ -25,6 +25,9 @@ class CallArg_Attr( CallArg ):
 
         self.value = int( inst )
 
+    # the value crosses as an FFI attribute (`jax_attrs`), it is not in the source
+    _render_key_skip = CallArg._render_key_skip + ( "value", )
+
     # -- driver-agnostic C++ (the same for every driver) --
     def cpp_root_decl( self, var_name ):
         # the attribute reaches the handler under its OWN name, the body reads it under the

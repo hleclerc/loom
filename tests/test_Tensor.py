@@ -1,6 +1,7 @@
-from loom import ShapeVar, ShapeArray, Axis, AxisList, Tensor, Aggregate, driver, RealTensor, IntTensor, BoolTensor
+import loom
+from loom import ShapeVar, ShapeArray, Axis, AxisList, Tensor, Aggregate, RealTensor, IntTensor, BoolTensor
 from errand import test
-from loom.testing import need
+from loom.testing import need, host
 from loom.util import info
 import numpy
 
@@ -52,7 +53,7 @@ if test( "ragged" ):
 
     # values assembled into a padded rank-2 buffer (pad = 0), functionally
     import numpy
-    raw = numpy.asarray( m.cell_vertices.raw )
+    raw = host( m.cell_vertices.raw )
     assert raw.shape == ( 2, 2 )
     assert raw.tolist() == [ [ 10, 11 ], [ 12, 0 ] ]
 
@@ -73,7 +74,7 @@ if test( "AxisList" ):
 
 
 
-    m = Image( values = driver.random( [ 2, 1 ] ), knots = [ [ 0, 1, 2 ], [ 0, 1 ] ] )
+    m = Image( values = loom.random( [ 2, 1 ] ), knots = [ [ 0, 1, 2 ], [ 0, 1 ] ] )
     assert list( m.extent.value ) == [ 2, 1 ]
     assert m.nb_dims.value == 2
 
@@ -213,17 +214,17 @@ if test( "tensor_ops" ):
     b = IntTensor( [ 10, 20, 30 ] )
 
     # scalar / tensor operands, left and right
-    assert numpy.asarray( a + b ).tolist() == [ 11, 22, 33 ]
-    assert numpy.asarray( b - a ).tolist() == [ 9, 18, 27 ]
-    assert numpy.asarray( a * 2 ).tolist() == [ 2, 4, 6 ]
-    assert numpy.asarray( 2 * a ).tolist() == [ 2, 4, 6 ]
-    assert numpy.asarray( -a ).tolist()    == [ -1, -2, -3 ]
+    assert host( a + b ).tolist() == [ 11, 22, 33 ]
+    assert host( b - a ).tolist() == [ 9, 18, 27 ]
+    assert host( a * 2 ).tolist() == [ 2, 4, 6 ]
+    assert host( 2 * a ).tolist() == [ 2, 4, 6 ]
+    assert host( -a ).tolist()    == [ -1, -2, -3 ]
 
     # comparisons yield a boolean Tensor
-    assert numpy.asarray( a >= 2 ).tolist() == [ False, True, True ]
+    assert host( a >= 2 ).tolist() == [ False, True, True ]
 
     # result of an op is a Tensor, chainable
-    assert numpy.asarray( ( a + b ) * 2 ).tolist() == [ 22, 44, 66 ]
+    assert host( ( a + b ) * 2 ).tolist() == [ 22, 44, 66 ]
 
     info( a + b )
 
@@ -237,12 +238,12 @@ if test( "tensor_reduce" ):
 
     # reduce BY AXIS NAME -- drops that axis, keeps the other
     per_col = t.sum( "row" )                       # sum over rows -> one value per col
-    assert numpy.asarray( per_col ).tolist() == [ 5, 7, 9 ]
+    assert host( per_col ).tolist() == [ 5, 7, 9 ]
     assert per_col._dim_names() == [ "col" ]
 
     # reduce BY POSITION
     per_row = t.sum( 1 )
-    assert numpy.asarray( per_row ).tolist() == [ 6, 15 ]
+    assert host( per_row ).tolist() == [ 6, 15 ]
     assert per_row._dim_names() == [ "row" ]
 
 
@@ -250,15 +251,15 @@ if test( "tensor_index" ):
     t = _named_2x3()
 
     r0 = t[ 0 ]                                    # first row -> the "col" axis survives
-    assert numpy.asarray( r0 ).tolist() == [ 1, 2, 3 ]
+    assert host( r0 ).tolist() == [ 1, 2, 3 ]
     assert r0._dim_names() == [ "col" ]
 
     c1 = t[ :, 1 ]                                 # second column -> the "row" axis survives
-    assert numpy.asarray( c1 ).tolist() == [ 2, 5 ]
+    assert host( c1 ).tolist() == [ 2, 5 ]
     assert c1._dim_names() == [ "row" ]
 
     by_name = t[ "col", 2 ]                        # select column 2 by axis name
-    assert numpy.asarray( by_name ).tolist() == [ 3, 6 ]
+    assert host( by_name ).tolist() == [ 3, 6 ]
     assert by_name._dim_names() == [ "row" ]
 
 
@@ -266,17 +267,17 @@ if test( "tensor_transpose" ):
     t = _named_2x3()                               # axes `row` (2), `col` (3)
 
     tt = t.T                                        # reverse -> `col` (3), `row` (2)
-    assert numpy.asarray( tt ).tolist() == [ [ 1, 4 ], [ 2, 5 ], [ 3, 6 ] ]
+    assert host( tt ).tolist() == [ [ 1, 4 ], [ 2, 5 ], [ 3, 6 ] ]
     assert tt._dim_names() == [ "col", "row" ]
 
     # explicit permutation, by axis NAME -- the names follow the move
     by_name = t.transpose( "col", "row" )
-    assert numpy.asarray( by_name ).tolist() == numpy.asarray( tt ).tolist()
+    assert host( by_name ).tolist() == host( tt ).tolist()
     assert by_name._dim_names() == [ "col", "row" ]
 
     # matmul chains through it: t (2x3) @ t.T (3x2) -> 2x2
     g = t @ t.T
-    assert numpy.asarray( g ).tolist() == [ [ 14, 32 ], [ 32, 77 ] ]
+    assert host( g ).tolist() == [ [ 14, 32 ], [ 32, 77 ] ]
 
 
 if test( "tensor_ref_broadcast" ):
@@ -291,16 +292,16 @@ if test( "tensor_ref_broadcast" ):
     # broadcasts. Operand order sets the order of the NON-batch axes (first-seen), so `v * m` lists
     # `col` first -- the same tensor as `m * v`, merely stored transposed (downstream aligns by ref).
     assert ( m * v )._dim_names() == [ "row", "col" ]
-    assert numpy.asarray( m * v ).tolist() == [ [ 10, 40, 90 ], [ 40, 100, 180 ] ]
+    assert host( m * v ).tolist() == [ [ 10, 40, 90 ], [ 40, 100, 180 ] ]
     assert ( v * m )._dim_names() == [ "col", "row" ]
-    assert numpy.asarray( v * m ).tolist() == [ [ 10, 40 ], [ 40, 100 ], [ 90, 180 ] ]
+    assert host( v * m ).tolist() == [ [ 10, 40 ], [ 40, 100 ], [ 90, 180 ] ]
 
     # a DIFFERENT axis object does NOT align, even with the SAME name (reference, not name): the two
     # `col`s are distinct axes, so the op is their outer product over two separate dimensions.
     col2 = Axis( ShapeVar(), name = "col" )
     w = IntTensor[ col2 ]( [ 1, 2, 3 ] )
     ow = v * w
-    assert numpy.asarray( ow ).shape == ( 3, 3 )
+    assert host( ow ).shape == ( 3, 3 )
     assert ow._dim_names() == [ "col", "col" ]
 
     # a BATCH axis sorts FIRST in the result layout, whichever operand carries it (and however the
@@ -310,8 +311,8 @@ if test( "tensor_ref_broadcast" ):
     r = m * bt
     assert r._dim_names() == [ b.name, "row", "col" ]                              # batch leading
     assert ( bt * m )._dim_names() == [ b.name, "row", "col" ]
-    assert numpy.asarray( r )[ 0 ].tolist() == [ [ 100, 200, 300 ], [ 400, 500, 600 ] ]
-    assert numpy.asarray( r )[ 1 ].tolist() == [ [ 200, 400, 600 ], [ 800, 1000, 1200 ] ]
+    assert host( r )[ 0 ].tolist() == [ [ 100, 200, 300 ], [ 400, 500, 600 ] ]
+    assert host( r )[ 1 ].tolist() == [ [ 200, 400, 600 ], [ 800, 1000, 1200 ] ]
 
 
 if test( "tensor_dot" ):
@@ -326,9 +327,9 @@ if test( "tensor_dot" ):
     out = left.dot( right, over = xy )                                              # contracts xy
     assert out._dim_names() == [ "a", "b" ]                                         # free axes survive
     # out[i,j] = sum_xy left[i,xy]*right[j,xy]
-    assert numpy.asarray( out ).tolist() == [ [ 1, 2, 0 ], [ 2, 0, 6 ] ]
+    assert host( out ).tolist() == [ [ 1, 2, 0 ], [ 2, 0, 6 ] ]
     # matches the positional matmul left @ right.T, but chosen by axis, not by order
-    assert numpy.asarray( out ).tolist() == numpy.asarray( left @ right.T ).tolist()
+    assert host( out ).tolist() == host( left @ right.T ).tolist()
 
 
 if test( "tensor_physical_layout_view" ):
@@ -337,7 +338,7 @@ if test( "tensor_physical_layout_view" ):
     # boundary). Everything else reads `.value`, so ops/results stay logical whatever the storage.
     from loom.tensor import PhysicalLayout
     from loom.tensor import ReferenceShape, Storage
-    from loom import driver
+    import loom
 
     logical = numpy.array( [ [ 1, 2, 3 ], [ 4, 5, 6 ] ], dtype = float )   # logical [2,3]
     raw = numpy.zeros( ( 4, 3 ) ); raw[ :2 ] = logical                     # batch(2)->flat padded to 4
@@ -349,14 +350,14 @@ if test( "tensor_physical_layout_view" ):
     t = RealTensor[ b, c ]()
     # ONE statement says how this value is backed: the buffer, the logical sizes it was read from,
     # and the physical layout relating the two -- rather than three fields that must agree.
-    t.storage = Storage.of( driver.array( raw ), ReferenceShape.from_dense_shape( [ 2, 3 ] ), L )
+    t.storage = Storage.of( loom.array( raw ), ReferenceShape.from_dense_shape( [ 2, 3 ] ), L )
 
     assert list( t.shape ) == [ 2, 3 ]
     assert t.capacity == ( 2, 3 )                     # per LOGICAL dim: the padding lives in the flat phys dim
-    assert numpy.asarray( t.value ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]   # padding + flatten peeled off
+    assert host( t.value ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]   # padding + flatten peeled off
 
     # an elementwise op reads `.value`, so it works transparently on the laid-out tensor
-    assert numpy.asarray( t + t ).tolist() == [ [ 2, 4, 6 ], [ 8, 10, 12 ] ]
+    assert host( t + t ).tolist() == [ [ 2, 4, 6 ], [ 8, 10, 12 ] ]
 
 
 if test( "tensor_protocol" ):
@@ -367,7 +368,7 @@ if test( "tensor_protocol" ):
     v = IntTensor( [ 5, 6, 7 ] )
     assert len( v ) == 3
     assert [ int( x ) for x in v ] == [ 5, 6, 7 ]  # iteration yields sub-tensors
-    assert numpy.asarray( v ).tolist() == [ 5, 6, 7 ]
+    assert host( v ).tolist() == [ 5, 6, 7 ]
     assert bool( ( v == v ).all() )                # elementwise eq, then reduce to a scalar bool
 
 
@@ -382,9 +383,9 @@ if test( "tensor_repr" ):
 if test( "tensor_symbolic_zero" ):
     # a symbolic zero is the framework's shaped-but-bufferless zero, stored straight in `_raw` --
     # the single source of truth for a tensor's kind (buffer / symbolic zero / None).
-    z = driver.symbolic_zero( [ 2, 3 ] )
-    assert driver.is_symbolic_zero( z )
-    assert not driver.is_symbolic_zero( driver.array( [ 1.0, 2.0 ] ) )
+    z = loom.symbolic_zero( [ 2, 3 ] )
+    assert loom.is_symbolic_zero( z )
+    assert not loom.is_symbolic_zero( loom.array( [ 1.0, 2.0 ] ) )
 
     t = RealTensor()
     t.set_raw( z )
@@ -395,7 +396,7 @@ if test( "tensor_symbolic_zero" ):
     assert "symbolic_zero" in repr( t )
 
     # writing a real buffer makes it a plain bound tensor -- no flag to reset, `_raw` says it all
-    t.set_raw( driver.array( [ [ 1.0, 2, 3 ], [ 4, 5, 6 ] ] ) )
+    t.set_raw( loom.array( [ [ 1.0, 2, 3 ], [ 4, 5, 6 ] ] ) )
     assert not t.is_symbolic_zero
     assert t.raw is not None
 
@@ -408,24 +409,24 @@ if test( "set_list_reassign" ):
     assert t.shape == [ None ]                          # one axis, extent still unresolved
 
     t.set( [ 1, 2, 3 ] )                               # observe from a python list
-    assert numpy.asarray( t ).tolist() == [ 1, 2, 3 ]
+    assert host( t ).tolist() == [ 1, 2, 3 ]
     assert t.shape == [ 3 ] and ni.value == 3
 
     t.set( [ 4, 5 ] )                                  # reassign: the observation follows
-    assert numpy.asarray( t ).tolist() == [ 4, 5 ]
+    assert host( t ).tolist() == [ 4, 5 ]
     assert t.shape == [ 2 ] and ni.value == 2
 
 
 if test( "set_backend_array" ):
     ni, nj = ShapeVar(), ShapeVar()
     t = IntTensor[ Axis( ni ), Axis( nj ) ]()
-    # a backend array, not a list -- and an INT one: `driver.array` defaults to the driver's
+    # a backend array, not a list -- and an INT one: `loom.array` defaults to the driver's
     # ftype, and binding a real buffer to a tensor declared `int` is refused (it would be
     # reinterpreted, not converted, once the FFI spells its element type in C++).
-    t.set( driver.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ], dtype = int ) )
+    t.set( loom.array( [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ], dtype = int ) )
     assert ni.value == 3 and nj.value == 2
     assert t.shape == [ 3, 2 ]
-    assert numpy.asarray( t ).tolist() == [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ]
+    assert host( t ).tolist() == [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ]
 
 
 if test( "set_ragged_reassign" ):
@@ -444,7 +445,7 @@ if test( "set_ragged_reassign" ):
     # not on the tensor) are re-observed from scratch.
     m.cell_vertices = [ [ 1 ], [ 2, 3, 4 ], [ 5, 6 ] ]
     assert m.nb_cells.value == 3 and list( m.nb_vtx_per_cell.value ) == [ 1, 3, 2 ]
-    assert numpy.asarray( m.cell_vertices.raw ).shape == ( 3, 3 )   # padded to the new max
+    assert host( m.cell_vertices.raw ).shape == ( 3, 3 )   # padded to the new max
 
 
 if test( "set_from_tensor" ):
@@ -454,12 +455,12 @@ if test( "set_from_tensor" ):
     mi, mj = ShapeVar(), ShapeVar()
     dst = IntTensor[ Axis( mi ), Axis( mj ) ]()
     dst.set( src )
-    assert numpy.asarray( dst ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]
+    assert host( dst ).tolist() == [ [ 1, 2, 3 ], [ 4, 5, 6 ] ]
     assert dst.shape == [ 2, 3 ] and mi.value == 2 and mj.value == 3
 
     # setting from a symbolic-zero tensor carries the KIND across (no buffer to re-observe)
     zero = Tensor.like( src )
-    zero.set_raw( driver.symbolic_zero( [ 2, 3 ] ) )
+    zero.set_raw( loom.symbolic_zero( [ 2, 3 ] ) )
     holder = Tensor.like( src )
     holder.set( zero )
     assert holder.is_symbolic_zero and holder.raw is None
@@ -512,7 +513,7 @@ if test( "shapevar_ragged_value_is_tensor" ):
     assert not isinstance( per_cell / 2, ShapeArray )
 
     # `.raw` is the escape hatch to the backend array; `as_tensor()` its tidy device form
-    assert numpy.asarray( m.nb_vtx_per_cell.raw ).tolist() == [ 2, 1 ]
+    assert host( m.nb_vtx_per_cell.raw ).tolist() == [ 2, 1 ]
     assert m.nb_vtx_per_cell.as_tensor()._dim_names() == [ "cell" ]
 
 
@@ -529,10 +530,10 @@ if test( "tensor_reduce_ragged" ):
     t = m.cell_vertices
 
     # a reduction over the ragged axis must IGNORE the padding hole (not fold the 0 in)
-    assert numpy.asarray( t.min( "vtx" ) ).tolist()  == [ 1.0, 3.0 ]   # masked; unmasked -> [1, 0]
-    assert numpy.asarray( t.prod( "vtx" ) ).tolist() == [ 2.0, 3.0 ]   # masked; unmasked -> [2, 0]
-    assert numpy.asarray( t.mean( "vtx" ) ).tolist() == [ 1.5, 3.0 ]   # masked; unmasked -> [1.5, 1.5]
-    assert numpy.asarray( t.sum( "vtx" ) ).tolist()  == [ 3.0, 3.0 ]
+    assert host( t.min( "vtx" ) ).tolist()  == [ 1.0, 3.0 ]   # masked; unmasked -> [1, 0]
+    assert host( t.prod( "vtx" ) ).tolist() == [ 2.0, 3.0 ]   # masked; unmasked -> [2, 0]
+    assert host( t.mean( "vtx" ) ).tolist() == [ 1.5, 3.0 ]   # masked; unmasked -> [1.5, 1.5]
+    assert host( t.sum( "vtx" ) ).tolist()  == [ 3.0, 3.0 ]
     assert int( t.min() ) == 1                                          # global min over real cells
 
 
@@ -545,7 +546,7 @@ if test( "dtype_is_a_contract_not_a_label" ):
 
     # widening is silent (that is a conversion, and it loses nothing)
     idx.set( [ True, False, True ] )
-    assert numpy.asarray( idx ).tolist() == [ 1, 0, 1 ]
+    assert host( idx ).tolist() == [ 1, 0, 1 ]
 
     # losing the fractional part is NOT: it is refused, from a list...
     try:
@@ -578,7 +579,7 @@ if test( "op_result_dtype_follows_the_op" ):
 
     mask = t > 1.5
     assert mask.dtype.boolean                                   # a comparison yields booleans
-    assert numpy.asarray( mask ).tolist() == [ False, True, True ]
+    assert host( mask ).tolist() == [ False, True, True ]
 
     idx = IntTensor( [ 1, 2, 3 ] )
     assert ( idx * 2 ).dtype.integer                            # int stays int
@@ -586,7 +587,7 @@ if test( "op_result_dtype_follows_the_op" ):
 
     # an integer tensor is compared against the value it is GIVEN, not against that value cast
     # down to its own type (`> 1.5` used to be answered as `> 1`).
-    assert numpy.asarray( idx > 1.5 ).tolist() == [ False, True, True ]
+    assert host( idx > 1.5 ).tolist() == [ False, True, True ]
 
 
 if test( "element_type_is_the_class" ):
@@ -635,19 +636,19 @@ if test( "a_count_that_lives_on_the_device_is_refused_on_the_host" ):
             refused = 1.0
         # the DEVICE form stays available -- it is the right answer here, just not a host one
         assert n.as_tensor() is not None
-        return driver.array( refused )
+        return loom.array( refused )
 
-    assert float( driver.jit( probe )( driver.array( 3, dtype = int ) ) ) == 1.0
+    assert float( loom.jit( probe )( loom.array( 3, dtype = int ) ) ) == 1.0
 
     # outside any trace the very same count reads back on the host, no ceremony
-    n.set_count( driver.array( 3, dtype = int ) )
+    n.set_count( loom.array( 3, dtype = int ) )
     assert int( n.value ) == 3
 
 
 if test( "storage_is_a_kind_not_a_flag" ):
     # HOW a value is backed is an object, one variant per way it can be (see `tensor/storage.py`),
     # and each answers the physical questions its own way. Nothing tests for a kind.
-    from loom.tensor import Storage, Unbound, Buffer, SymbolicZero, Fill
+    from loom.tensor import Storage, Unbound, Buffer, Zero, Fill
     from loom.tensor import ReferenceShape
 
     n = ShapeVar()
@@ -659,13 +660,13 @@ if test( "storage_is_a_kind_not_a_flag" ):
     t.set( [ 1.0, 2.0, 3.0 ] )
     assert isinstance( t.storage, Buffer )
     assert t.is_defined and t.capacity == ( 3, )
-    assert numpy.asarray( t.value ).tolist() == [ 1.0, 2.0, 3.0 ]
+    assert host( t.value ).tolist() == [ 1.0, 2.0, 3.0 ]
 
     # a symbolic zero HOLDS a value (it reads as 0) yet backs no buffer -- which is exactly why it
     # binds nothing across the FFI. One variant, no flag, no special case at the call sites.
     z = RealTensor[ Axis( ShapeVar( 3 ) ) ]()
-    z.set_raw( driver.symbolic_zero( [ 3 ] ) )
-    assert isinstance( z.storage, SymbolicZero )
+    z.set_raw( loom.symbolic_zero( [ 3 ] ) )
+    assert isinstance( z.storage, Zero )
     assert z.is_defined and z.is_symbolic_zero
     assert z.raw is None                              # nothing to bind...
     assert z.storage.raw is not None                  # ...though the framework's object is held
@@ -675,18 +676,18 @@ if test( "storage_is_a_kind_not_a_flag" ):
     assert isinstance( f.storage, Fill ) and f.is_fill
     assert f.capacity == ( 4, )                       # its logical extents ARE its capacity
     assert f.allocated_sizes is None                  # ... and back no capacity a ShapeVar inverts
-    assert numpy.asarray( f.value ).tolist() == [ 2.5 ] * 4
+    assert host( f.value ).tolist() == [ 2.5 ] * 4
 
     # binding a value to another tensor carries its KIND along, and retypes what backs it
     holder = RealTensor[ Axis( ShapeVar( 4 ) ) ]()
     holder.set( f )
     assert isinstance( holder.storage, Fill )         # a fill stays a fill
     holder.set( z )
-    assert isinstance( holder.storage, SymbolicZero ) # a symbolic zero stays one
+    assert isinstance( holder.storage, Zero )   # a symbolic zero stays one
 
     # and `Storage.of` is the ONE place a kind is decided from a value
     assert isinstance( Storage.of( None ), Unbound )
-    assert isinstance( Storage.of( driver.array( 1.0 ) ), Buffer )
+    assert isinstance( Storage.of( loom.array( 1.0 ) ), Buffer )
 
 
 if test( "a_literal_extent_is_enough_standalone" ):
@@ -757,17 +758,17 @@ if test( "where_selects_by_axis_identity" ):
     assert type( mask ) is BoolTensor
 
     # either branch may be a plain scalar, or another tensor
-    assert numpy.asarray( mask.where( x, 0.0 ) ).tolist() == [ 0.0, 2.0, 0.0 ]
-    assert numpy.asarray( mask.where( x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
+    assert host( mask.where( x, 0.0 ) ).tolist() == [ 0.0, 2.0, 0.0 ]
+    assert host( mask.where( x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
 
     # and the three operands align BY AXIS, like any elementwise op: a per-row condition selects
     # across a whole matrix with no reshaping.
     m = RealTensor[ i, j ]( [ [ 1.0, 2.0 ], [ 3.0, 4.0 ], [ 5.0, 6.0 ] ] )
     r = mask.where( m, 0.0 )
     assert r.shape == [ 3, 2 ] and r._dim_names() == [ "i", "j" ]
-    assert numpy.asarray( r ).tolist() == [ [ 0.0, 0.0 ], [ 3.0, 4.0 ], [ 0.0, 0.0 ] ]
+    assert host( r ).tolist() == [ [ 0.0, 0.0 ], [ 3.0, 4.0 ], [ 0.0, 0.0 ] ]
 
-    assert numpy.asarray( loom.where( mask, x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
+    assert host( loom.where( mask, x, y ) ).tolist() == [ 10.0, 2.0, 30.0 ]
 
 
 if test( "every_operation_has_both_forms" ):
@@ -780,7 +781,7 @@ if test( "every_operation_has_both_forms" ):
     v = RealTensor[ i ]( [ -1.0, 2.0 ] )
     w = RealTensor[ i ]( [ 10.0, 20.0 ] )
 
-    same = lambda a, b: numpy.asarray( a ).tolist() == numpy.asarray( b ).tolist()
+    same = lambda a, b: host( a ).tolist() == host( b ).tolist()
 
     assert same( loom.dot( v, w, "i" ), v.dot( w, "i" ) )
     assert same( loom.sum ( m, "i" ), m.sum ( "i" ) )
@@ -823,8 +824,8 @@ if test( "an_aggregate_detaches_entirely" ):
     q = loom.stop_gradient( p )
 
     # the values are the same, the buffers are other objects
-    assert numpy.asarray( q.pos.value ).tolist() == numpy.asarray( p.pos.value ).tolist()
-    assert numpy.asarray( q.weight.value ).tolist() == [ 1.0, 2.0, 3.0 ]
+    assert host( q.pos.value ).tolist() == host( p.pos.value ).tolist()
+    assert host( q.weight.value ).tolist() == [ 1.0, 2.0, 3.0 ]
     assert q.pos is not p.pos
 
     # the counts and the axes are THE SAME OBJECTS: a restated count is a count that can
@@ -857,7 +858,7 @@ if test( "a_result_keeps_its_extents_after_its_operand_is_gone" ):
     # registering is only sound because an op preserves its axes' extents. A partial slice does
     # NOT, so it hands over a DERIVED axis: the same axis MEANT, over a count of its own.
     s = x[ 0:2 ]
-    assert numpy.asarray( s ).tolist() == [ 1.0, 2.0 ]
+    assert host( s ).tolist() == [ 1.0, 2.0 ]
     assert s.shape == [ 2 ]                    # the SLICED size, not the axis's
     assert s._dim_names() == [ "i" ]           # ... still readable as `i`
     assert int( i.max ) == 3                   # ... and the shared axis is untouched
@@ -886,7 +887,7 @@ if test( "a_window_into_a_dimension_remembers_where_it_starts" ):
     w = RealTensor[ num_vertex ]( [ 0.0, 10.0, 20.0, 30.0, 40.0, 50.0 ] )
 
     # the same window of the same dimension: elementwise
-    assert numpy.asarray( v[ 2:4 ] * w[ 2:4 ] ).tolist() == [ 40.0, 90.0 ]
+    assert host( v[ 2:4 ] * w[ 2:4 ] ).tolist() == [ 40.0, 90.0 ]
     assert ( v[ 2:4 ] * w[ 2:4 ] ).shape == [ 2 ]
 
     # DIFFERENT windows of the same dimension are REFUSED. They index the same thing, so they are
@@ -933,7 +934,7 @@ if test( "slicing_keeps_the_meaning_and_drops_the_size" ):
     assert sa._dim_axes()[ 0 ].coordinate == sb._dim_axes()[ 0 ].coordinate   # ... same window
 
     # so they map by reference, elementwise -- NOT as an outer product
-    assert numpy.asarray( sa * sb ).tolist() == [ 10.0, 40.0 ]
+    assert host( sa * sb ).tolist() == [ 10.0, 40.0 ]
     assert ( sa * sb ).shape == [ 2 ]
 
     # and a sliced matrix still lines its rows up with a sliced vector
@@ -942,8 +943,8 @@ if test( "slicing_keeps_the_meaning_and_drops_the_size" ):
     assert r.shape == [ 2, 2 ] and r._dim_names() == [ "i", "j" ]
 
     # a narrowed dimension is still selectable by name AND by the original axis object
-    assert numpy.asarray( m[ 0:2 ].sum( "i" ) ).tolist() == [ 4.0, 6.0 ]
-    assert numpy.asarray( m[ 0:2 ].sum(  i  ) ).tolist() == [ 4.0, 6.0 ]
+    assert host( m[ 0:2 ].sum( "i" ) ).tolist() == [ 4.0, 6.0 ]
+    assert host( m[ 0:2 ].sum(  i  ) ).tolist() == [ 4.0, 6.0 ]
 
     assert int( i.max ) == 3                                        # never poisoned
 
@@ -1046,7 +1047,7 @@ if test( "a_dimension_can_be_shared_across_aggregates" ):
     b = Cell( num_vertex = vertex ); b.positions = [ 10.0, 20.0, 30.0 ]
 
     assert a.num_vertex.identity is b.num_vertex.identity is vertex
-    assert numpy.asarray( a.positions * b.positions ).tolist() == [ 10.0, 40.0, 90.0 ]
+    assert host( a.positions * b.positions ).tolist() == [ 10.0, 40.0, 90.0 ]
 
     # each keeps its OWN count -- the dimension carries no size to impose
     assert int( a.nb_vertices.value ) == 3
@@ -1071,8 +1072,8 @@ if test( "a_dimension_can_be_shared_across_aggregates" ):
 
 if test( "factories" ):
     # THE FACTORIES: a tensor built from its AXES, with no shape to repeat -- and without ever
-    # going through `driver.array`, whose dtype is guessed from a literal (and guessed badly).
-    print( "driver :", type( driver._checked_driver_instance() ).__name__ )
+    # going through `loom.array`, whose dtype is guessed from a literal (and guessed badly).
+    print( "driver :", loom.resolved_framework() )
 
     n = ShapeVar( 4 )
     x = Axis( n ); x.name = "x"
@@ -1081,33 +1082,33 @@ if test( "factories" ):
 
     # the CLASS is the type declaration: an iota of integers is integer, period.
     ranks = IntTensor[ x ].iota()
-    assert numpy.asarray( ranks.value ).tolist() == [ 0, 1, 2, 3 ]
+    assert host( ranks.value ).tolist() == [ 0, 1, 2, 3 ]
     assert not ranks.dtype.floating_point
 
     # without an axis and at rank > 1: the FLAT rank, in C order -- the "who am I?" of a work-item
     flat = IntTensor[ y, x ].iota()
-    assert numpy.asarray( flat.value ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
+    assert host( flat.value ).tolist() == [ [ 0, 1, 2, 3 ], [ 4, 5, 6, 7 ], [ 8, 9, 10, 11 ] ]
 
     # with an axis: the COORDINATE along that axis, broadcast over the others
     columns = IntTensor[ y, x ].iota( x )
-    assert numpy.asarray( columns.value ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
+    assert host( columns.value ).tolist() == [ [ 0, 1, 2, 3 ] ] * 3
     rows = IntTensor[ y, x ].iota( y )
-    assert numpy.asarray( rows.value ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
+    assert host( rows.value ).tolist() == [ [ 0 ] * 4, [ 1 ] * 4, [ 2 ] * 4 ]
 
     # zeros / ones / full, in the shape the axes give
-    assert numpy.asarray( RealTensor[ y, x ].zeros().value ).tolist() == [ [ 0.0 ] * 4 ] * 3
-    assert numpy.asarray( RealTensor[ y, x ].ones().value ).tolist() == [ [ 1.0 ] * 4 ] * 3
-    assert numpy.asarray( RealTensor[ x ].full( 2.5 ).value ).tolist() == [ 2.5 ] * 4
+    assert host( RealTensor[ y, x ].zeros().value ).tolist() == [ [ 0.0 ] * 4 ] * 3
+    assert host( RealTensor[ y, x ].ones().value ).tolist() == [ [ 1.0 ] * 4 ] * 3
+    assert host( RealTensor[ x ].full( 2.5 ).value ).tolist() == [ 2.5 ] * 4
 
     # linspace: bounds INCLUDED, along the named axis
-    assert numpy.asarray( RealTensor[ x ].linspace( 0, 1 ).value ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
-    grille = numpy.asarray( RealTensor[ y, x ].linspace( 0, 1, x ).value ).tolist()
+    assert host( RealTensor[ x ].linspace( 0, 1 ).value ).tolist() == [ 0.0, 1 / 3, 2 / 3, 1.0 ]
+    grille = host( RealTensor[ y, x ].linspace( 0, 1, x ).value ).tolist()
     assert grille == [ [ 0.0, 1 / 3, 2 / 3, 1.0 ] ] * 3
 
     # a reproducible draw, which stays within [ 0, 1 [
     a = RealTensor[ y, x ].random( seed = 7 )
     b = RealTensor[ y, x ].random( seed = 7 )
-    va, vb = numpy.asarray( a.value ), numpy.asarray( b.value )
+    va, vb = host( a.value ), host( b.value )
     assert va.shape == ( 3, 4 ) and ( va == vb ).all()
     assert ( 0 <= va ).all() and ( va < 1 ).all()
 
@@ -1227,3 +1228,62 @@ if test( "a_count_is_a_number" ):
         assert False, "an unresolved count is worth no integer"
     except ValueError:
         pass
+
+if test( "a_buffer_is_adopted_as_it_is" ):
+    # a materialized buffer is not converted to the driver's defaults: its own size stands, and the
+    # very same object is held (no copy, no change of framework)
+    for dt in ( numpy.float32, numpy.float64 ):
+        a = numpy.arange( 6, dtype = dt ).reshape( 2, 3 )
+        t = RealTensor( a )
+        assert t.dtype.size == 8 * a.itemsize
+        assert t.raw is a
+    # ... a python list is a conversion decision, so the driver's policy still rules
+    assert 8 * host( RealTensor( [ 1.0, 2.0 ] ).value ).itemsize == loom.resolved_dtype().size
+    # ... a NAMED dtype is a contract the value is converted to
+    t = RealTensor[ { "size": 32 } ]( numpy.zeros( 3 ) )
+    assert t.dtype.size == 32 and host( t.value ).dtype == numpy.float32
+    # ... and a buffer of another kind is still converted, not adopted
+    t = RealTensor( numpy.arange( 3, dtype = numpy.int32 ) )
+    assert t.dtype.floating_point
+
+if test( "a_buffer_knows_its_framework" ):
+    # one class per framework: the framework, whether it traces, its dtype and strides are ANSWERED
+    # by the buffer -- nothing above it tests for a framework by name
+    from loom.tensor.storage import Storage, Buffer, NumpyBuffer
+    a = numpy.arange( 6, dtype = numpy.float32 ).reshape( 2, 3 )
+    s = Storage.of( a )
+    assert isinstance( s, NumpyBuffer ) and isinstance( s, Buffer )
+    assert s.framework == "numpy" and not s.traces
+    assert s.dtype.size == 32 and not s.is_strided()
+    assert s.astype( s.dtype.__class__.fp( 64 ) ).dtype == numpy.float64
+    assert NumpyBuffer( a.T ).is_strided()
+    assert RealTensor( a ).storage.framework == "numpy"
+
+    try:
+        import jax, jax.numpy as jnp
+    except ImportError:
+        jax = None
+    if jax is not None:
+        from loom.tensor.storage import JaxBuffer, JaxTracedBuffer
+        assert isinstance( Storage.of( jnp.ones( 3 ) ), JaxBuffer )
+        seen = []
+        def probe( x ):
+            seen.append( Storage.of( x ) )
+            return x
+        jax.jit( probe )( jnp.ones( 3 ) )
+        assert isinstance( seen[ 0 ], JaxTracedBuffer ) and seen[ 0 ].traces and seen[ 0 ].framework == "jax"
+        try:
+            seen[ 0 ].to_numpy()
+            assert False
+        except TypeError:
+            pass
+
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None:
+        t = Storage.of( torch.ones( 2, 3 ) )
+        assert t.framework == "torch" and not t.traces and not t.is_strided()
+        assert Storage.of( torch.ones( 2, 3, requires_grad = True ) ).traces
+        assert t.astype( t.dtype.__class__.fp( 64 ) ).dtype == torch.float64

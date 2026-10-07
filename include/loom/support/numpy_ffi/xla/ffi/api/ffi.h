@@ -6,8 +6,10 @@
 // (the numpy driver, `drivers/NumpyFfi.py`), this one stands in: same spelling, so the very same
 // generated source compiles -- and the call frame is a few plain structs numpy can fill through ctypes.
 //
-// Only what the generated code uses is here: host buffers, int64 attributes, an error return. No
-// platform stream, no XLA allocator (`Ctx<>`): those are the GPU paths, and this driver is CPU only.
+// Only what the generated code uses is here: buffers (with their strides), int64 attributes, an error return,
+// and the two things XLA's context gives a GPU handler -- the platform stream and a scratch allocator
+// (`Ctx<>`) -- which the caller supplies in the frame: a framework that runs on a card hands over ITS
+// stream and ITS memory pool (see `drivers/PointerFfi.py`). The buffers are wherever the framework put them.
 #pragma once
 
 #include <cmath>     // the real xla header drags it in; kernel bodies use `exp`, `M_PI`... unqualified
@@ -15,22 +17,33 @@
 #include <cstddef>
 #include <cstdio>
 #include <string>
+#include <optional>
 #include <utility>
 #include <exception>
 #include <type_traits>
 
 // ---------------------------------------------------------------------------- the C ABI
-// What Python hands over: for each buffer its address, rank and extents; attributes as int64.
+// What Python hands over: for each buffer its address, rank, extents and BYTE strides (a buffer is
+// read where the framework holds it, whatever its strides); attributes as int64.
+// `strides_bytes` is not part of XLA's API: a kernel only reads it when it was generated for a
+// strided input (see `CallArg_Tensor.runtime_strides`), which never happens against XLA's own header.
 struct XLA_FFI_Buffer {
     void *  data;
     int64_t rank;
     int64_t dims[ 8 ];
+    int64_t strides_bytes[ 8 ];
 };
 
 struct XLA_FFI_CallFrame {
     const XLA_FFI_Buffer *args;     // the inputs, in `Bind()` order
     const XLA_FFI_Buffer *rets;     // the outputs, ditto
     const int64_t        *attrs;    // the attributes, ditto
+
+    void *stream;                   // the platform stream the call is ordered on (a `cudaStream_t`), or null
+    // the call's scratch pool: `allocate( context, nb_bytes, alignment )`, null when it refuses.
+    // What it hands out lives until the call returns.
+    void *( *allocate )( void *context, std::size_t nb_bytes, std::size_t alignment );
+    void *allocate_context;
 };
 
 // what a failed call returns: a message, in storage of its own (one per thread, never freed)
@@ -89,6 +102,7 @@ struct Buffer {
 
     T *typed_data() const { return static_cast<T *>( b_->data ); }
     Dimensions dimensions() const { return { b_->dims, R }; }
+    int64_t stride_bytes( std::size_t d ) const { return b_->strides_bytes[ d ]; }
     std::size_t element_count() const { std::size_t n = 1; for ( std::size_t i = 0; i < R; ++i ) n *= b_->dims[ i ]; return n; }
 
 private:
@@ -116,9 +130,32 @@ private:
     B b_;
 };
 
+// ---------------------------------------------------------------------------- the call's context
+// What `Bind().Ctx<...>()` gives a handler, as in XLA: the stream the call is ordered on...
+template<class Stream> struct PlatformStream {};
+
+// ... and an allocator whose memory lives until the call returns.
+struct ScratchAllocator {
+    void *( *allocate )( void *context, std::size_t nb_bytes, std::size_t alignment );
+    void *context;
+
+    std::optional<void *> Allocate( std::size_t nb_bytes, std::size_t alignment ) const {
+        void *p = allocate ? allocate( context, nb_bytes, alignment ) : nullptr;
+        if ( p == nullptr )
+            return std::nullopt;
+        return p;
+    }
+};
+
 // ---------------------------------------------------------------------------- the binding
 namespace detail {
-    enum class Kind { arg, ret, attr, none };
+    enum class Kind { arg, ret, attr, ctx, none };
+
+    template<class C> struct CtxOf;
+    template<class S> struct CtxOf<PlatformStream<S>> {
+        static S get( const XLA_FFI_CallFrame &f ) { return reinterpret_cast<S>( f.stream ); } };
+    template<> struct CtxOf<ScratchAllocator> {
+        static ScratchAllocator get( const XLA_FFI_CallFrame &f ) { return { f.allocate, f.allocate_context }; } };
 
     template<class B> struct ArgTag  { static constexpr Kind kind = Kind::arg;
         static B get( const XLA_FFI_CallFrame &f, std::size_t i ) { return B( f.args[ i ] ); } };
@@ -126,6 +163,8 @@ namespace detail {
         static Result<B> get( const XLA_FFI_CallFrame &f, std::size_t i ) { return Result<B>( B( f.rets[ i ] ) ); } };
     template<class T> struct AttrTag { static constexpr Kind kind = Kind::attr;
         static T get( const XLA_FFI_CallFrame &f, std::size_t i ) { return static_cast<T>( f.attrs[ i ] ); } };
+    template<class C> struct CtxTag  { static constexpr Kind kind = Kind::ctx;
+        static auto get( const XLA_FFI_CallFrame &f, std::size_t ) { return CtxOf<C>::get( f ); } };
 
     // how many tags before position `i` are of the same kind: the index into that kind's list
     template<class... Tags>
@@ -150,6 +189,7 @@ namespace detail {
         template<class B> Binding<Tags..., ArgTag<B>>  Arg() const { return {}; }
         template<class B> Binding<Tags..., RetTag<B>>  Ret() const { return {}; }
         template<class T> Binding<Tags..., AttrTag<T>> Attr( const char * ) const { return {}; }
+        template<class C> Binding<Tags..., CtxTag<C>>  Ctx() const { return {}; }
 
         template<class Fn>
         XLA_FFI_Error *Call( Fn fn, XLA_FFI_CallFrame *frame ) const {

@@ -1,7 +1,8 @@
 # from typing_extensions import Sequence, overload
 from ..util.Attribute import Attribute, resolve_attribute
 from typing import TYPE_CHECKING, Iterator
-from ..drivers.driver import driver
+from ..drivers import framework_defaults
+from .host import to_host
 from numpy._typing import ArrayLike
 import weakref
 import numpy
@@ -31,7 +32,7 @@ class ShapeVar( Attribute ):
 
     What sizes a buffer is a CAPACITY, and a capacity is deliberately NOT state
     kept here: it is a decision about ONE allocation, so it belongs to the call
-    that allocates (`driver.call( ..., capacities = { "cell.nb_vertices": 8 } )`).
+    that allocates (`loom.ffi_call( ..., capacities = { "cell.nb_vertices": 8 } )`).
     Storing it on the object would open a window where the object contradicts
     itself -- a capacity of 64 next to a buffer of 8. What we can offer is what we
     KNOW: `allocated_capacity` (read off the buffers our tensors already have) and
@@ -160,7 +161,7 @@ class ShapeVar( Attribute ):
             count = shape_var.static_raw()
             if count is None:
                 return None
-            env[ name ] = numpy.asarray( count )
+            env[ name ] = to_host( count )
 
         res = numpy.asarray( eval( compile( expr, f"<axis size { self.name }>", "eval" ),
                                    { "__builtins__": {} }, env ) )
@@ -200,7 +201,7 @@ class ShapeVar( Attribute ):
             return self._count
 
         raw = self.static_raw()
-        return None if raw is None else numpy.asarray( raw )
+        return None if raw is None else to_host( raw )
 
     @property
     def value( self ):
@@ -257,7 +258,7 @@ class ShapeVar( Attribute ):
 
     @property
     def max( self ) -> int:
-        return driver.max( self.raw )
+        return framework_defaults.ops( self.raw ).max( self.raw )
 
     def allocated_capacity( self ):
         """The capacity our tensors were ALLOCATED with, read off their buffers -- a fact, not

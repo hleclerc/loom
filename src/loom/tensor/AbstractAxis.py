@@ -4,6 +4,7 @@ import weakref
 import re
 
 from .Affine import Affine, parse_terms
+from .host import to_host
 
 
 # WHAT AN AFFINE CAN READ, exactly: terms `nb_thing`, `3 * nb_thing` or `7`, separated by `+` / `-`.
@@ -121,7 +122,7 @@ class AbstractAxis( Attribute ):
         lo, hi = self.lo.value( of ), self.hi.value( of )
         if lo is None or hi is None:
             return None
-        span = hi - lo
+        span = to_host( hi - lo )       # a count a kernel wrote may live on a card
         return numpy.maximum( span if self.step == 1 else -( -span // self.step ), 0 )
 
     # the two halves of the extent EXPRESSION, kept readable: it is walked term by term in a few

@@ -10,18 +10,19 @@ def need( capability: str ):
     device must be the CPU). Only the numpy driver ( forward-only, `jit` is the identity ) lacks them today. `errand` is imported lazily: this module may be imported
     by an interpreter that is not the one the entry runs in.
     """
-    from loom import driver
+    from loom.drivers import framework_defaults
     if capability == "cpu":
-        if not driver.device.is_cpu:
+        if not framework_defaults.device().is_cpu:
             from errand import skip
-            skip( f"needs the CPU device -- the driver runs on { driver.device }", hint = "run with a CPU environment" )
+            skip( f"needs the CPU device -- the driver runs on { framework_defaults.device() }", hint = "run with a CPU environment" )
         return
-    framework = str( driver.framework )
-    # torch differentiates and maps, but its `jit` is the identity: nothing is traced into tracers
+    framework = str( framework_defaults.framework() )
+    # torch differentiates, maps and compiles, but a kernel call is a break in the graph: nothing is
+    # traced into tracers
     if capability == "jax":         # the test calls `jax` directly: nothing to fall back on
         lacks = framework != "jax"
     else:
-        lacks = capability == "trace" if framework == "torch" else framework == "numpy"
+        lacks = capability == "trace" if framework == "torch" else framework in ( "numpy", "cupy" )
     if not lacks:
         return
     if capability not in _WHAT:
@@ -30,8 +31,8 @@ def need( capability: str ):
     if capability == "jax":
         skip( f"calls jax directly -- not available under the { framework } driver", hint = "run with --env jax" )
     if framework == "torch":
-        skip( f"needs {_WHAT[ capability ]} -- the torch jit is the identity", hint = "run with --env jax" )
-    skip( f"needs {_WHAT[ capability ]} -- the numpy driver is forward-only", hint = "run with --env jax or torch" )
+        skip( f"needs {_WHAT[ capability ]} -- the torch jit does not trace loom calls", hint = "run with --env jax" )
+    skip( f"needs {_WHAT[ capability ]} -- the {framework} driver is forward-only", hint = "run with --env jax or torch" )
 
 def need_autodiff():
     need( "grad" )

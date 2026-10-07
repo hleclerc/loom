@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy
 
 import loom
-from loom import driver
+from loom.testing import host
+import loom
 from loom.compilation.FfiCode import FfiCode
 from loom.tensor import Axis, IntTensor, ShapeVar
 from errand import test
@@ -59,7 +60,7 @@ def _scaled( scale ):
             sources = [ ( str( HERE / "scaled.cpp" ), { "SCALE": str( scale ) } ) ] ),
         res = loom.out( res ),
     )
-    return numpy.asarray( res.value ).reshape( -1 ).tolist()
+    return host( res.value ).reshape( -1 ).tolist()
 
 
 if test( "a_source_compiled_with_a_define_is_linked_in" ):

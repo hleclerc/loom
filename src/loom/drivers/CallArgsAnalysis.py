@@ -19,7 +19,7 @@ def batch_attr_name( axis_name ):
 
 
 class CallArgsAnalysis:
-    """Lower the kwargs of `driver.call` into a tree of `CallArg`.
+    """Lower the kwargs of `loom.ffi_call` into a tree of `CallArg`.
 
     The objects are built by the CALLER (`cell = Cell( nb_dims = 2 )`); this class never
     constructs anything. It walks them and says how each attribute reaches the kernel: which

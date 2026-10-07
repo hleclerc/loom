@@ -48,7 +48,7 @@ class CallArg_Tensor( CallArg ):
         # their buffers -- device arrays -- long after the call ended.
         # Weak is safe: we only use it during code generation, which the analysis drives.
         self._caa = weakref.ref( call_args_analysis )
-        self.memory_space = call_args_analysis.cpp_memory_space
+        self.memory_space = self._memory_space_of( inst, call_args_analysis )
 
         if self.io_category.is_output:
             self.shape = [ int( s ) for s in call_args_analysis.output_shape( inst, path ) ]
@@ -100,6 +100,43 @@ class CallArg_Tensor( CallArg ):
         # the call's batch axes, to tell a SHARED output (accumulated into by every item) from a
         # per-item one -- see `cpp_seed_member`.
         self._call_batch_axes = list( call_args_analysis.batch_axes )
+
+        # An input the framework holds STRIDED (a transposed view, a slice, a broadcast) is read where
+        # it is, by a view that takes its strides from the buffer at run time -- never copied to
+        # a dense one first. Decided here, on the very value the call will receive: `PointerFfi`
+        # hands it over with its strides exactly when this is set. A layout of our own (a padded
+        # batch) is a layout and not a framework's strides, so it keeps its literals.
+        self.runtime_strides = bool(
+            self.io_category.is_input and inst.raw is not None and not inst.is_fill
+            and inst.buffer_layout.is_identity and inst.storage.is_strided() )
+
+    # Where an INPUT lives is in the type of its view (`memory_space`), so the queue knows what it must transfer
+    # (`transfer_cost_per_byte( queue, memory_space )`, `run_parallel` brings it over). It is the buffer's OWN,
+    # for a buffer read in place by its address -- torch, cupy -- and not the device's: the kernel then takes a
+    # buffer wherever it sits. What is not read in place (numpy, which an adapter gives to the card; jax, which XLA
+    # hands over in the device's space; an output, born on the device) keeps the device's.
+    _MEMORY_SPACES = { "cpu": "CpuHostMemorySpace", "cuda": "CudaGlobalMemorySpace" }
+
+    @staticmethod
+    def _memory_space_of( inst, call_args_analysis ):
+        storage = inst.storage
+        if storage.framework in ( "torch", "cupy" ):
+            where = storage.device()
+            if where is not None:
+                return CallArg_Tensor._MEMORY_SPACES[ where[ 0 ] ]
+        return call_args_analysis.cpp_memory_space
+
+    # `storage`: only its CLASS decides how the member is spelled (`storage.cpp_type( self )`) -- what it
+    # holds, the data, is not in the source. `_device`: a function of the device, which is in the key.
+    _render_key_skip = CallArg._render_key_skip + ( "storage", "_device" )
+
+    def _render_key_extra( self ):
+        # what `layout` reads off the tensor: an input carries the layout its buffer already has, an
+        # output's alignment may come from its class.
+        from .render_key import plain
+        layout = self.inst.buffer_layout if self.io_category.is_input else None
+        return ( type( self.storage ).__qualname__, plain( layout ), self.runtime_strides,
+                 plain( getattr( self.inst, "item_alignment_bytes", 0 ) ) )
 
     @property
     def layout( self ):
@@ -185,6 +222,13 @@ class CallArg_Tensor( CallArg ):
         # the per-LOGICAL-axis BYTE strides of the physical layout (what `tensor_view`'s 4th arg wants).
         return "tuple( " + ", ".join( f"SI( { s } )" for s in self.layout.strides_bytes( self.itemsize ) ) + " )"
 
+    def cpp_runtime_strides_type( self ):
+        # the strides this buffer carries, read at run time: one byte stride per dimension, never a literal
+        return "Tuple<" + ", ".join( "SI" for _ in self.axis_names ) + ">"
+
+    def cpp_runtime_strides_tuple( self ):
+        return "tuple( " + ", ".join( self.jax_stride_bytes( d ) for d in range( len( self.axis_names ) ) ) + " )"
+
     def cpp_axis_tuple( self ):
         return "tuple( " + ", ".join( self.axis_names ) + " )"
 
@@ -230,7 +274,7 @@ class CallArg_Tensor( CallArg ):
 
         It was missing: `JaxFfi._render_call` asks every root argument that has one for a
         `cpp_seed_root`, and only aggregates had one -- so a bare tensor output (the simplest
-        case: `driver.call( ..., out = RealTensor[ ... ]() )`) was never seeded, even though
+        case: `loom.ffi_call( ..., out = RealTensor[ ... ]() )`) was never seeded, even though
         `LOOM_ZERO_OUTPUTS` promises otherwise. Same rule as for a member, the view being here
         the variable itself."""
         return self._seed_of( var_name )

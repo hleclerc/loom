@@ -1,0 +1,14 @@
+{
+  "name": "loom-docs",
+  "private": true,
+  "type": "module",
+  "description": "The loom website. `npm install` then `npm run dev`.",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}

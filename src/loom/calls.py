@@ -4,18 +4,18 @@
 and it has no business showing up in a user's code. `ffi_call` is the same call, under the name of
 what it does, and with another way of saying the inputs and the outputs.
 
-WHAT CHANGES COMPARED TO `driver.call`, and why:
+WHAT CHANGES COMPARED TO `loom.ffi_call`, and why:
 
   * `name` is the FIRST argument. It is mandatory -- it names the functors, prefixes the compiled
     target and groups the compilation journal -- so it has no business in the middle of the data.
 
-  * THE ROLE IS SAID ON THE VALUE, not in a list on the side. `driver.call` carries four lists of
+  * THE ROLE IS SAID ON THE VALUE, not in a list on the side. `loom.ffi_call` carries four lists of
     paths ( `output_attributes`, the two `exceptions`, `scratch_attributes` ) that have to be kept
     in agreement BY HAND with the kwarg names -- and a typo in which only showed up at the moment
     an attribute not found was reported. Here the role is CARRIED by the argument:
     `next = loom.out( next )` can no longer designate anything but itself.
 
-  * IN DOING SO, the kernel's namespace is given back to it -- ENTIRELY. `driver.call` reserved
+  * IN DOING SO, the kernel's namespace is given back to it -- ENTIRELY. `loom.ffi_call` reserved
     EIGHT names ( `name`, `output_attributes`, `output_exceptions`, `input_exceptions`,
     `output_capacities`, `batch_alignment`, `has_dynamic_capacity`, `scratch_attributes` ): a
     kernel that wanted an argument called `name` could not have it, and `output_attribute` in the
@@ -263,7 +263,7 @@ def returned( returns ):
 def ffi_call( name, *kernels, **kwargs ):
     """Runs `kernels` on the values passed as kwargs.
 
-    IT IS `driver.call`, under the name of what it does: there is only one form of call, and
+    IT IS `loom.ffi_call`, under the name of what it does: there is only one form of call, and
     `driver` remains the low layer that the user has no need to name.
 
     WHAT IS RETURNED: the WRITTEN arguments -- `loom.out` as well as `loom.mutable` -- in the order
@@ -272,8 +272,63 @@ def ffi_call( name, *kernels, **kwargs ):
         return loom.ffi_call( "my_call", kernel, input = input,
                               output = loom.out( RealTensor[ n ]() ) )
     """
-    from .drivers.driver import driver
-    return driver.call( name, *kernels, **kwargs )
+    from .drivers import framework_defaults
+    framework = _framework_of( kwargs.values(), framework_defaults.framework_name() )
+    if framework is None:
+        return framework_defaults.call( name, *kernels, **kwargs )
+    # the call runs where its buffers are, whatever `loom.default_framework` was set to for the values that
+    # nobody said anything about
+    with framework_defaults.using( framework ):
+        return framework_defaults.call( name, *kernels, **kwargs )
+
+
+# ---- which framework a call runs on -------------------------------------------------------------
+# The default framework only says what to BUILD when nothing was specified: a call adapts to the
+# framework of its buffers (the rule is in `drivers/promotion.py`, shared with the operations).
+
+def _framework_of( values, default ):
+    """The framework name a call should run on, or `None` to keep the default one."""
+    from .drivers.promotion import promote
+    tracing, plain = set(), set()
+    for value in values:
+        _scan( value, tracing, plain, set() )
+    return promote( tracing, plain, default, for_call = True )
+
+
+def _scan( value, tracing, plain, seen ):
+    """Collect, into `tracing` / `plain`, the framework of every buffer reachable from `value`."""
+    from .tensor.Tensor import Tensor
+    from .tensor.storage.buffers import buffer_class_for
+    from .util.Aggregate import Aggregate
+
+    if isinstance( value, Arg ):
+        value = value.value
+    if value is None or isinstance( value, ( str, int, float, bool ) ) or id( value ) in seen:
+        return
+    seen.add( id( value ) )
+
+    if isinstance( value, Tensor ):
+        storage = value.storage          # a zero, a fill, an unbound tensor: no buffer, so no vote
+        value = storage.buffer
+        if value is None:
+            return
+    else:
+        storage = None
+    if isinstance( value, ( list, tuple ) ):
+        for v in value:
+            _scan( v, tracing, plain, seen )
+    elif isinstance( value, dict ):
+        for v in value.values():
+            _scan( v, tracing, plain, seen )
+    elif isinstance( value, Aggregate ):
+        for v in vars( value ).values():
+            _scan( v, tracing, plain, seen )
+    else:
+        if storage is None:
+            cls = buffer_class_for( value )
+            storage = cls( value ) if cls is not None else None
+        if storage is not None and storage.framework is not None:
+            ( tracing if storage.traces else plain ).add( storage.framework )
 
 
 def _empty_like( value, name ):

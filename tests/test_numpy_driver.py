@@ -11,7 +11,8 @@ os.environ.setdefault( "LOOM_FRAMEWORK", "numpy" )
 
 import numpy
 import loom
-from loom import CtShapeVar, ShapeVar, Axis, Aggregate, driver, RealTensor
+import loom
+from loom import CtShapeVar, ShapeVar, Axis, Aggregate, RealTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
 
@@ -20,22 +21,22 @@ from errand import test
 # and launched on the CPU queue; there is neither tracing nor differentiation.
 
 if test( "driver" ):
-    assert driver.framework == "numpy"
-    assert driver.device.is_cpu
-    assert driver.ftype.cpp_name == "FP64"
+    assert loom.resolved_framework() == "numpy"
+    assert loom.resolved_device().is_cpu
+    assert loom.resolved_dtype().cpp_name == "FP64"
 
-    a = driver.array( [ 1, 2, 3 ] )
+    a = loom.array( [ 1, 2, 3 ] )
     assert isinstance( a, numpy.ndarray ) and a.dtype == numpy.float64
-    assert not driver.is_traced( a )
+    assert not loom.is_traced( a )
 
     # no tape: whatever needs one says so, instead of returning a wrong value
-    for verb in ( driver.vmap, driver.grad ):
+    for verb in ( loom.vmap, loom.grad ):
         try:
             verb( lambda x: x )
             assert False, "expected NotImplementedError"
         except NotImplementedError:
             pass
-    assert driver.jit( lambda x: x + 1 )( 1 ) == 2
+    assert loom.jit( lambda x: x + 1 )( 1 ) == 2
 
 
 if test( "call" ):

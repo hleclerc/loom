@@ -38,10 +38,10 @@ class Device:
     @staticmethod
     def default() -> 'Device':
         if Device._default_device is None:
-            from ..drivers.driver import driver
+            from ..drivers import framework_defaults
             from .Cpu import Cpu
             Device._default_device = Cpu()
-            if driver.available_gpus:
+            if framework_defaults.ops().available_gpus:
                 # the card is there, but it is only a device for us if we can compile for it
                 # (`device_is_present` asks the compiler): until the CUDA backend is ported, a GPU
                 # machine works on its CPU.

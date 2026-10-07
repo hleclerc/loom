@@ -22,7 +22,7 @@ class Dtype:
     read separately:
 
     * the KIND is semantic and per-field -- an index tensor is integer whatever the machine.
-    * the SIZE is a global policy (`driver.ftype` / `driver.itype`, `SDOT_FTYPE` / `SDOT_ITYPE`).
+    * the SIZE is a global policy (`loom.resolved_dtype()` / `loom.resolved_itype()`, `SDOT_FTYPE` / `SDOT_ITYPE`).
       `None` means "whatever the driver runs with", resolved LATE (see `driver_version`), so a
       declaration written at import time does not freeze a size the user has not chosen yet.
 
@@ -111,11 +111,12 @@ class Dtype:
 
     @staticmethod
     def of( raw ) -> 'Dtype':
-        """The dtype a backend buffer ACTUALLY has (via the driver, so Jax and Torch answer the
-        same way). This is the truthful direction: a buffer knows its type, a declaration only
-        claims one."""
-        from ..drivers.driver import driver
-        return driver.dtype_of( raw )
+        """The dtype a backend buffer ACTUALLY has. This is the truthful direction: a buffer knows
+        its type, a declaration only claims one. Read off the buffer itself, so it needs no driver:
+        a numpy, jax, torch or cupy array answers the same way whatever the default framework is
+        (a jax symbolic zero carries its type in its `aval`)."""
+        aval = getattr( raw, "aval", None )
+        return Dtype.from_numpy( ( aval if aval is not None else raw ).dtype )
 
     @staticmethod
     def fp( size: int | None = None ):
@@ -178,6 +179,11 @@ class Dtype:
             return { REAL: "TF", SINT: "TI", UINT: "TU" }[ self.kind ]
         return { REAL: "FP", SINT: "SI", UINT: "PI" }[ self.kind ] + str( self.size )
 
+    def render_key( self ):
+        """What a rendered source can read of this dtype: its kind, its size, and what an open size
+        resolves to (see `drivers/render_key.py`)."""
+        return ( "Dtype", self.kind, self.size, self.numpy_dtype.str )
+
     @property
     def numpy_dtype( self ):
         """The `numpy.dtype` of the driver's spelling of this type (what a host buffer holds, a
@@ -188,8 +194,8 @@ class Dtype:
     def driver_version( self ):
         if self._driver_version:
             return self._driver_version
-        from ..drivers.driver import driver
-        return driver.driver_dtype_version( self.kind, self.size )
+        from ..drivers import framework_defaults
+        return framework_defaults.dtype_version( self )
 
     def resolved( self ) -> 'Dtype':
         """This dtype with its size FILLED IN from the driver -- what it will really be on the
@@ -212,3 +218,20 @@ class Dtype:
 
     def __repr__( self ) -> str:
         return f"Dtype( { self.cpp_name } )"
+
+
+class DefaultDtype( Dtype ):
+    """`loom.default_dtype` / `loom.default_itype`: a `Dtype` the user may resize in place
+    (`loom.default_dtype.size = 32`), which tells the default driver the moment it changes, so that
+    nothing has to look at it again at every use."""
+
+    @property
+    def size( self ):
+        return self._size
+
+    @size.setter
+    def size( self, value ):
+        self._size = value
+        if self.__dict__.get( "_armed", False ):
+            from ..drivers.FrameworkDefaults import settings_changed
+            settings_changed()

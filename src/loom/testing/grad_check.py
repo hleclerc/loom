@@ -1,8 +1,8 @@
 """Agnostic derivative checker (Jax today, Torch tomorrow).
 
 `check_grad` compares the derivative of a function, obtained through the driver's
-adjoint mode (`driver.vjp`), with its centered finite-difference estimate. Nothing is
-framework-specific: everything goes through `driver.vjp` / `driver.random` and through
+adjoint mode (`loom.vjp`), with its centered finite-difference estimate. Nothing is
+framework-specific: everything goes through `loom.vjp` / `loom.random` and through
 tensor arithmetic (`+`, `*`, `.sum()`), common to Jax and Torch -- see
 the architecture note on agnostic tests.
 
@@ -20,7 +20,8 @@ with respect to its buffer, an output `Tensor` is compared on its dense view
 import numpy
 
 from loom.tensor import Tensor
-from loom import driver
+import loom
+from loom.drivers import framework_defaults
 
 
 def _raw( x ):
@@ -36,7 +37,7 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
     differ by more than `atol + rtol * |num|`. Returns the pair ( adjoint, finite diff. ).
 
     `seed` fixes the random projections (the cotangent `w` and the tangents `vs`). Without it
-    they come from the process counter of `driver.random`, hence from HOW MANY draws the
+    they come from the process counter of `loom.random`, hence from HOW MANY draws the
     previous tests made: the same test then draws different directions depending on whether it is
     run alone or in the suite, and a check whose error depends on the direction may pass
     on one side and fail on the other. Passing it makes the test reproducible.
@@ -55,12 +56,12 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
     # gap of the size of `tol`. We force FP64 for the duration of the check, then restore the
     # previous value so as not to leak it into the following tests (driver is a
     # global singleton shared by the whole test process).
-    previous_ftype = driver.ftype
-    driver.ftype = "FP64"
+    previous_size = loom.default_dtype.size
+    loom.default_dtype.size = 64
     try:
         # a host (numpy) primal is cast to the driver's own array type: `p + eps * v` below mixes it
-        # with `driver.random` draws, which a framework tensor does not accept from a numpy array
-        primals = [ driver.array( _raw( a ) ) if isinstance( _raw( a ), numpy.ndarray ) else _raw( a ) for a in args ]
+        # with `loom.random` draws, which a framework tensor does not accept from a numpy array
+        primals = [ framework_defaults.array( _raw( a ) ) if isinstance( _raw( a ), numpy.ndarray ) else _raw( a ) for a in args ]
 
         # `f` generally returns a `Tensor`: it is its DENSE view that we compare (the capacity
         # padding is not a real output). The extent of an axis written by the kernel is a DEVICE
@@ -74,11 +75,11 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
         else:
             out_f = f
 
-        out, pullback = driver.vjp( out_f, *primals )
+        out, pullback = framework_defaults.ops( primals[ 0 ] ).vjp( out_f, *primals )
 
         # random cotangent on the output, random tangents on the inputs
-        w  = driver.random( out.shape, seed = seed )
-        vs = [ driver.random( p.shape, seed = None if seed is None else seed + 1 + i )
+        w  = framework_defaults.random( out.shape, seed = seed )
+        vs = [ framework_defaults.random( p.shape, seed = None if seed is None else seed + 1 + i )
                for i, p in enumerate( primals ) ]
 
         # adjoint: < vjp(w), v >, summed over the inputs
@@ -90,7 +91,7 @@ def check_grad( f, *args, eps = 1e-4, rtol = 2e-3, atol = 1e-4, seed = None ):
         minus = out_f( *[ p - eps * v for p, v in zip( primals, vs ) ] )
         num = float( ( ( plus - minus ) * w ).sum() ) / ( 2 * eps )
     finally:
-        driver.ftype = previous_ftype
+        loom.default_dtype.size = previous_size
 
     err = abs( ana - num )
     tol = atol + rtol * abs( num )

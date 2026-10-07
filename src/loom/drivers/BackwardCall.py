@@ -1,4 +1,4 @@
-"""The backward pass of a `driver.call`, expressed as an ORDINARY kernel call whose body is the code's
+"""The backward pass of a `loom.ffi_call`, expressed as an ORDINARY kernel call whose body is the code's
 backward -- framework-neutral: the caller passes `run( code, ca, device, prefix ) -> ( output
 CallArgs, result arrays )`, the framework's way of executing one kernel (see `JaxFfi._run`,
 `TorchFfi._run`). Shared by the Jax and the Torch drivers."""
@@ -31,7 +31,7 @@ def _grad_shapevar( inst, raw ):
     whatever `_count` holds AT THE MOMENT `op_bwd` executes -- safe only when that is the very
     trace that resolved it. Under `lax.scan`'s differentiation, `op_bwd` is replayed in a later,
     separate trace, so a resolved-but-still-tracer count from the original trace is dead by then.
-    `raw` here is instead the count as it flowed through `driver.call`'s own residual channel
+    `raw` here is instead the count as it flowed through `loom.ffi_call`'s own residual channel
     (`full_in`/`out_values`), which Jax DOES keep valid across that replay."""
     from ..tensor.ShapeVar import ShapeVar
     res = ShapeVar.__new__( ShapeVar )
@@ -121,7 +121,7 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
         if not isinstance( inst, Tensor ):
             from ..tensor.ShapeVar import ShapeVar
             if isinstance( inst, ShapeVar ):
-                # a data-dependent ShapeVar (its count came from a kernel, via `driver.call`'s own
+                # a data-dependent ShapeVar (its count came from a kernel, via `loom.ffi_call`'s own
                 # input/output tracking) reuses the properly-threaded residual value; a purely
                 # static one (never bound as an FFI buffer -- `residual_of` has nothing for it)
                 # falls through to the plain shared-object case below, same as Axis/CtShapeVar.

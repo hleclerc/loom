@@ -139,11 +139,91 @@ def _batch_indices_decl( ca ):
 def _render_call( code, ca, device ):
     """`_render_source`, plus the generated headers the rendering asked for ( `{ rel_path: content }` ):
     the kernel compiles against THOSE, from an include overlay of its own, never against the shared
-    tree another call may have rewritten meanwhile (see `compilation/generated_headers.py`)."""
+    tree another call may have rewritten meanwhile (see `compilation/generated_headers.py`).
+
+    Remembered: a call that repeats an earlier one -- same code, same shapes, other numbers -- gets the
+    same text, so it is not rendered again (see `render_key.py`, which says when that is certain)."""
+    from . import render_key
+    if not render_key.enabled():
+        return _render_uncached( code, ca, device )
+
+    key = render_key.render_key( code, ca, device )
+    if key is None:
+        return _render_uncached( code, ca, device )
+
+    hit = render_key.lookup( key )
+    if hit is None:
+        render_key.stats[ "miss" ] += 1
+        res = _render_uncached( code, ca, device )
+        source, _, _, _, sources, headers = res
+        render_key.store( key, ( source, sources, headers ) )
+        return res
+
+    render_key.stats[ "hit" ] += 1
+    source, sources, headers = hit
+    # what rendering would have done on the way: the call's headers are declared, so that the shared
+    # tree and any collector around us see them
+    from ..compilation.generated_headers import shared_header
+    for rel_path, content in headers.items():
+        shared_header( rel_path, content )
+    inputs, outputs = _call_buffers( ca )
+    res = ( source, inputs, outputs, _call_attrs( ca ), sources, dict( headers ) )
+    if render_key.verifying():
+        fresh = _render_uncached( code, ca, device )
+        _check_same( fresh, res, code )
+    return res
+
+
+def _check_same( fresh, cached, code ):
+    names = ( "source", "inputs", "outputs", "attrs", "sources", "headers" )
+    for name, a, b in zip( names, fresh, cached ):
+        if name in ( "inputs", "outputs" ):
+            same = [ id( x ) for x in a ] == [ id( x ) for x in b ]
+        elif name == "attrs":
+            same = [ tuple( x ) for x in a ] == [ tuple( x ) for x in b ]
+        else:
+            same = a == b
+        if not same:
+            raise RuntimeError( f"loom: the render cache gave a different `{ name }` for the call `{ code.name }` "
+                                f"than rendering it again -- the key of `render_key.py` misses something the "
+                                f"rendering reads" + ( "\n" + _first_difference( a, b ) if name == "source" else "" ) )
+
+
+def _first_difference( a, b ):
+    import difflib
+    return "\n".join( list( difflib.unified_diff( a.splitlines(), b.splitlines(), "fresh", "cached", lineterm = "", n = 1 ) )[ :20 ] )
+
+
+def _render_uncached( code, ca, device ):
     from ..compilation.generated_headers import collecting_headers
     with collecting_headers() as headers:
         res = _render_source( code, ca, device )
     return ( *res, headers )
+
+
+def _call_buffers( ca ):
+    """The FFI buffers of the call, inputs then outputs -- which is the order XLA binds them in."""
+    inputs = [ t for t in ca.tensors if t.io_category.is_input ]
+    outputs = [ t for t in ca.tensors if t.io_category.is_output ]
+    return inputs, outputs
+
+
+def _call_attrs( ca ):
+    """The scalars that are neither data nor structure -- a capacity bound, a bare `int` argument. They
+    cross as XLA FFI ATTRIBUTES: baked into the call, not into the kernel, so a new value does not
+    mean a new compilation. ( Extents need no attribute at all: XLA carries them next to the data.)
+    Gathered by folding the node tree, each node answering for itself -- and NOT part of what the
+    render cache remembers: they carry the VALUES of this call."""
+    # imported here and not at the top: `JaxFfi` <-> `CallArgsAnalysis` depend on each other
+    # (see the import of `CallArgsAnalysis` further down, already local for the same reason).
+    from .CallArgsAnalysis import batch_attr_name
+
+    attrs = [ a for n in ca.nodes() if hasattr( n, "jax_attrs" ) for a in n.jax_attrs() ]
+    # the extent of each batch axis, BY VALUE: a plain count, of rank 0, read-only
+    # and known to the host -- exactly what `CallArg_ShapeVar.as_scalar` sends across as an
+    # attribute. A batch axis is not a special case on this point.
+    attrs += [ ( batch_attr_name( n ), "int64_t", ca.batch_axis_size( n ) ) for n in ca.batch_axes ]
+    return attrs
 
 
 def _render_source( code, ca, device ):
@@ -160,22 +240,8 @@ def _render_source( code, ca, device ):
     class may appear twice in a call with different compile-time parameters -- and a bare
     tensor as the view itself, no wrapper needed.
     """
-    inputs = [ t for t in ca.tensors if t.io_category.is_input ]
-    outputs = [ t for t in ca.tensors if t.io_category.is_output ]
-
-    # scalars that are neither data nor structure -- a capacity bound, a bare `int` argument. They
-    # cross as XLA FFI ATTRIBUTES: baked into the call, not into the kernel, so a new value does
-    # not mean a new compilation. (Extents need no attribute at all: XLA carries them next to the
-    # data.) Gathered by folding the node tree, each node answering for itself.
-    # imported here and not at the top: `JaxFfi` <-> `CallArgsAnalysis` depend on each other
-    # (see the import of `CallArgsAnalysis` further down, already local for the same reason).
-    from .CallArgsAnalysis import batch_attr_name
-
-    attrs = [ a for n in ca.nodes() if hasattr( n, "jax_attrs" ) for a in n.jax_attrs() ]
-    # the extent of each batch axis, BY VALUE: a plain count, of rank 0, read-only
-    # and known to the host -- exactly what `CallArg_ShapeVar.as_scalar` sends across as an
-    # attribute. A batch axis is not a special case on this point.
-    attrs += [ ( batch_attr_name( n ), "int64_t", ca.batch_axis_size( n ) ) for n in ca.batch_axes ]
+    inputs, outputs = _call_buffers( ca )
+    attrs = _call_attrs( ca )
 
     # the headers the arguments ask for (an aggregate names its struct header), then whatever the
     # body itself listed. Collected blind: the call never knows which node brought a header, nor
@@ -280,12 +346,12 @@ def _render_source( code, ca, device ):
         passed += [ f"sdot::kernel_form( q, { n }_io, { n } )" for n in names ]
 
         # `TF`: the scalar of the call's reals ( what `RealTensor` produces when nothing is
-        # specified, hence `driver.ftype` ). A body writes it without having to derive it from a view.
+        # specified, hence `loom.resolved_dtype()` ). A body writes it without having to derive it from a view.
         # `cpp_name` gives the ALIAS `TF` as long as the size is left to the driver; here we want
         # the resolved type, otherwise we would write `using TF = TF;`.
-        from ..drivers.driver import driver as _driver
-        tf = ( "\n/// the real scalar of this call ( `driver.ftype` )\n"
-               f"using TF = { _driver.ftype.cpp_name };\n" )
+        from . import framework_defaults
+        tf = ( "\n/// the real scalar of this call ( the default real type )\n"
+               f"using TF = { framework_defaults.ftype().cpp_name };\n" )
 
         args_struct = ( tf +
             f"\n// what crosses over to the kernel ( see `FfiCode` )\n"

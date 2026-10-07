@@ -7,9 +7,9 @@ from .Affine import Affine, Coord
 from .Tensor import Tensor
 from .functions import (
     dot, where, sum, prod, cumsum, min, max, mean, all, any,
-    sqrt, arcsin, abs, clip, stop_gradient, transpose,
+    sqrt, arcsin, exp, abs, clip, stop_gradient, transpose,
 )
-from .storage import Storage, Unbound, Buffer, SymbolicZero, Fill
+from .storage import Storage, Unbound, Buffer, Zero, Fill
 from .RealTensor import RealTensor
 from .IntTensor import IntTensor
 from .BoolTensor import BoolTensor

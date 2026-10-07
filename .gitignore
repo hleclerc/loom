@@ -22,3 +22,9 @@ runs/
 # misc
 tmp/
 .cache/
+
+# the docs site ( vitepress ): keep its config and theme, not its dependencies nor its builds
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+.pytest_cache/

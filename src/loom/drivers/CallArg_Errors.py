@@ -59,7 +59,7 @@ class CallArg_Errors( CallArg ):
         self.max_records = MAX_RECORDS
         self.shape = [ 1 + 3 * self.max_records ]   # [ nb_records, ( kind, id, value )... ]
         self.raw = None
-        # what the call says a failure code means ( `driver.call( ..., failures = { code: message } )` ),
+        # what the call says a failure code means ( `loom.ffi_call( ..., failures = { code: message } )` ),
         # and its name, for the message
         self.failure_messages = {}
         self.call_name = getattr( call_args_analysis, "name", "" ) or ""
@@ -91,7 +91,8 @@ class CallArg_Errors( CallArg ):
         `None` when the buffer is a TRACED value (under a `jit` or a `vmap`): its content only
         exists at execution time, so no Python loop can look at it and try again."""
         try:
-            raw = numpy.asarray( self.raw )
+            from ..tensor.host import to_host
+            raw = to_host( self.raw )
         except Exception:
             return None
 

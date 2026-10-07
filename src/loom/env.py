@@ -70,3 +70,15 @@ def set_var( name, value ):
     """Set the setting, for ourselves and for subprocesses (what `loom-kernels` does before
     launching a recording or a catalogue compilation)."""
     os.environ[ PREFIX + name ] = str( value )
+
+
+_hinted = set()
+
+
+def hint( message ):
+    """An optimization ADVICE, shown (once per message) only to who asked for them with `LOOM_HINTS=1`.
+    loom does what it is asked even when it could be done faster -- a copy is made when one is needed,
+    and this is where it says so, never by refusing."""
+    if message not in _hinted and flag( "HINTS" ):
+        _hinted.add( message )
+        print( f"loom hint: { message }", file = sys.stderr )

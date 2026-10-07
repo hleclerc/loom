@@ -23,7 +23,8 @@ a clean refusal is correct behavior, whereas a segfault, a silence or a wrong re
 are not.
 """
 import loom
-from loom import Axis, ShapeVar, RealTensor, driver
+import loom
+from loom import Axis, ShapeVar, RealTensor
 from loom.compilation.FfiCode import FfiCode
 from errand import test
 from loom.testing import need
@@ -139,7 +140,7 @@ if test( "under_jit" ):
         )
         return total.value[ 0 ]
 
-    compile = driver.jit( loss )
+    compile = loom.jit( loss )
     rng = numpy.random.default_rng( 0 )
 
     refuse = False
@@ -147,7 +148,7 @@ if test( "under_jit" ):
         x = rng.normal( size = n )
         expected = float( x[ x > 0 ].sum() )
         try:
-            got = float( compile( driver.array( x ) ) )
+            got = float( compile( loom.array( x ) ) )
         except Exception as e:
             assert "RESOURCE_EXHAUSTED" in str( e ), e
             refuse = True

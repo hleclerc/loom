@@ -89,7 +89,7 @@ if test( "we_go_back_in_time" ):
     need( "grad" )
     # WHAT we made the solver differentiable FOR: an inversion. We observe the temperature after
     # `nb_steps` diffusion steps, and we recover the INITIAL state by gradient descent through
-    # the whole chain -- all compiled once ( `loom.driver.jit` ).
+    # the whole chain -- all compiled once ( `loom.loom.jit` ).
     n, nb_steps, coef = 14, 6, 0.2
 
     true_state = _bump( n )
@@ -100,8 +100,8 @@ if test( "we_go_back_in_time" ):
         return ( diff * diff ).sum()
 
     u = loom.RealTensor[ n, n ].zeros().raw
-    loss_jit = loom.driver.jit( loss )
-    gradient = loom.driver.jit( loom.driver.grad( loss ) )
+    loss_jit = loom.loom.jit( loss )
+    gradient = loom.loom.jit( loom.loom.grad( loss ) )
 
     # the step size: `evolve` is CONTRACTING ( diffusion only smooths ), so the singular
     # values of its Jacobian are <= 1 and the Hessian of the loss has its eigenvalues
@@ -137,11 +137,11 @@ if test( "the_same_body_batches_without_knowing_it" ):
     u = rng.normal( size = ( nb, n, n ) )
 
     # the reference: one call per batch item, by hand
-    ref = numpy.stack( [ numpy.asarray( step( loom.driver.array( u[ b ] ), 0.1 ) ) for b in range( nb ) ] )
+    ref = numpy.stack( [ numpy.asarray( step( loom.loom.array( u[ b ] ), 0.1 ) ) for b in range( nb ) ] )
 
     # the same, vmapped over the first axis of `u`
     batched = jax.vmap( lambda uu: step( uu, 0.1 ), in_axes = 0 )
-    got = numpy.asarray( batched( loom.driver.array( u ) ) )
+    got = numpy.asarray( batched( loom.loom.array( u ) ) )
 
     assert got.shape == ref.shape, ( got.shape, ref.shape )
     diff = float( numpy.abs( ref - got ).max() )

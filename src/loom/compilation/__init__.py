@@ -1,17 +1,11 @@
+from functools import cache
 from pathlib import Path
-import tempfile
-import hashlib
-import getpass
 import sys
 import os
 from .. import env
 
 
-def _src_root():
-    """Root used to anchor the default (in-tree) build directory."""
-    return Path( __file__ ).resolve().parents[ 4 ]
-
-
+@cache
 def _dev_repo_root():
     """Repo root, but only when this really looks like a dev checkout (loom/include/loom
     exists) -- None when running from an installed wheel."""
@@ -19,6 +13,7 @@ def _dev_repo_root():
     return candidate if ( candidate / "loom" / "include" / "loom" ).is_dir() else None
 
 
+@cache
 def loom_include_root() -> Path:
     """The `-I` root so `#include <loom/support/...>` resolves: `<repo>/loom/include` from a dev
     checkout (edit C++ without rebuilding the wheel), the `loom/_include` tree the wheel ships next
@@ -75,43 +70,16 @@ def _is_writable_dir( path: Path ):
         return False
 
 
-def _fallback_build_dir( root: Path ):
-    """A stable, per-user, per-checkout build directory under the temp dir.
-
-    Used when the in-tree `build` directory is read-only (e.g. sources shipped
-    in a read-only location). The path is deterministic for a given checkout so
-    that incremental builds keep reusing the same .o / .a artifacts instead of
-    rebuilding from scratch every time.
-
-    `tempfile.gettempdir()` is honoured (TMPDIR/TEMP/TMP, then a sane default),
-    so this works on macOS, Linux and Windows.
-    """
-    # Short hash of the checkout path: keeps distinct checkouts apart while
-    # staying deterministic across runs.
-    digest = hashlib.sha1( str( root ).encode( "utf-8" ) ).hexdigest()[ :12 ]
-
-    # Including the user name avoids permission clashes in a world-shared
-    # temp dir (typical on Linux: /tmp shared between users).
-    try:
-        user = getpass.getuser()
-    except Exception:
-        user = "anon"
-    user = "".join( c if c.isalnum() else "_" for c in user )
-
-    return Path( tempfile.gettempdir() ) / f"loom-build-{ user }-{ digest }"
-
-
 def build_dir():
-    """Directory where compilation artifacts (.o, .a, shared libs) are stored.
+    """Directory where compilation artifacts (.o, .a, shared libs) are stored: `cache_root() / "build"`,
+    the per-user cache of the platform (`~/.cache/loom`, `~/Library/Caches/loom`, ...), or
+    `LOOM_BUILD_DIR` when set (an explicit override, made absolute at the first call).
 
-    Resolution order:
-      1. `LOOM_BUILD_DIR` if set (explicit override).
-      2. Dev checkout: `<repo>/build` when writable, else a stable per-user directory
-         under the system temp dir (used when the checkout is read-only).
-      3. Installed wheel (no dev checkout): the per-user cache root (`cache_root`) -- never
-         inside the venv/site-packages.
-
-    The chosen directory is created if needed and returned as a `Path`.
+    Never the current directory, never the checkout: where a command is launched from, and which
+    copy of the sources it runs, must not decide where its kernels go -- the same kernel built
+    from two directories is ONE build. What a kernel is compiled against (which C++ roots, which
+    runtime) is part of its NAME (see `JaxFfi.compile_and_register` and `Build.object`), so two
+    checkouts with different sources share the directory without ever sharing a binary.
 
     The answer is CACHED per `LOOM_BUILD_DIR` value: it is asked on every generated header of every
     call (`generated_headers.shared_header`), and probing writability each time -- a `mkdir`, a
@@ -129,25 +97,9 @@ _build_dir_cache = {}
 
 
 def _resolve_build_dir( override ):
-    if override:
-        path = Path( override ).expanduser()
-        path.mkdir( parents = True, exist_ok = True )
-        return path
-
-    dev_root = _dev_repo_root()
-    if dev_root is not None:
-        default = dev_root / "build"
-        if _is_writable_dir( default ):
-            return default
-
-        fallback = _fallback_build_dir( dev_root )
-        fallback.mkdir( parents = True, exist_ok = True )
-        return fallback
-
-    # installed wheel: no meaningful in-tree default -- the per-user cache root.
-    installed_default = cache_root() / "build"
-    installed_default.mkdir( parents = True, exist_ok = True )
-    return installed_default
+    path = Path( override ).expanduser().resolve() if override else cache_root() / "build"
+    path.mkdir( parents = True, exist_ok = True )
+    return path
 
 
 def cache_root() -> Path:

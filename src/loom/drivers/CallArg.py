@@ -16,6 +16,26 @@ class CallArg:
         self.io_category = io_category
         self.name = name
 
+    # -- the key of the source this node contributes to (see `render_key.py`) -------------------
+    # Every field of the node is part of it, unless listed here -- and a field that is not a plain
+    # fact makes the whole call uncacheable. What is skipped is what the rendering does NOT read:
+    # the Python object (the node snapshots what it needs from it) and the weak back-reference.
+    _render_key_skip = ( "inst", "_caa" )
+
+    def _render_key_extra( self ) -> tuple:
+        """What the rendering reads of this node OTHERWISE than through a field: through `inst`, or
+        through a function of a field. Nothing for most nodes."""
+        return ()
+
+    def render_key( self ):
+        from .render_key import plain, SCALAR_TYPES
+        skip = self._render_key_skip
+        fields = []
+        for k, v in vars( self ).items():
+            if k not in skip:
+                fields.append( ( k, v if type( v ) in SCALAR_TYPES else plain( v ) ) )   # most fields are scalars
+        return ( type( self ).__qualname__, tuple( fields ), self._render_key_extra() )
+
     @property
     def is_differentiable( self ) -> bool:
         """Whether a gradient can flow through this argument -- what tells `JaxFfi._call_with_vjp`
@@ -110,6 +130,11 @@ class CallArg:
 
     def jax_data_ptr( self ):
         return f"{ self._jax_buffer() }typed_data()"
+
+    def jax_stride_bytes( self, d ):
+        """Byte stride `d` of this buffer, READ FROM THE BUFFER at run time. Only the pointer FFI
+        has one (`loom/support/numpy_ffi`): XLA's buffers are dense, and nothing asks for it there."""
+        return f"SI( { self._jax_buffer() }stride_bytes( { d } ) )"
 
     def jax_dim( self, d ):
         """Extent `d` of this buffer, READ FROM THE BUFFER at run time.

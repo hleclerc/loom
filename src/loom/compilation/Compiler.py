@@ -39,6 +39,60 @@ def env_cxxflags() -> list:
     return shlex.split( env.var( "CXXFLAGS", "" ) )
 
 
+# ── probes, remembered across processes ──────────────────────────────────────────────────────────
+# Each probe below compiles ( and runs ) a tiny program: ~70 ms apiece, paid again by EVERY process that
+# starts. The answer only moves when the toolchain does, so it is kept on disk next to the other caches,
+# keyed on what could change it: the compiler ( resolved path, mtime, size ), the tool directories it
+# may live in, the user's own overrides -- and it expires after a week, the net for whatever that key
+# does not see ( a library installed next to the compiler ). `LOOM_PROBE_CACHE=0` turns it off.
+
+_PROBE_MAX_AGE = 7 * 24 * 3600
+
+
+def _probe_key( kind: str, cxx: str, extra = "" ) -> str:
+    import hashlib, json
+    resolved = shutil.which( cxx ) or cxx
+    stats = []
+    for f in ( resolved, os.path.realpath( resolved ), "/Library/Developer/CommandLineTools", "/Applications/Xcode.app/Contents/Developer" ):
+        try:
+            st = os.stat( f )
+            stats.append( [ f, st.st_mtime_ns, st.st_size ] )
+        except OSError:
+            stats.append( [ f, None, None ] )
+    ident = json.dumps( [ kind, cxx, stats, os.environ.get( "SDKROOT" ), os.environ.get( "CONDA_PREFIX" ), sys.platform, extra ] )
+    return hashlib.sha1( ident.encode() ).hexdigest()
+
+
+def _probe( kind: str, cxx: str, compute, extra = "" ):
+    """`compute()` ( a JSON-able answer ), remembered on disk across processes."""
+    import json, time
+    if env.var( "PROBE_CACHE", "1" ).strip().lower() in ( "0", "false", "no", "off" ):
+        return compute()
+    try:
+        from . import cache_root
+        path = cache_root() / "probes.json"
+        key = _probe_key( kind, cxx, extra )
+        try:
+            known = json.loads( path.read_text() )
+        except ( OSError, ValueError ):
+            known = {}
+        hit = known.get( key )
+        if hit is not None and time.time() - hit[ "when" ] < _PROBE_MAX_AGE:
+            return hit[ "value" ]
+    except Exception:
+        return compute()
+    value = compute()
+    try:
+        known = { k: v for k, v in known.items() if time.time() - v[ "when" ] < _PROBE_MAX_AGE }
+        known[ key ] = { "when": time.time(), "value": value }
+        tmp = path.with_name( f".probes.{ os.getpid() }.tmp" )
+        tmp.write_text( json.dumps( known ) )
+        os.replace( tmp, path )
+    except Exception:
+        pass
+    return value
+
+
 # ── OpenMP ───────────────────────────────────────────────────────────────────────────────────────
 # Some of the code a kernel pulls in is parallel on its own ( the AMGCL linear solvers of the transport ):
 # without `-fopenmp` it silently runs on ONE thread -- measured: 4x slower on 2D/3D Newton solves, 2.2x on
@@ -47,6 +101,21 @@ def env_cxxflags() -> list:
 # `LOOM_OPENMP=0` turns it off ( e.g. to keep the OpenMP runtime out of a process that has another one ).
 
 _openmp_cache = {}
+_build_signature_cache = {}
+
+
+def _probe_openmp( cxx, sysroot ) -> list:
+    import subprocess, tempfile
+    src = b"#include <omp.h>\nint main() { int n = 0;\n#pragma omp parallel reduction(+:n)\n n += 1; return n > 0 ? 0 : 1; }\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = str( Path( tmp ) / "probe" )
+        try:
+            ok = subprocess.run( [ cxx, "-fopenmp", "-x", "c++", "-", "-o", exe, *sysroot ], input = src,
+                                 capture_output = True, timeout = 60 ).returncode == 0 \
+                 and subprocess.run( [ exe ], capture_output = True, timeout = 60 ).returncode == 0
+        except ( OSError, subprocess.SubprocessError ):
+            ok = False
+    return [ "-fopenmp" ] if ok else []
 
 
 def openmp_flags( cxx: str | None, sysroot: list = () ) -> list:
@@ -55,17 +124,7 @@ def openmp_flags( cxx: str | None, sysroot: list = () ) -> list:
     if cxx is None or env.var( "OPENMP", "" ).strip().lower() in ( "0", "false", "no", "off" ):
         return []
     if cxx not in _openmp_cache:
-        import subprocess, tempfile
-        src = b"#include <omp.h>\nint main() { int n = 0;\n#pragma omp parallel reduction(+:n)\n n += 1; return n > 0 ? 0 : 1; }\n"
-        with tempfile.TemporaryDirectory() as tmp:
-            exe = str( Path( tmp ) / "probe" )
-            try:
-                ok = subprocess.run( [ cxx, "-fopenmp", "-x", "c++", "-", "-o", exe, *sysroot ], input = src,
-                                     capture_output = True, timeout = 60 ).returncode == 0 \
-                     and subprocess.run( [ exe ], capture_output = True, timeout = 60 ).returncode == 0
-            except ( OSError, subprocess.SubprocessError ):
-                ok = False
-        _openmp_cache[ cxx ] = [ "-fopenmp" ] if ok else []
+        _openmp_cache[ cxx ] = _probe( "openmp", cxx, lambda: _probe_openmp( cxx, sysroot ), extra = list( sysroot ) )
     return _openmp_cache[ cxx ]
 
 
@@ -118,12 +177,14 @@ def sysroot_flags( cxx: str | None ) -> list:
     if os.environ.get( "SDKROOT" ) or any( f.startswith( ( "-isysroot", "--sysroot" ) ) for f in env_cxxflags() ):
         return []
     if cxx not in _sysroot_flags_cache:
-        flags = []
-        if not _links( cxx, None ):
-            sdk = next( ( s for s in _sdk_candidates() if _links( cxx, s ) ), None )
-            if sdk is not None:
-                flags = [ "-isysroot", sdk ]
-        _sysroot_flags_cache[ cxx ] = flags
+        def compute():
+            flags = []
+            if not _links( cxx, None ):
+                sdk = next( ( s for s in _sdk_candidates() if _links( cxx, s ) ), None )
+                if sdk is not None:
+                    flags = [ "-isysroot", sdk ]
+            return flags
+        _sysroot_flags_cache[ cxx ] = _probe( "sysroot", cxx, compute )
     return _sysroot_flags_cache[ cxx ]
 
 
@@ -297,10 +358,23 @@ class HostCxx( Compiler ):
 
     @property
     def build_signature( self ) -> str:
+        # asked on EVERY kernel call (it is part of the kernel's name), and the flags it summarizes
+        # cost ~0.5 ms to rebuild. A device hands out a NEW compiler object each time, so the memo
+        # lives at module level, keyed on what the answer depends on: the compiler's own state and
+        # the whole environment (everything the flags read -- `LOOM_*`, `CXXFLAGS`, `SDKROOT` --
+        # is in it, and a test that changes one gets its new signature).
+        # (`os.environ._data` is the raw bytes mapping: `items()` decodes every variable, ~0.4 ms)
+        raw = getattr( os.environ, "_data", None )
+        key = ( type( self ).__qualname__, repr( sorted( vars( self ).items() ) ),
+                tuple( ( raw if raw is not None else os.environ ).items() ) )
+        cached = _build_signature_cache.get( key )
+        if cached is not None:
+            return cached
         flags = self.flags()
         sig = f"{ self.cxx }|" + " ".join( flags )
         if "-march=native" in flags:
             sig += "|" + cpu_model()
+        _build_signature_cache[ key ] = sig
         return sig
 
     def _require( self ):

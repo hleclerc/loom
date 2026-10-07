@@ -7,6 +7,7 @@ OFFSETS. The rest -- the prefix sum, the total, the exact allocation -- follows 
 import numpy
 
 import loom
+from loom.testing import host
 from loom.compilation.FfiCode import FfiCode
 from errand import test
 
@@ -24,14 +25,14 @@ if test( "the_i_is_looked_up_in_the_offsets" ):
     counts = loom.IntTensor[ 3 ]( [ 2, 0, 3 ] )
     csr = loom.CsrTensor.from_counts( counts )
 
-    assert numpy.asarray( csr.offsets.value ).tolist() == [ 0, 2, 2, 5 ]
+    assert host( csr.offsets.value ).tolist() == [ 0, 2, 2, 5 ]
     assert csr.total == 5          # the last bound IS the total
     assert csr.nb_rows_value == 3
 
     loom.ffi_call( "csr_fill", _FILL, csr = loom.out( csr, writes = ( "values", ) ), nb_items = 3 )
 
     # row 0 -> 0, 1 ; row 1 -> nothing ; row 2 -> 20, 21, 22
-    assert numpy.asarray( csr.values.value ).reshape( -1 ).tolist() == [ 0, 1, 20, 21, 22 ]
+    assert host( csr.values.value ).reshape( -1 ).tolist() == [ 0, 1, 20, 21, 22 ]
     print( f"3 rows ( 2, 0, 3 ) -> { csr.total } slots, exactly the total" )
 
 
@@ -49,7 +50,7 @@ if test( "an_empty_row_has_a_zero_size" ):
         sizes = loom.out( sizes ),
         nb_items = 4,
     )
-    assert numpy.asarray( sizes.value ).reshape( -1 ).tolist() == [ 0, 3, 0, 1 ]
+    assert host( sizes.value ).reshape( -1 ).tolist() == [ 0, 3, 0, 1 ]
 
 
 if test( "the_csr_pads_nothing" ):

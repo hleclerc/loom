@@ -30,7 +30,9 @@ environment is tagged cuda but empty to date; in the meantime, directly:
 from pathlib import Path
 
 import loom
-from loom import Axis, ShapeVar, RealTensor, driver, compilation
+from loom.testing import host
+import loom
+from loom import Axis, ShapeVar, RealTensor, compilation
 from loom.compilation.FfiCode import FfiCode
 from errand import test, skip
 
@@ -92,7 +94,7 @@ def _on_gpu():
     """Is there a GPU here? The question is about loom's DEVICE, not about the presence of a card:
     without CUDA jaxlib, loom falls back to the CPU and this test no longer has a point."""
     try:
-        return bool( getattr( driver.device, "is_cuda_gpu", False ) )
+        return bool( getattr( loom.resolved_device(), "is_cuda_gpu", False ) )
     except Exception:
         return False
 
@@ -112,7 +114,7 @@ if test( "size_decided_by_the_data" ):
             expected_s, expected_m = _expected( x )
             assert int( m ) == expected_m, ( n, int( m ), expected_m )
             assert abs( s - expected_s ) < 1e-9, ( n, s, expected_s )
-        print( f"scratch: exact size read on the card, on { driver.device }" )
+        print( f"scratch: exact size read on the card, on { loom.resolved_device() }" )
 
 
 if test( "under_jit" ):
@@ -125,12 +127,12 @@ if test( "under_jit" ):
         def compute( x ):
             return _compute( x ).value
 
-        compile = driver.jit( compute )
+        compile = loom.jit( compute )
 
         sizes = []
         for seed in range( 4 ):
             x = numpy.random.default_rng( seed ).normal( size = n )
-            r = numpy.asarray( compile( driver.array( x ) ) )
+            r = host( compile( loom.array( x ) ) )
             expected_s, expected_m = _expected( x )
             assert int( r[ 1 ] ) == expected_m, ( seed, int( r[ 1 ] ), expected_m )
             assert abs( float( r[ 0 ] ) - expected_s ) < 1e-8, ( seed, float( r[ 0 ] ), expected_s )

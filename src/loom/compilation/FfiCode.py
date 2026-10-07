@@ -10,6 +10,13 @@ class AbstractFfiCode:
     which the call obtains through `for_backward()` and then launches like any other forward. The
     rest of the pipeline therefore only knows a single direction."""
 
+    def render_key( self ):
+        """What the source rendered from this code can read of it: its fields, all of them (see
+        `drivers/render_key.py`). A subclass that holds something that is not a plain fact makes the
+        call uncacheable, which is the safe answer."""
+        from ..drivers.render_key import plain_object
+        return plain_object( self )
+
     def code_for( self, call_args_analysis ) -> str:
         raise NotImplementedError
 
@@ -61,7 +68,7 @@ class FfiCode( AbstractFfiCode ):
     The adjoint is not a field of the forward: it is another kernel, and it is the CALL that takes
     several of them.
 
-        driver.call(
+        loom.ffi_call(
             FfiCode( code = "mypackage::forward( queue, ... );" ),
             FfiCode( code = "mypackage::backward( queue, ... );" ),   # optional
             name = "one_step",
@@ -324,7 +331,7 @@ class Kernels( AbstractFfiCode ):
     """WHAT A CALL LAUNCHES: a forward kernel, an optional backward kernel, and the name that identifies
     both.
 
-    This is not a class that you write yourself: `driver.call` builds it from the
+    This is not a class that you write yourself: `loom.ffi_call` builds it from the
     `FfiCode`s that you pass it. It exists because the pipeline needs ONE object to ask
     "your preamble", "your body", "your adjoint", "you with one more axis" -- and
     because these last three questions are about the PAIR, not about one kernel.
@@ -332,7 +339,7 @@ class Kernels( AbstractFfiCode ):
 
     def __init__( self, name, forward, backward = None, batch_axes = () ) -> None:
         if not name:
-            raise ValueError( "driver.call: `name` is required -- it names the functors, prefixes "
+            raise ValueError( "loom.ffi_call: `name` is required -- it names the functors, prefixes "
                               "the compiled target and groups the compilation journal" )
         self.name = name
         self.forward = forward

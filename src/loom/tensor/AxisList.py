@@ -2,6 +2,8 @@ import weakref
 
 import numpy
 
+from .host import to_host
+
 from ..util.Attribute import resolve_attribute
 from .AbstractAxis import AbstractAxis
 
@@ -78,7 +80,7 @@ class AxisList( AbstractAxis ):
         # ShapeVar is a rank-1 vector of that length.
         res = numpy.full( self.loop_axis.max, self.offset, dtype = int )
         for shape_var, m in self.coeffs.items():
-            res = res + m * numpy.asarray( shape_var.raw, dtype = int )
+            res = res + m * to_host( shape_var.raw ).astype( int )
         return [ int( x ) for x in res ]
 
     def capacity_list( self, capacity_of ):

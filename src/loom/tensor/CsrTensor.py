@@ -28,7 +28,7 @@ class CsrTensor( Aggregate ):
 
     AND A HOST READ, which is the real price: the TOTAL sizes `values`, and it is a count
     that a kernel has just written. A shape built by `from_counts` is therefore not usable under
-    `jit` -- exactly what a JIT cannot pay, and what `driver.call` knows how to do.
+    `jit` -- exactly what a JIT cannot pay, and what `loom.ffi_call` knows how to do.
 
     `offsets` carries `nb_rows + 1` BOUNDS and not `nb_rows` counts: the size of a row is then
     a subtraction of two neighbours, with no extra array, and the last bound IS the total.
@@ -63,7 +63,7 @@ class CsrTensor( Aggregate ):
         `template_kwargs` goes to `values` ( `dtype`, `size`, `device` ): what the rows CARRY
         is not decided by the counts.
         """
-        from ..drivers.driver import driver
+        from ..drivers import framework_defaults
         from .functions import cumsum
 
         raw = counts.value if isinstance( counts, Tensor ) else counts
@@ -77,7 +77,7 @@ class CsrTensor( Aggregate ):
         # the bounds: the exclusive prefix sum, THEN the total -- `nb + 1` entries. The
         # `concatenate` goes through the driver, so it stays where the data lives.
         starts = cumsum( flat, exclusive = True )
-        res.offsets = driver.concatenate( [ starts.value, driver.array( [ total ], dtype = starts.dtype ) ] )
+        res.offsets = framework_defaults.ops( starts.value ).concatenate( [ starts.value, framework_defaults.array( [ total ], dtype = starts.dtype ) ] )
         return res
 
     @property

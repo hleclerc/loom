@@ -21,5 +21,9 @@ class NumpyFramework( Framework ):
             return False
 
     def make_instance( self, device, ftype, itype ):
-        from .NumpyDriver import NumpyDriver
-        return NumpyDriver( self, device, ftype, itype )
+        from .Settings import Settings
+        return Settings( self, device, ftype, itype )
+
+    def _make_operations( self ):
+        from .NumpyOperations import NumpyOperations
+        return NumpyOperations()

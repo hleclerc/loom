@@ -49,6 +49,11 @@ class PhysicalLayout:
     and every logical op are unaffected. `phys_num = None` keeps the logical order.
     """
 
+    def render_key( self ):
+        """Everything a rendered source can read of a layout (see `drivers/render_key.py`)."""
+        from ..drivers.render_key import plain
+        return ( "PhysicalLayout", plain( self.caps ), plain( self.buffer_shape ), plain( self.strides ), bool( self.is_identity ) )
+
     def __init__( self, caps, buffer_shape, strides, is_identity ):
         self.caps = caps                   # capacity (allocated extent) per LOGICAL dimension
         self.buffer_shape = buffer_shape   # dense physical buffer to allocate (a list of ints)

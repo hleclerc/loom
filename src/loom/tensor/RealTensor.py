@@ -6,7 +6,7 @@ class RealTensor( Tensor ):
     """A tensor of REAL numbers -- the differentiable kind, and the default one.
 
     Its size (FP32 / FP64) is not part of the declaration: it is the driver's policy
-    (`driver.ftype`, `SDOT_FTYPE`), resolved late. Pass `dict( size = 32 )` to pin one.
+    (`loom.resolved_dtype()`, `SDOT_FTYPE`), resolved late. Pass `dict( size = 32 )` to pin one.
     """
 
     dtype_kinds = ( REAL, )

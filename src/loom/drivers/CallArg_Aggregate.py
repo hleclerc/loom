@@ -56,6 +56,7 @@ class CallArg_Aggregate( CallArg ):
 
         self.type_name = call_args_analysis.cpp_type_name( type( inst ) )
         self.inst = inst
+        self.device = call_args_analysis.device
 
         self.attributes = {}
         # the axes the aggregate DECLARES (an `Axis` lowers to no CallArg): kept so their
@@ -126,6 +127,18 @@ class CallArg_Aggregate( CallArg ):
                 if inc not in incs:
                     incs.append( inc )
         return incs
+
+    def cpp_sources( self ):
+        """The domain units the call must LINK for us, `( path, defines )`: what the aggregate's class asks for through
+        `ffi_units( self_call_arg )` ( the call arg is passed: it knows the device and the resolved types of the members
+        the unit depends on ), and whatever its members ask. The caller collects them blind, like the includes."""
+        out = []
+        hook = getattr( self.inst, "ffi_units", None )
+        if hook is not None:
+            out += list( hook( self ) )
+        for child in self.attributes.values():
+            out += list( getattr( child, "cpp_sources", lambda: () )() )
+        return out
 
     def _emit_full_header( self ):
         """Generate the struct WHOLE, for an aggregate the user did not hand-write a header for:

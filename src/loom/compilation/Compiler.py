@@ -31,6 +31,7 @@ import shutil
 import shlex
 import sys
 import os
+import subprocess
 from .. import env
 
 
@@ -94,14 +95,25 @@ def _probe( kind: str, cxx: str, compute, extra = "" ):
 
 
 # ── OpenMP ───────────────────────────────────────────────────────────────────────────────────────
-# Some of the code a kernel pulls in is parallel on its own ( the AMGCL linear solvers of the transport ):
-# without `-fopenmp` it silently runs on ONE thread -- measured: 4x slower on 2D/3D Newton solves, 2.2x on
-# the whole 2D uniform solve. So OpenMP is on whenever the compiler can do it ( g++, a clang with libomp );
-# Apple's clang cannot, and the code then falls back to its sequential choices ( `_OPENMP` is not defined ).
-# `LOOM_OPENMP=0` turns it off ( e.g. to keep the OpenMP runtime out of a process that has another one ).
+# Off unless asked ( `LOOM_OPENMP=1`, or `LOOM_OPENMP_FLAG` given ): the kernels run on loom's own thread pool, and an OpenMP
+# runtime is one more thing a wheel would depend on ( `libgomp`, or `libomp` which a user's machine does not have ). When asked, it is
+# on if the compiler can do it ( g++, a clang with libomp; Apple's clang cannot: `_OPENMP` is then not defined ).
 
 _openmp_cache = {}
 _build_signature_cache = {}
+
+
+def _openmp_flag() -> str:
+    """`-fopenmp` unless `LOOM_OPENMP_FLAG` says otherwise ( OpenMP is only used when `LOOM_OPENMP=1` ): `-fopenmp=libgomp` makes clang use the GNU runtime ( `libgomp.so.1`, which
+    a `manylinux` wheel may depend on ) instead of LLVM's `libomp.so` ( which a user's machine does not have )."""
+    return env.var( "OPENMP_FLAG", "" ).strip() or "-fopenmp"
+
+
+def link_flags() -> list:
+    """`LOOM_LDFLAGS`: what the user adds to every link ( e.g. `-static-libstdc++ -static-libgcc` for a library that must not need a newer
+    `libstdc++` than the machine it is installed on has )."""
+    import shlex
+    return shlex.split( env.var( "LDFLAGS", "" ) )
 
 
 def _probe_openmp( cxx, sysroot ) -> list:
@@ -110,22 +122,24 @@ def _probe_openmp( cxx, sysroot ) -> list:
     with tempfile.TemporaryDirectory() as tmp:
         exe = str( Path( tmp ) / "probe" )
         try:
-            ok = subprocess.run( [ cxx, "-fopenmp", "-x", "c++", "-", "-o", exe, *sysroot ], input = src,
+            ok = subprocess.run( [ cxx, _openmp_flag(), *link_flags(), "-x", "c++", "-", "-o", exe, *sysroot ], input = src,
                                  capture_output = True, timeout = 60 ).returncode == 0 \
                  and subprocess.run( [ exe ], capture_output = True, timeout = 60 ).returncode == 0
         except ( OSError, subprocess.SubprocessError ):
             ok = False
-    return [ "-fopenmp" ] if ok else []
+    return [ _openmp_flag() ] if ok else []
 
 
 def openmp_flags( cxx: str | None, sysroot: list = () ) -> list:
     """`[ "-fopenmp" ]` when `cxx` compiles, links AND runs a program that uses it, else `[]`. Probed once per
     compiler."""
-    if cxx is None or env.var( "OPENMP", "" ).strip().lower() in ( "0", "false", "no", "off" ):
+    asked = env.var( "OPENMP", "" ).strip().lower() in ( "1", "true", "yes", "on" ) or bool( env.var( "OPENMP_FLAG", "" ).strip() )
+    if cxx is None or not asked:
         return []
-    if cxx not in _openmp_cache:
-        _openmp_cache[ cxx ] = _probe( "openmp", cxx, lambda: _probe_openmp( cxx, sysroot ), extra = list( sysroot ) )
-    return _openmp_cache[ cxx ]
+    key = ( cxx, _openmp_flag(), tuple( link_flags() ) )
+    if key not in _openmp_cache:
+        _openmp_cache[ key ] = _probe( "openmp", cxx, lambda: _probe_openmp( cxx, sysroot ), extra = [ *sysroot, _openmp_flag(), *link_flags() ] )
+    return _openmp_cache[ key ]
 
 
 # ── macOS: an SDK the linker can read ────────────────────────────────────────────────────────────
@@ -210,10 +224,29 @@ X86_LEVELS = (
 )
 
 
+def cpu_targets() -> list:
+    """The architecture levels a catalogue is built for on this family of machine, richest first, the
+    baseline (which any processor of the family runs) last."""
+    machine = platform.machine().lower()
+    if machine in ( "aarch64", "arm64" ):
+        return [ "armv8-a" ]
+    if machine not in ( "x86_64", "amd64" ):
+        return [ machine ]
+    return [ level for level, _ in X86_LEVELS ] + [ "x86-64" ]
+
+
 def cpu_variant() -> str:
-    """The richest architecture level this machine supports (`x86-64-v3`, `armv8-a`...):
-    the key under which a precompiled catalogue files its variants. numpy can read the CPU
-    (`__cpu_features__`); failing that, `/proc/cpuinfo`."""
+    """The architecture level the CPU BEHAVES as (`x86-64-v3`, `armv8-a`...): what this machine supports, lowered by
+    the `LOOM_TARGET` mask if there is one (see `devices/hardware.py`). It decides which catalogue builds are
+    loaded, how a kernel is compiled on the spot (`HostCxx`) and, for the Python that asks the device, what the
+    hardware "is"."""
+    from ..devices import hardware
+    return hardware.apply_mask( real_cpu_variant(), cpu_targets() )
+
+
+def real_cpu_variant() -> str:
+    """The richest architecture level this machine supports, whatever the mask: the key under which a precompiled
+    catalogue files its variants. numpy can read the CPU (`__cpu_features__`); failing that, `/proc/cpuinfo`."""
     machine = platform.machine().lower()
     if machine in ( "aarch64", "arm64" ):
         return "armv8-a"
@@ -238,6 +271,11 @@ def cpu_variant() -> str:
         if all( n in features for n in needs ):
             return level
     return "x86-64"
+
+
+# the compute capabilities a catalogue is built for, richest first (`LOOM_CUDA_ARCH` or
+# a package's own script chooses another set)
+CUDA_ARCHS = ( "sm_90", "sm_89", "sm_86", "sm_80", "sm_75", "sm_70" )
 
 
 def find_host_cxx() -> str | None:
@@ -321,18 +359,34 @@ class HostCxx( Compiler ):
 
     name = "host c++"
 
-    def __init__( self, cxx: str | None = None, variant: str | None = None ):
+    def __init__( self, cxx: str | None = None, variant: str | None = None, cxxflags: list | None = None, ldflags: list | None = None ):
         self.cxx = cxx or find_host_cxx()
+        self._cxxflags = cxxflags                    # None: `LOOM_CXXFLAGS`
+        self._ldflags = ldflags                      # None: `LOOM_LDFLAGS`
         # `None` = this machine (`-march=native`); a named level = a portable binary
-        self.variant = variant or env.var( "CPU_VARIANT" ) or None
+        self.variant = variant or env.var( "CPU_VARIANT" ) or self._masked_variant()
+
+    @staticmethod
+    def _masked_variant():
+        """Under a `LOOM_TARGET` mask the machine is compiled for the level it pretends to be, not for what it is:
+        otherwise the "weaker" run would execute `-march=native` code and test nothing."""
+        from ..devices import hardware
+        mask = hardware.mask()
+        return mask if mask in cpu_targets() else None
 
     def is_available( self ) -> bool:
         return self.cxx is not None
 
+    def link_user_flags( self ) -> list:
+        return link_flags() if self._ldflags is None else self._ldflags
+
+    def user_flags( self ) -> list:
+        return env_cxxflags() if self._cxxflags is None else self._cxxflags
+
     def march_flags( self ) -> list:
         if env.flag( "NO_MARCH_NATIVE" ):
             return []
-        if any( f.startswith( "-march" ) or f.startswith( "-mcpu" ) for f in env_cxxflags() ):
+        if any( f.startswith( "-march" ) or f.startswith( "-mcpu" ) for f in self.user_flags() ):
             return []
         if self.variant:
             return [ f"-march={ self.variant }" ]
@@ -354,7 +408,7 @@ class HostCxx( Compiler ):
     def flags( self ) -> list:
         return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
                  "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
-                 *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *env_cxxflags() ]
+                 *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *self.user_flags() ]
 
     @property
     def build_signature( self ) -> str:
@@ -371,7 +425,7 @@ class HostCxx( Compiler ):
         if cached is not None:
             return cached
         flags = self.flags()
-        sig = f"{ self.cxx }|" + " ".join( flags )
+        sig = f"{ self.cxx }|" + " ".join( flags ) + "|" + " ".join( [ _openmp_flag(), *self.link_user_flags() ] )
         if "-march=native" in flags:
             sig += "|" + cpu_model()
         _build_signature_cache[ key ] = sig
@@ -390,9 +444,9 @@ class HostCxx( Compiler ):
             "cxx":             ( [ self.cxx, *self.flags(), "{includes}", "{defines}", "{extra}",
                                    "-MMD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
                                  True, "c++ $in $defines" ),
-            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *bsymbolic, "{soname}",
+            "link_shared":     ( [ self.cxx, "-pthread", "-shared", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *self.link_user_flags(), *bsymbolic, "{soname}",
                                    "-o", "{out}", "{in}", "{libs}" ], False, "link $out" ),
-            "link_executable": ( [ self.cxx, "-pthread", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), "-o", "{out}", "{in}", "{libs}" ],
+            "link_executable": ( [ self.cxx, "-pthread", *sysroot_flags( self.cxx ), *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *self.link_user_flags(), "-o", "{out}", "{in}", "{libs}" ],
                                  False, "link $out" ),
         }
 
@@ -411,7 +465,14 @@ class HostCxx( Compiler ):
             for prefix, suffix in ( ( "lib", ".so" ), ( "lib", ".dylib" ) ):
                 if name.startswith( prefix ) and name.endswith( suffix ):
                     name = name[ len( prefix ):-len( suffix ) ]
-            flags += [ f"-L{ lib.parent }", f"-l{ name }", f"-Wl,-rpath,{ lib.parent }" ]
+            flags += [ f"-L{ lib.parent }", f"-l{ name }" ]
+        if libraries:
+            # next to ITSELF first, then where it was built: a kernel copied into a catalogue loads the runtime that is
+            # copied beside it, not the one of the machine that made it; one that stays in the cache has none beside it.
+            # (`$$`: this string goes into a ninja file, where `$` introduces a variable; and it is quoted, for the shell
+            # that ninja runs it with would otherwise expand `$ORIGIN` to nothing)
+            flags.append( "-Wl,-rpath,@loader_path" if sys.platform == "darwin" else "'-Wl,-rpath,$$ORIGIN'" )
+            flags += [ f"-Wl,-rpath,{ Path( lib ).parent }" for lib in libraries ]
         return " ".join( flags )
 
     def soname_flags( self, out ):
@@ -420,6 +481,31 @@ class HostCxx( Compiler ):
     def describe( self ):
         return [ ( "host c++", self.cxx or "not found" ), ( "flags", " ".join( self.flags() ) ),
                  ( "variant", f"{ self.variant or 'native' } (the machine supports { cpu_variant() })" ) ]
+
+
+def cuda_host_variant() -> str:
+    """The level the host half of a CUDA kernel is compiled for when it goes into a catalogue: a fixed one (not this CPU's
+    `native`), the same baseline for every machine of the family -- `x86-64-v3` (AVX2) or `armv8-a`."""
+    targets = cpu_targets()
+    return "x86-64-v3" if "x86-64-v3" in targets else targets[ -1 ]
+
+
+_supported = {}
+
+
+def nvcc_supported_archs( nvcc: str | None ) -> tuple:
+    """The `sm_XX` this nvcc can generate code for (`--list-gpu-code`; CUDA 13 dropped `sm_70`), in `CUDA_ARCHS` order.
+    All of them when nvcc cannot be asked."""
+    if nvcc not in _supported:
+        found = None
+        if nvcc is not None:
+            try:
+                r = subprocess.run( [ nvcc, "--list-gpu-code" ], capture_output = True, text = True, timeout = 60 )
+                found = set( r.stdout.split() ) if r.returncode == 0 and r.stdout.strip() else None
+            except ( OSError, subprocess.SubprocessError ):
+                found = None
+        _supported[ nvcc ] = tuple( a for a in CUDA_ARCHS if found is None or a in found )
+    return _supported[ nvcc ]
 
 
 def find_nvcc() -> str | None:
@@ -440,13 +526,35 @@ def find_nvcc() -> str | None:
     return shutil.which( "nvcc" )
 
 
+def cudart_link_dir( nvcc: str ) -> list:
+    """`[ "-L", dir ]` where the SHARED `libcudart.so` can be linked: the pip toolkit ships `libcudart.so.13` alone ( its `lib/` has no
+    unversioned name, which `-lcudart` needs ), so a link directory with the symlink is made in the cache. `[]` when the toolkit has it."""
+    lib = Path( nvcc ).resolve().parent.parent / "lib"
+    if not lib.is_dir() or ( lib / "libcudart.so" ).exists():
+        return []
+    versions = sorted( lib.glob( "libcudart.so.*" ) )
+    if not versions:
+        return []
+    from . import cache_root
+    link = cache_root() / "cudart" / "libcudart.so"
+    try:
+        link.parent.mkdir( parents = True, exist_ok = True )
+        if link.is_symlink() and link.resolve() != versions[ -1 ].resolve():
+            link.unlink()
+        if not link.exists():
+            link.symlink_to( versions[ -1 ] )
+    except OSError:
+        return []
+    return [ "-L", str( link.parent ) ]
+
+
 class Nvcc( Compiler ):
     """`nvcc` around the host compiler: what CUDA uses. A `.cu` source goes through nvcc
     (the kernel, host and device code in the same unit), a `.cpp` through the host compiler as
     is; nvcc links (it knows where `libcudart` is).
 
     `arch` is that of the present card (`sm_75`), read by `CudaGpu.sm_arch`: we compile for
-    IT. A binary for several architectures is the wheels' business (step 4).
+    IT. The catalogue holds one library per kernel and per architecture (`compilation/catalogue.py`).
 
     `--expt-relaxed-constexpr`: the `constexpr` functions of the standard library
     (`std::min`, `std::forward`, `std::tuple`, ...) become callable from the device -- which the
@@ -457,9 +565,26 @@ class Nvcc( Compiler ):
     name = "nvcc"
 
     def __init__( self, host: HostCxx | None = None, arch: str | None = None ):
-        self.host = host or HostCxx()
+        # the host half of a kernel that goes into a catalogue must load on any machine of the family: the baseline, not this CPU
+        from . import catalogue
+        # `LOOM_CUDA_HOST`: the host compiler behind nvcc when it is not the CPU's ( nvcc's front end does not parse what a clang
+        # announces from C++23 in the headers of a recent libstdc++; a g++ at `-std=c++20` does not ), with its own flags
+        # ( `LOOM_CUDA_HOST_CXXFLAGS`, `LOOM_CUDA_HOST_LDFLAGS` ) -- the CPU kernels keep theirs
+        other = env.var( "CUDA_HOST" )
+        self.host_ldflags = shlex.split( env.var( "CUDA_HOST_LDFLAGS", "" ) ) if other else link_flags()
+        self.host = host or HostCxx( cxx = other or None, variant = cuda_host_variant() if catalogue.collecting() else None,
+                                     cxxflags = shlex.split( env.var( "CUDA_HOST_CXXFLAGS", "" ) ) if other else None,
+                                     ldflags = self.host_ldflags if other else None )
         self.nvcc = find_nvcc()
         self.arch = arch or env.var( "CUDA_ARCH" ) or "native"
+        # `LOOM_CUDA_PTX=0`: the cubin alone, no PTX for the driver to compile for a newer card. A catalogue
+        # build per architecture has no use for it, except in its poorest target (which is the fallback).
+        self.ptx = env.flag( "CUDA_PTX", not catalogue.collecting() )
+        # `LOOM_CUDART=shared`: the kernel needs `libcudart.so` beside the framework's instead of carrying its own copy (static: ~300 kB
+        # of host code per kernel)
+        self.cudart = env.var( "CUDART", "shared" if catalogue.collecting() else "static" )
+        # `LOOM_CUDA_COMPRESS=0`: no compression of the device code (nvcc >= 12.4 can pack it for size)
+        self.compress = env.flag( "CUDA_COMPRESS", catalogue.collecting() )
 
     def is_available( self ) -> bool:
         return self.nvcc is not None and self.host.is_available()
@@ -479,13 +604,16 @@ class Nvcc( Compiler ):
         # catalogue): one `-gencode` per architecture, plus the PTX of the highest for whatever
         # comes after
         archs = [ a.strip() for a in self.arch.split( "," ) if a.strip() ]
-        if len( archs ) == 1:
+        if len( archs ) == 1 and self.ptx:
             arch_flags = [ f"-arch={ archs[ 0 ] }" ]
+        elif len( archs ) == 1:
+            arch_flags = [ f"-gencode=arch=compute_{ archs[ 0 ][ 3: ] },code=sm_{ archs[ 0 ][ 3: ] }" ]
         else:
             arch_flags = [ f"-gencode=arch=compute_{ a[ 3: ] },code=sm_{ a[ 3: ] }" for a in archs ]
             arch_flags.append( f"-gencode=arch=compute_{ archs[ -1 ][ 3: ] },code=compute_{ archs[ -1 ][ 3: ] }" )
         return [ "-std=c++20", f"-ccbin={ self.host.cxx }", *arch_flags, "-O3", *defines,
                  "--expt-relaxed-constexpr", "--extended-lambda", "--Werror", "cross-execution-space-call",
+                 f"--cudart={ self.cudart }", *( [ "--compress-mode=size" ] if self.compress else [] ),
                  "-Xcompiler", ",".join( host_flags ),
                  *( [ "-lineinfo" ] if os.environ.get( "LOOM_LINEINFO" ) else [] ) ]
 
@@ -503,12 +631,15 @@ class Nvcc( Compiler ):
         # the `.cpp` units are compiled by the host compiler with its OpenMP flag ( `openmp_flags` ): the link must
         # bring the runtime too, which nvcc does not know about -- through the host compiler, as its own link does
         omp = [ a for f in openmp_flags( self.host.cxx, sysroot_flags( self.host.cxx ) ) for a in ( "-Xcompiler", f ) ]
+        omp += [ a for f in self.host_ldflags for a in ( "-Xcompiler", f ) ]
+        if self.cudart == "shared":
+            omp += cudart_link_dir( self.nvcc )            # `LOOM_LDFLAGS` reach the host linker too
         res[ "nvcc" ]            = ( [ self.nvcc, *self.flags(), "{includes}", "{defines}", "{extra}",
                                        "-MD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
                                      True, "nvcc $in $defines" )
-        res[ "link_shared" ]     = ( [ self.nvcc, ccbin, "-shared", *omp, *bsymbolic, "{soname}",
+        res[ "link_shared" ]     = ( [ self.nvcc, ccbin, f"--cudart={ self.cudart }", "-shared", *omp, *bsymbolic, "{soname}",
                                        "-o", "{out}", "{in}", "{libs}" ], False, "link $out" )
-        res[ "link_executable" ] = ( [ self.nvcc, ccbin, *omp, "-o", "{out}", "{in}", "{libs}" ],
+        res[ "link_executable" ] = ( [ self.nvcc, ccbin, f"--cudart={ self.cudart }", *omp, "-o", "{out}", "{in}", "{libs}" ],
                                      False, "link $out" )
         return res
 
@@ -517,7 +648,8 @@ class Nvcc( Compiler ):
 
     def link_libraries( self, libraries ):
         # nvcc does not know `-Wl,`: what goes to the linker goes through `-Xlinker`
-        return self.host.link_libraries( libraries ).replace( "-Wl,-rpath,", "-Xlinker -rpath -Xlinker " )
+        return self.host.link_libraries( libraries ).replace( "'-Wl,-rpath,$$ORIGIN'", "-Xlinker '-rpath,$$ORIGIN'" ) \
+                                                    .replace( "-Wl,-rpath,", "-Xlinker -rpath -Xlinker " )
 
     def soname_flags( self, out ):
         return self.host.soname_flags( out ).replace( "-Wl,-install_name,", "-Xlinker -install_name -Xlinker " )

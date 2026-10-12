@@ -1,0 +1,18 @@
+Bootstrap: localimage
+From: manylinux_2_28.sif
+
+%help
+    The build image of loom's Linux wheels: PyPA's manylinux_2_28 (glibc 2.28, AlmaLinux 8) with a recent clang. A kernel compiled in it
+    needs nothing newer than glibc 2.28 of the machine it runs on, and carries its own libstdc++ (`-static-libstdc++`).
+
+    apptainer pull manylinux_2_28.sif docker://quay.io/pypa/manylinux_2_28_x86_64
+    apptainer build --fakeroot manylinux_loom.sif manylinux.def
+
+%post
+    dnf -y install clang llvm-toolset libomp-devel libstdc++-static
+    dnf clean all
+    clang++ --version | head -1
+
+%environment
+    export LOOM_CXX=/usr/bin/clang++
+    export LOOM_CXXFLAGS="-std=c++23 -static-libstdc++ -static-libgcc"

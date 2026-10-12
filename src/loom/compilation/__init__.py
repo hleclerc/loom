@@ -6,26 +6,14 @@ from .. import env
 
 
 @cache
-def _dev_repo_root():
-    """Repo root, but only when this really looks like a dev checkout (loom/include/loom
-    exists) -- None when running from an installed wheel."""
-    candidate = Path( __file__ ).resolve().parents[ 4 ]
-    return candidate if ( candidate / "loom" / "include" / "loom" ).is_dir() else None
-
-
-@cache
 def loom_include_root() -> Path:
-    """The `-I` root so `#include <loom/support/...>` resolves: `<repo>/loom/include` from a dev
-    checkout (edit C++ without rebuilding the wheel), the `loom/_include` tree the wheel ships next
-    to the package otherwise (pure `__file__`-relative, no repo assumption)."""
-    dev_root = _dev_repo_root()
-    if dev_root is not None:
-        return dev_root / "loom" / "include"
-    packaged = Path( __file__ ).resolve().parents[ 1 ] / "_include"
-    if ( packaged / "loom" / "support" ).is_dir():
-        return packaged
-    raise RuntimeError( "loom: cannot locate the C++ header tree (neither a dev checkout's "
-                        "loom/include nor the packaged loom/_include were found) -- broken install?" )
+    """The `-I` root so `#include <loom/support/...>` resolves: `include/` next to this package. The repository
+    lays its sources out as the installation does (`src/loom/include`), so a checkout, an editable install and a wheel
+    all find it the same way."""
+    root = Path( __file__ ).resolve().parents[ 1 ] / "include"
+    if not ( root / "loom" / "support" ).is_dir():
+        raise RuntimeError( f"loom: cannot locate the C++ header tree ({ root } has no loom/support) -- broken install?" )
+    return root
 
 
 # The C++ roots of the packages built ON loom (sdot's `sdot/include`, holding `sdot/` and
@@ -139,6 +127,9 @@ def include_dirs() -> list:
 from .externals import register_external as register_external
 
 
+dependencies = {}      # name of a library built here -> the libraries it needs beside it (the runtime, the units), for a catalogue
+
+
 def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = (), work_dir = None,
                   include_overlay = None ):
     """Compile & link `src_paths` into a shared library with the compiler of `device`, through
@@ -155,8 +146,9 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     make it unique -- typically a content hash of the sources + the compiler's `build_signature`
     (see `JaxFfi`).
 
-    `sources`: extra units, `( path, defines )`, compiled once per (source, defines, compiler)
-    and shared among all the kernels that ask for them -- the domain code one does not want to
+    `sources`: extra units, `( path, defines )`, built once per (source, defines, compiler) into a shared library
+    that all the kernels asking for it link (`Build.unit_library`; its entry points are declared
+    `visibility( "default" )`, kernels being compiled hidden) -- the domain code one does not want to
     reinstantiate in every kernel (a density, a dimension: macros choose, the `.o` is made once).
 
     `include_overlay`: an include root searched FIRST by `src_paths` (not by the domain units) --
@@ -173,9 +165,20 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
         objects = [ b.object( p, extra_flags = extra_flags or [], shared = work_dir is None,
                               include_first = [ include_overlay ] if include_overlay else [] )
                     for p in src_paths ]
-        objects += [ b.object( p, defines ) for p, defines in sources ]
-        lib = b.shared_library( ( work_dir or build_dir() ) / lib_name, objects, [ b.runtime_library() ] )
+        # a domain unit is a SHARED LIBRARY of its own, made once per (source, defines, compiler) and linked by every kernel
+        # that asks for it -- not an object linked into each of them, which copied it into every library of a catalogue
+        runtime = b.runtime_library()
+        units = [ b.unit_library( p, defines, runtime ) for p, defines in sources ]
+        lib = b.shared_library( ( work_dir or build_dir() ) / lib_name, objects, [ runtime, *units ] )
         b.run( [ lib ] )
+        # what the kernel needs beside it in a catalogue: the units it links, and theirs
+        closure, todo = [], list( units )
+        while todo:
+            u = todo.pop( 0 )
+            if u not in closure:
+                closure.append( u )
+                todo += b.unit_needs.get( u, [] )
+    dependencies[ lib_name ] = [ runtime, *closure ]
     return lib
 
 

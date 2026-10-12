@@ -124,13 +124,38 @@ class Device:
             f"a call ( see `Device.cpp_scratch_decl` )" )
 
     # ── the catalogue (precompiled kernels in a wheel, see compilation/catalogue.py) ──────
+    # A catalogue holds one build PER ARCHITECTURE: its parameters -- the instruction-set level of a CPU
+    # (`x86-64-v3`), the compute capability of a GPU (`sm_80`) -- are what names the build, so
+    # that a machine picks the richest one it can load. The names below ("targets") are those parameters;
+    # a TAG is `<kind>-<target>` (`cpu-x86-64-v3`, `cuda-sm_80`).
     def catalogue_kind( self ) -> str:
         """Under which kind a recorded source is filed ("cpu" | "cuda")."""
         raise NotImplementedError
 
-    def catalogue_tags( self ) -> list:
-        """The catalogue tags this machine can run, best first (`cpu-x86-64-v4`, then `v3`, ...)."""
+    def catalogue_targets( self ) -> list:
+        """Every architecture a catalogue is built for by default, richest first."""
         raise NotImplementedError
+
+    def real_target( self ):
+        """The architecture this hardware IS, whatever the `LOOM_TARGET` mask (None if there is none)."""
+        raise NotImplementedError
+
+    def catalogue_target( self ):
+        """The architecture the device BEHAVES as: `real_target`, lowered by the mask (see `devices/hardware.py`)."""
+        raise NotImplementedError
+
+    def runnable_targets( self ) -> list:
+        """Every catalogue target this hardware can EXECUTE, richest first: what a mask may ask for."""
+        raise NotImplementedError
+
+    def catalogue_tag( self, target: str ) -> str:
+        return f"{ self.catalogue_kind() }-{ target }"
+
+    def current_catalogue_tag( self ):
+        """The one tag this device is served from: the architecture it behaves as. No other is tried -- a poorer
+        architecture's build is another kernel (other code, other results), chosen by `choices.py` or not at all."""
+        target = self.catalogue_target()
+        return None if target is None else self.catalogue_tag( target )
 
     # ── how the device compiles ───────────────────────────────────────────────
     # A device compiles with ITS compiler (`compilation.Compiler`): the host C++ compiler for the

@@ -67,8 +67,7 @@ def is_set( name ) -> bool:
 
 
 def set_var( name, value ):
-    """Set the setting, for ourselves and for subprocesses (what `loom-kernels` does before
-    launching a recording or a catalogue compilation)."""
+    """Set the setting, for ourselves and for subprocesses."""
     os.environ[ PREFIX + name ] = str( value )
 
 

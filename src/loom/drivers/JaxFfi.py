@@ -98,6 +98,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     `headers`: the generated headers the source was rendered with ( `{ rel_path: content }`, see
     `_render_call` ). They are part of what is compiled, hence of the name, and are written into
     the kernel's own directory, first on its `-I` path (`generated_headers.write_overlay`).
+
     """
 
     if not prefix:
@@ -115,15 +116,16 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     # two checkouts sharing the cache directory must not share a kernel that includes different ones.
     name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|{ include_roots() }"
                                     + headers_key( headers ) )
+    from ..compilation import catalogue
     if name in _loaded:
+        # a catalogue being collected wants it too, if an earlier call compiled it outside the block (no-op otherwise)
+        catalogue.publish( _loaded[ name ]._name, source, sources, device, code_name, signature )
         journal.record_reuse()
         return name
 
     # a precompiled kernel first (a wheel's catalogue, see `compilation/catalogue.py`): the same
     # source, compiled for a CPU level this machine can run -- nothing to compile, nothing to
-    # check. Recording (a catalogue being built) sees every source that goes by.
-    from ..compilation import catalogue
-    catalogue.record( source, sources, device, headers )
+    # check. While a catalogue is being collected it is not consulted: everything is compiled, then published.
     found = catalogue.lookup( source, sources, device )
     started = time.monotonic()
     if found is not None:
@@ -156,6 +158,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
         lib = ctypes.CDLL( str( lib_path ) )
         handler = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
+        catalogue.publish( lib_path, source, sources, device, code_name, signature )
 
     jax.ffi.register_ffi_target(
         name, jax.ffi.pycapsule( handler ), platform = device.ffi_platform,
@@ -191,7 +194,7 @@ def _make_op( code, ca, device, prefix ):
     """
     @jax.custom_batching.custom_vmap
     def op( *arrays ):
-        source, _, outputs, attrs, sources, headers = _render_call( code, ca, device )
+        source, _, outputs, attrs, sources, headers = _render_call( code, ca, device, raw = True )
         target = compile_and_register( source, device, prefix, sources,
                                        code_name = code.name, signature = call_signature( ca ),
                                        headers = headers )

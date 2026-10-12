@@ -45,8 +45,9 @@ class CupyOperations( NumpyOperations ):
         return gpu
 
     def _check_device( self, device ):
+        from .Framework import UnsupportedDevice
         if not device.is_cuda_gpu:
-            raise ValueError( f"the cupy driver runs on a CUDA card (asked for { device }): use numpy for the CPU" )
+            raise UnsupportedDevice( f"the cupy driver runs on a CUDA card (asked for { device }): use numpy for the CPU" )
         cupy.cuda.Device( device.device_id ).use()
 
     @staticmethod

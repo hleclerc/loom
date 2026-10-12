@@ -70,6 +70,9 @@ def _lib_suffix() -> str:
     return ".dylib" if sys.platform == "darwin" else ".so"
 
 
+_FLAVOR = "pointer"
+
+
 def _load( source: str, device, prefix: str, sources, code_name, signature, headers = None ):
     """The handler of this source, compiled (or reused from disk) and loaded."""
     # the key is what changes the binary: the source, how it is compiled -- and WHICH FFI it is
@@ -81,26 +84,35 @@ def _load( source: str, device, prefix: str, sources, code_name, signature, head
         journal.record_reuse()
         return _loaded[ name ]
 
+    from ..compilation import catalogue
     started = time.monotonic()
-    kernel_dir = KernelDir( name )          # built privately, published by a rename
-    with kernel_dir as work_dir:
-        src_path = work_dir / f"kernel{ device.compiler.source_suffix() }"
-        if not ( src_path.exists() and src_path.read_text() == source ):
-            src_path.write_text( source )
+    found = catalogue.lookup( source, sources, device, _FLAVOR )          # a wheel's precompiled kernel first
+    if found is not None:
+        lib, entry = found
+        journal.record( name, code_name, signature, "catalogue" )
+    else:
+        if catalogue.policy() == "catalogue":
+            raise RuntimeError( f"loom: kernel `{ name }` is not in the catalogue and LOOM_KERNELS=catalogue forbids compiling it" )
+        kernel_dir = KernelDir( name )          # built privately, published by a rename
+        with kernel_dir as work_dir:
+            src_path = work_dir / f"kernel{ device.compiler.source_suffix() }"
+            if not ( src_path.exists() and src_path.read_text() == source ):
+                src_path.write_text( source )
 
-        make_library(
-            name + _lib_suffix(), [ src_path ], device,
-            extra_flags = [ "-isystem", shim_include_dir() ],
-            sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
-            work_dir = work_dir,
-            include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
-        )
-    lib_path = kernel_dir.final / ( name + _lib_suffix() )
-    lib = ctypes.CDLL( str( lib_path ) )
-    entry = getattr( lib, _HANDLER_SYMBOL )
+            make_library(
+                name + _lib_suffix(), [ src_path ], device,
+                extra_flags = [ "-isystem", shim_include_dir() ],
+                sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
+                work_dir = work_dir,
+                include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
+            )
+        lib_path = kernel_dir.final / ( name + _lib_suffix() )
+        lib = ctypes.CDLL( str( lib_path ) )
+        entry = getattr( lib, _HANDLER_SYMBOL )
+        journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
+        catalogue.publish( lib_path, source, sources, device, code_name, signature, _FLAVOR )
     entry.restype = ctypes.c_void_p
     entry.argtypes = [ ctypes.POINTER( _CallFrame ) ]
-    journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
 
     _loaded[ name ] = entry
     return entry

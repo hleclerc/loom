@@ -52,14 +52,21 @@ class Cpu( Device ):
     def catalogue_kind( self ):
         return "cpu"
 
-    def catalogue_tags( self ):
-        # every level at or below what the machine carries: a v4 machine loads a v3 catalogue
-        from ..compilation.Compiler import cpu_variant, X86_LEVELS
-        mine = cpu_variant()
-        levels = [ level for level, _ in X86_LEVELS ] + [ "x86-64" ]
-        if mine in levels:
-            return [ f"cpu-{ l }" for l in levels[ levels.index( mine ): ] ]
-        return [ f"cpu-{ mine }" ]
+    def catalogue_targets( self ):
+        from ..compilation.Compiler import cpu_targets
+        return cpu_targets()
+
+    def real_target( self ):
+        from ..compilation.Compiler import real_cpu_variant
+        return real_cpu_variant()
+
+    def catalogue_target( self ):
+        from ..compilation.Compiler import cpu_variant
+        return cpu_variant()
+
+    def runnable_targets( self ):
+        levels, mine = self.catalogue_targets(), self.real_target()
+        return levels[ levels.index( mine ): ] if mine in levels else [ mine ]
 
     @property
     def ffi_platform( self ):

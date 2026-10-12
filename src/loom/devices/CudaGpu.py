@@ -1,8 +1,31 @@
 from .Device import Device
 import ctypes
 import os
+from .. import env
 
 _libcuda = None
+
+# What a card of each capability offers per SM / block, from the CUDA programming guide's table of compute
+# capabilities: ( max threads per SM, 32-bit registers per SM, shared memory per SM, shared memory per block ).
+# A `LOOM_TARGET` mask lowers the card's attributes to these (never above what the card really has), so that the
+# Python which sizes a launch from them (`group_size`, `nb_threads`) decides as it would on that generation.
+CUDA_PROFILES = {
+    "sm_70": ( 2048, 65536,  98304, 49152 ),
+    "sm_75": ( 1024, 65536,  65536, 49152 ),
+    "sm_80": ( 2048, 65536, 167936, 49152 ),
+    "sm_86": ( 1536, 65536, 102400, 49152 ),
+    "sm_89": ( 1536, 65536, 102400, 49152 ),
+    "sm_90": ( 2048, 65536, 233472, 49152 ),
+}
+
+
+def cuda_device_count() -> int:
+    """How many CUDA cards the driver shows (0 without a driver)."""
+    lib = _load_libcuda()
+    if lib is None:
+        return 0
+    n = ctypes.c_int( 0 )
+    return n.value if lib.cuDeviceGetCount( ctypes.byref( n ) ) == 0 else 0
 
 
 class CudaGpu( Device ):
@@ -59,7 +82,8 @@ class CudaGpu( Device ):
     @property
     def compiler( self ):
         from ..compilation.Compiler import Nvcc
-        return Nvcc( arch = self.sm_arch )
+        # `LOOM_CUDA_ARCH` wins over the card: it is how a catalogue is built for architectures that are not here
+        return Nvcc( arch = env.var( "CUDA_ARCH" ) or self.sm_arch )
 
     # ── the generated source, CUDA-side ─────────────────────────────────────
     # The queue is XLA's stream for this call: what XLA launched before us on it is done when we
@@ -96,13 +120,29 @@ class CudaGpu( Device ):
     def catalogue_kind( self ):
         return "cuda"
 
-    def catalogue_tags( self ):
-        # one CUDA catalogue: a fat binary for several architectures (`SDOT_CUDA_ARCH` at build)
-        return [ "cuda" ]
+    def catalogue_targets( self ):
+        # the architectures the installed nvcc can still generate (CUDA 13 no longer does `sm_70`)
+        from ..compilation.Compiler import nvcc_supported_archs, find_nvcc
+        return list( nvcc_supported_archs( find_nvcc() ) )
+
+    def real_target( self ):
+        attrs = self._real_attrs()
+        return None if attrs is None else f"sm_{ attrs[ 5 ] }{ attrs[ 6 ] }"
+
+    def catalogue_target( self ):
+        return self.sm_arch
+
+    def runnable_targets( self ):
+        # a lower capability runs on a card: its cubin when the generation is the same, its PTX (which the driver
+        # compiles) otherwise -- the catalogue's lowest build and the masked runs keep their PTX
+        from .hardware import sm_number
+        real = self.real_target()
+        return [] if real is None else [ t for t in self.catalogue_targets() if sm_number( t ) <= sm_number( real ) ]
 
     @property
     def sm_arch( self ):
-        """`sm_75`-style architecture of the card, read off the driver (None if no card)."""
+        """`sm_75`-style architecture of the card, read off the driver and lowered by the `LOOM_TARGET` mask
+        (None if no card)."""
         attrs = self._get_attrs()
         if attrs is None:
             return None
@@ -130,6 +170,21 @@ class CudaGpu( Device ):
         return f"CudaGpu:{ self.device_id }"
 
     def _get_attrs( self ):
+        """The card's attributes, as the device BEHAVES: the real ones, lowered to the profile of the masked capability."""
+        attrs = self._real_attrs()
+        if attrs is None:
+            return None
+        from .hardware import apply_mask
+        real = f"sm_{ attrs[ 5 ] }{ attrs[ 6 ] }"
+        target = apply_mask( real, [ real ] )
+        if target == real or target not in CUDA_PROFILES:
+            return attrs
+        nb_sm, thr, regs, shm_sm, mem, _, _, shm_blk = attrs
+        p_thr, p_regs, p_shm_sm, p_shm_blk = CUDA_PROFILES[ target ]
+        return ( nb_sm, min( thr, p_thr ), min( regs, p_regs ), min( shm_sm, p_shm_sm ), mem,
+                 int( target[ 3:-1 ] ), int( target[ -1 ] ), min( shm_blk, p_shm_blk ) )
+
+    def _real_attrs( self ):
         if self._attrs is not None:
             return self._attrs
         lib = _load_libcuda()

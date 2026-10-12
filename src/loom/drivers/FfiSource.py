@@ -50,7 +50,7 @@ def call_signature( ca ):
 # and each aggregate arg is materialized as a small `struct` of views over them, so the C++
 # body can read and write `cell.<field>`.
 _CALL_TEMPLATE = """\
-#include "xla/ffi/api/ffi.h"
+{support_defines}{ffi_include}
 #include <{queue_include}>
 // the device is in the TYPE of everything below: the queue decides the memory space the kernel
 // dereferences. `SDOT_QUEUE` is also what a hand-written header may read (`sdot/Queue.h`).
@@ -70,7 +70,7 @@ namespace sdot {{ using Queue = SDOT_QUEUE; }}
 #include <cstdint>
 #include <iostream>
 
-namespace ffi = xla::ffi;
+namespace ffi = {ffi_namespace};
 using namespace sdot;
 
 // the axes this call names, from their shared generated headers (`DEFINE_AXIS`), so anything
@@ -103,17 +103,126 @@ static ffi::Error sdot_ffi_impl( {params} ) {{
     return ffi::Error::Success();
 }}
 
-// the ONE exported symbol (everything else is hidden, see `HostCxx`): the declaration carries the
-// visibility, the macro below defines it. Its NAME is a define, not part of the source (the source
-// is hashed into the kernel's name): `sdot_ffi_entry` in a library of its own, a unique name when a
-// catalogue links many kernels into one library (see `compilation/catalogue.py`).
+{entry}
+"""
+
+# the ONE exported symbol of a kernel library (everything else is hidden, see `HostCxx`): the declaration carries the
+# visibility, the macro defines it. Its NAME is a define, not part of the source (the source is hashed into the kernel's name):
+# `sdot_ffi_entry` in a library of its own, a unique name when a catalogue links many kernels into one library.
+_ENTRY_NAME = """\
 #ifndef SDOT_FFI_ENTRY
 #define SDOT_FFI_ENTRY sdot_ffi_entry
 #endif
 extern "C" LOOM_EXPORT XLA_FFI_Error *SDOT_FFI_ENTRY( XLA_FFI_CallFrame * );
-XLA_FFI_DEFINE_HANDLER_SYMBOL( SDOT_FFI_ENTRY, sdot_ffi_impl,
-    ffi::Ffi::Bind(){binds} );
 """
+
+_ENTRY_TYPED = _ENTRY_NAME + """\
+XLA_FFI_DEFINE_HANDLER_SYMBOL( SDOT_FFI_ENTRY, sdot_ffi_impl,
+    ffi::Ffi::Bind(){binds} );"""
+
+# THE BODY AND THE ENTRIES. For a CPU kernel the generated source is split in two. The body ( everything above, down to `sdot_ffi_impl` )
+# is written against `loom_raw` buffers ( `loom/support/ffi_body.h` ) and exported as one plain function; it is compiled ONCE, as a
+# unit ( `FfiModule` ), whatever framework calls it. The entry of each framework is the small stub below: it decodes what its
+# framework hands over -- Jax's XLA frame, or the pointer frame of Torch, Cupy and Numpy -- and calls the body.
+_BODY_EXPORT = """\
+// the body, as a function of plain buffers; its name is a define ( the source is hashed into the unit's name )
+#ifndef LOOM_BODY
+#define LOOM_BODY loom_body
+#endif
+extern "C" LOOM_EXPORT const char *LOOM_BODY( const loom_raw::Raw *bufs, const std::int64_t *attrs, const loom_raw::Context *context ) {{
+    return sdot_ffi_impl( {args} ).msg;
+}}"""
+
+# Jax: the frame decoded by hand ( `loom/support/ffi_raw.h` )
+_STUB_JAX = """\
+#include <loom/support/export.h>
+#include "xla/ffi/api/c_api.h"
+#include <loom/support/ffi_raw.h>
+extern "C" LOOM_EXPORT const char *{symbol}( const loom_raw::Raw *, const std::int64_t *, const loom_raw::Context * );
+""" + _ENTRY_NAME + """\
+XLA_FFI_Error *SDOT_FFI_ENTRY( XLA_FFI_CallFrame *frame ) {{
+    if ( loom_raw::answer_metadata( frame ) || frame->stage != XLA_FFI_ExecutionStage_EXECUTE )
+        return nullptr;
+    static const int dtype[] = {{ {dtypes} }};
+    static const int rank[] = {{ {ranks} }};
+    static const char *const names[] = {{ {names} }};
+    loom_raw::Raw bufs[ {nb} + 1 ];
+    std::int64_t attrs[ {nt} + 1 ];
+    if ( XLA_FFI_Error *e = loom_raw::decode( frame, {na}, {nr}, {nt}, dtype, rank, bufs, names, attrs ) )
+        return e;
+{context}
+    const char *message = {symbol}( bufs, attrs, {context_arg} );
+    return message ? loom_raw::fail( frame, message ) : nullptr;
+}}"""
+
+# Torch, Cupy, Numpy: the pointer frame ( `numpy_ffi/xla/ffi/api/ffi.h` ), buffers with their byte strides
+_STUB_POINTER = """\
+#include <loom/support/export.h>
+#include <xla/ffi/api/ffi.h>
+#include <loom/support/ffi_body.h>
+extern "C" LOOM_EXPORT const char *{symbol}( const loom_raw::Raw *, const std::int64_t *, const loom_raw::Context * );
+""" + _ENTRY_NAME + """\
+XLA_FFI_Error *SDOT_FFI_ENTRY( XLA_FFI_CallFrame *frame ) {{
+    loom_raw::Raw bufs[ {nb} + 1 ];
+    for ( int i = 0; i < {na}; ++i )
+        bufs[ i ] = {{ frame->args[ i ].data, frame->args[ i ].dims, frame->args[ i ].strides_bytes }};
+    for ( int i = 0; i < {nr}; ++i )
+        bufs[ {na} + i ] = {{ frame->rets[ i ].data, frame->rets[ i ].dims, frame->rets[ i ].strides_bytes }};
+    const loom_raw::Context context{{ frame->stream, frame->allocate, frame->allocate_context }};
+    const char *message = {symbol}( bufs, frame->attrs, &context );
+    if ( ! message )
+        return nullptr;
+    static thread_local XLA_FFI_Error error;
+    std::snprintf( error.message, sizeof error.message, "%s", message );
+    return &error;
+}}"""
+
+
+def env_flag_on( name ):
+    from .. import env
+    return env.flag( name, True )
+
+
+def raw_ffi_enabled( device = None, stream_param = None, scratch = None ):
+    """Is the kernel split into a body shared by every framework and a small entry ( see above )? The default: the typed API's
+    `Handler` template is a third to a half of a kernel's object code and a fifth of its compile time, and the body is then compiled
+    once for Jax, Torch, Cupy and Numpy. On a card the entry also brings the stream and the memory pool ( `loom_raw::Context` ).
+    `LOOM_RAW_FFI=0` goes back to the typed API everywhere."""
+    from .. import env
+    return env.flag( "RAW_FFI", True )
+
+
+def _buffers_of( inputs, outputs ):
+    import re
+    def parse( t ):
+        m = re.fullmatch( r"ffi::BufferR(\d)<ffi::(\w+)>", t )
+        return int( m.group( 1 ) ), m.group( 2 )
+    return [ parse( b.jax_ffi_type() ) for b in [ *inputs, *outputs ] ]
+
+
+def _body_export( inputs, outputs, attrs, device, scratch ):
+    bufs = _buffers_of( inputs, outputs )
+    args = []
+    stream = device.cpp_stream_param()
+    if stream:                                              # `cudaStream_t xla_stream`
+        args.append( f"reinterpret_cast<{ stream.rsplit( None, 1 )[ 0 ] }>( context->stream )" )
+    if scratch and device.cpp_scratch_param():
+        args.append( "loom_raw::ScratchAllocator( context )" )
+    args += [ f"loom_raw::{ 'BufferR' + str( r ) }<loom_raw::{ e }>{{ bufs[ {i} ] }}" for i, ( r, e ) in enumerate( bufs[ :len( inputs ) ] ) ]
+    args += [ f"ffi::Result<loom_raw::BufferR{ r }<loom_raw::{ e }>>{{ {{ bufs[ {i} ] }} }}" for i, ( r, e ) in enumerate( bufs ) if i >= len( inputs ) ]
+    args += [ f"attrs[ {t} ]" for t in range( len( attrs ) ) ]
+    return _BODY_EXPORT.format( args = ", ".join( args ) )
+
+
+def _entry_stub( symbol, inputs, outputs, attrs, jax, on_card ):
+    bufs = _buffers_of( inputs, outputs )
+    # Jax: the stream and the pool of a card come from XLA's context
+    context = ( "    loom_raw::GpuScope gpu( frame );\n    if ( XLA_FFI_Error *e = gpu.begin() )\n        return e;" if on_card else "" )
+    return ( _STUB_JAX if jax else _STUB_POINTER ).format(
+        symbol = symbol, context = context, context_arg = "&gpu.context" if on_card else "nullptr",
+        dtypes = ", ".join( [ f"loom_raw::{ e }::dtype" for _, e in bufs ] or [ "0" ] ), ranks = ", ".join( [ str( r ) for r, _ in bufs ] or [ "0" ] ),
+        names = ", ".join( [ f'"{ n }"' for n, _, _ in attrs ] or [ "nullptr" ] ), nb = len( bufs ), nt = len( attrs ),
+        na = len( inputs ), nr = len( outputs ) )
 
 
 def _batch_indices_decl( ca ):
@@ -136,25 +245,29 @@ def _batch_indices_decl( ca ):
              f"global_batch_indices{{ tuple( { sizes } ) }};" )
 
 
-def _render_call( code, ca, device ):
+def _render_call( code, ca, device, raw = False ):
     """`_render_source`, plus the generated headers the rendering asked for ( `{ rel_path: content }` ):
     the kernel compiles against THOSE, from an include overlay of its own, never against the shared
     tree another call may have rewritten meanwhile (see `compilation/generated_headers.py`).
 
     Remembered: a call that repeats an earlier one -- same code, same shapes, other numbers -- gets the
-    same text, so it is not rendered again (see `render_key.py`, which says when that is certain)."""
+    same text, so it is not rendered again (see `render_key.py`, which says when that is certain).
+
+    `raw`: the caller can take a hand-decoded XLA frame (`loom/support/ffi_raw.h`) -- Jax's driver can, the pointer drivers
+    bring their own frame."""
     from . import render_key
     if not render_key.enabled():
-        return _render_uncached( code, ca, device )
+        return _render_uncached( code, ca, device, raw )
 
     key = render_key.render_key( code, ca, device )
     if key is None:
-        return _render_uncached( code, ca, device )
+        return _render_uncached( code, ca, device, raw )
+    key = ( key, bool( raw ) )
 
     hit = render_key.lookup( key )
     if hit is None:
         render_key.stats[ "miss" ] += 1
-        res = _render_uncached( code, ca, device )
+        res = _render_uncached( code, ca, device, raw )
         source, _, _, _, sources, headers = res
         render_key.store( key, ( source, sources, headers ) )
         return res
@@ -169,7 +282,7 @@ def _render_call( code, ca, device ):
     inputs, outputs = _call_buffers( ca )
     res = ( source, inputs, outputs, _call_attrs( ca ), sources, dict( headers ) )
     if render_key.verifying():
-        fresh = _render_uncached( code, ca, device )
+        fresh = _render_uncached( code, ca, device, raw )
         _check_same( fresh, res, code )
     return res
 
@@ -194,11 +307,19 @@ def _first_difference( a, b ):
     return "\n".join( list( difflib.unified_diff( a.splitlines(), b.splitlines(), "fresh", "cached", lineterm = "", n = 1 ) )[ :20 ] )
 
 
-def _render_uncached( code, ca, device ):
+def _render_uncached( code, ca, device, raw = False ):
     from ..compilation.generated_headers import collecting_headers
     with collecting_headers() as headers:
-        res = _render_source( code, ca, device )
-    return ( *res, headers )
+        source, inputs, outputs, attrs, sources, body = _render_source( code, ca, device, raw )
+    if body is not None:
+        # the body is a unit of its own, compiled once whatever the framework: it is given the headers the call rendered, which
+        # it includes by their names
+        from ..compilation.FfiModule import FfiModule
+        text, symbol = body
+        module = FfiModule( code.cpp_base_name(), source = text, defines = { "LOOM_BODY": symbol }, files = headers, needs = sources,
+                            suffix = device.compiler.source_suffix() )
+        sources = ( module.unit(), )
+    return ( source, inputs, outputs, attrs, sources, headers )
 
 
 def _call_buffers( ca ):
@@ -226,7 +347,7 @@ def _call_attrs( ca ):
     return attrs
 
 
-def _render_source( code, ca, device ):
+def _render_source( code, ca, device, raw_frame = False ):
     """The complete FFI handler source for this code bound to these buffers, and the attributes
     it expects.
 
@@ -259,10 +380,20 @@ def _render_source( code, ca, device ):
     # key, and a catalogue key must be the same on every machine. Resolved at compile time.
     sources = []
     for src in [ s for arg_ca in ca.args.values() for s in getattr( arg_ca, "cpp_sources", lambda: () )() ] + list( code.sources ):
+        if hasattr( src, "unit" ):                       # an `FfiModule`: its header comes with its unit
+            if src.header_path not in includes:
+                includes.append( src.header_path )
+            src = src.unit()
         path, defines = ( src if isinstance( src, tuple ) else ( src, {} ) )
         item = ( str( path ), tuple( sorted( dict( defines ).items() ) ) )
         if item not in sources:
             sources.append( item )
+
+    # a call on a card links the CUDA support unit ( `kernels/cuda_support.cu` ): the kernels that every call would otherwise
+    # instantiate for its own view types, compiled once
+    cuda_support = device.cpp_queue_type == "CudaQueue" and env_flag_on( "CUDA_SUPPORT" )
+    if cuda_support:
+        sources.append( ( "loom/support/kernels/cuda_support.cu", () ) )
 
     # XLA FFI binds in this order, and the handler's parameters must follow it: the platform
     # stream if the device runs on one (CUDA: the queue is BUILT on XLA's stream, so the call is
@@ -373,7 +504,9 @@ def _render_source( code, ca, device ):
                   '            return ffi::Error( ffi::ErrorCode::kResourceExhausted, scratch.refusal_message() );' )
 
     from ..tensor.AbstractAxis import AbstractAxis
-    source = _CALL_TEMPLATE.format(
+    from ..tensor.AbstractAxis import AbstractAxis
+    shared = raw_ffi_enabled()
+    text = _CALL_TEMPLATE.format(
         queue_decl    = queue_decl,
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
@@ -387,17 +520,26 @@ def _render_source( code, ca, device ):
         seeds         = "\n".join( s for s in seeds if s ),
         body          = body,
         binds         = binds,
+        support_defines = '#define LOOM_CUDA_SUPPORT_UNIT 1\n' if cuda_support else '',
+        ffi_include   = '#include <loom/support/ffi_body.h>' if shared else '#include "xla/ffi/api/ffi.h"',
+        ffi_namespace = "loom_raw" if shared else "xla::ffi",
+        entry         = _body_export( inputs, outputs, attrs, device, scratch ) if shared else _ENTRY_TYPED.format( binds = binds ),
     )
-    return source, inputs, outputs, attrs, tuple( sources )
+    if not shared:
+        return text, inputs, outputs, attrs, tuple( sources ), None
+    import hashlib
+    symbol = "loom_body_" + hashlib.sha256( text.encode() ).hexdigest()[ :20 ]
+    return _entry_stub( symbol, inputs, outputs, attrs, raw_frame, bool( stream_param ) ), inputs, outputs, attrs, tuple( sources ), ( text, symbol )
 
 
 def _resolve_source( path ):
     """A kernel source, as given (`sdot/density/gaussians.cpp`, like an include) or absolute."""
     from ..compilation import include_roots
+    from ..compilation.generated_headers import include_root
     p = Path( path )
     if p.is_absolute():
         return p
-    for root in include_roots():
+    for root in [ *include_roots(), include_root() ]:
         if ( Path( root ) / p ).is_file():
             return Path( root ) / p
     raise FileNotFoundError( f"kernel source `{ path }` not found under the C++ source roots" )

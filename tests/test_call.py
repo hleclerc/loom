@@ -690,6 +690,49 @@ if test( "batch_alignment_forced" ):
     assert padded.value.tolist() == want
 
 
+if test( "an_aligned_layout_does_not_put_the_sizes_in_the_source" ):
+    # The extents and byte strides of a buffer with a NON-identity layout (a device that aligns its batches) used to be
+    # LITERALS of the generated source: every size was another kernel, and a catalogue could only serve the sizes it was built
+    # with. They cross as FFI attributes now. Two batches of different sizes, same alignment: ONE kernel.
+    from loom.compilation import journal
+    from loom.tensor import new_batch_axis
+
+    class Cell8( Aggregate ):
+        scale            : RealTensor[ "dim" ]
+        vertex_positions : RealTensor[ "num_vertex", "dim" ]
+
+        num_vertex       : Axis[ "nb_vertices" ]
+        dim              : Axis[ "nb_dims" ]
+
+        nb_vertices      : ShapeVar
+        nb_dims          : CtShapeVar
+
+    kernel = FfiCode.per_item( code = """
+    auto c = outputs.cell( batch_index );
+    c.nb_vertices.set( 1 );
+    c.vertex_positions( num_vertex = 0, dim = 0 ) = c.scale( dim = 0 );
+    c.vertex_positions( num_vertex = 0, dim = 1 ) = c.scale( dim = 1 );
+    """ )
+    def run( nb_items, capacity ):
+        cell = Cell8( nb_dims = 2, batch_axes = [ new_batch_axis( nb_items ) ] )
+        cell.scale = loom.array( [ [ float( i ), float( 10 * i ) ] for i in range( nb_items ) ] )
+        loom.ffi_call(
+            "test_call_aligned_sizes",
+            kernel,
+            cell = loom.out( cell, writes = ( "nb_vertices", "vertex_positions" ), capacities = { "nb_vertices": capacity } ),
+            batch_alignment = 32,
+        )
+        return cell.vertex_positions
+
+    first = run( 3, 4 )
+    before = journal.stats()
+    second = run( 7, 6 )
+    after = journal.stats()
+    assert after[ "kernels" ] == before[ "kernels" ], f"another size built another kernel ({ before[ 'kernels' ] } -> { after[ 'kernels' ] })"
+    assert first.value.tolist()  == [ [ [ float( i ), float( 10 * i ) ] ] for i in range( 3 ) ]
+    assert second.value.tolist() == [ [ [ float( i ), float( 10 * i ) ] ] for i in range( 7 ) ]
+
+
 if test( "physical_axis_reorder" ):
     # PHASE 3: a physical-order REORDER. The input tensor is stored COLUMN-MAJOR (its two axes
     # permuted in memory), a layout with NON-MONOTONIC strides. The kernel indexes it by LOGICAL

@@ -465,6 +465,38 @@ void launch_kernel( const CudaQueue &queue, void ( *kernel )( KArgs... ), int gr
     cuda_check( cudaGetLastError(), "launch (custom kernel)" );
 }
 
+// ── fills, by a unit compiled once ────────────────────────────────────────────────────────────
+// Filling a view ( `TensorView::fill_with`, what seeds the outputs of a call ) was one kernel per view TYPE, identical in all of them. A call
+// that links the CUDA support unit ( `kernels/cuda_support.cu`, announced by `LOOM_CUDA_SUPPORT_UNIT` ) hands a view that is already on the
+// card to it instead: a few bytes of description instead of a kernel instantiation. Found by `fill_with` through ADL.
+#ifdef LOOM_CUDA_SUPPORT_UNIT
+extern "C" {
+    LOOM_EXPORT int loom_cuda_fill_contiguous( void *stream, void *ptr, long long n, const void *value, int elem_size );
+    LOOM_EXPORT int loom_cuda_fill_strided( void *stream, void *ptr, int rank, const long long *dims, const long long *strides_bytes, const void *value, int elem_size );
+}
+
+template<class View>
+    requires ( View::ct_rank >= 1 && View::ct_rank <= 8 && std::is_same_v<typename View::MemorySpace, CudaGlobalMemorySpace>
+               && ( sizeof( typename View::TF ) == 1 || sizeof( typename View::TF ) == 2 || sizeof( typename View::TF ) == 4 || sizeof( typename View::TF ) == 8 )
+               && std::is_trivially_copyable_v<typename View::TF> )
+QueueEvent cuda_fill_view( const CudaQueue &queue, const View &view, typename View::TF value ) {
+    using TF = typename View::TF;
+    long long dims[ 8 ], strides[ 8 ], n = 1;
+    [&]<int... K>( std::integer_sequence<int,K...> ) {
+        ( ( dims[ K ] = static_cast<long long>( view.shape( Ct<int,K>() ) ), strides[ K ] = static_cast<long long>( view.strides()[ Ct<int,K>() ] ), n *= dims[ K ] ), ... );
+    }( std::make_integer_sequence<int,View::ct_rank>() );
+    cudaStream_t stream = queue.stream;
+    if ( n > 0 ) {
+        TF *ptr = view._data.template as<TF>();
+        const int err = view.items_are_contiguous()
+            ? loom_cuda_fill_contiguous( stream, ptr, n, &value, int( sizeof( TF ) ) )
+            : loom_cuda_fill_strided( stream, ptr, View::ct_rank, dims, strides, &value, int( sizeof( TF ) ) );
+        cuda_check( cudaError_t( err ), "fill" );
+    }
+    return QueueEvent( [stream]{ cuda_check( cudaStreamSynchronize( stream ), "sync (fill)" ); } );
+}
+#endif
+
 namespace detail::CudaQueueTiming {
     /// the slot of the graph launches ( never launched itself: its address names the slot )
     static __global__ void graph_marker() {}

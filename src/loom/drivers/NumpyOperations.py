@@ -187,8 +187,9 @@ class NumpyOperations:
         return Cpu()
 
     def _check_device( self, device ):
+        from .Framework import UnsupportedDevice
         if not device.is_cpu:
-            raise ValueError( f"the numpy driver runs on the CPU only (asked for { device }): use jax or torch for a GPU" )
+            raise UnsupportedDevice( f"the numpy driver runs on the CPU only (asked for { device }): use jax or torch for a GPU" )
 
     @staticmethod
     def _ffi():

@@ -70,3 +70,31 @@ if test( "a_source_compiled_with_a_define_is_linked_in" ):
 if test( "another_define_is_another_unit" ):
     assert _scaled( 3 ) == [ 3, 6, 9 ]
     assert _scaled( 2 ) == [ 2, 4, 6 ]
+
+
+def _module( scale ):
+    """The same unit as `scaled.cpp`, but written by the program: no file of ours, the scale is in the text."""
+    return loom.FfiModule(
+        "generated_scaled",
+        header = "namespace gen { LOOM_EXPORT sdot::SI scaled( sdot::SI x ); }",
+        source = f"namespace gen {{ sdot::SI scaled( sdot::SI x ) {{ return x * { scale }; }} }}",
+        includes = [ "loom/support/common_types.h" ],
+    )
+
+
+def _scaled_by_module( scale ):
+    num = Axis( ShapeVar( 3 ), name = "num" )
+    res = IntTensor[ num ]()
+    code = _CODE.replace( "sdot::scaled", "gen::scaled" )
+    loom.ffi_call( f"test_module_scaled_{ scale }", FfiCode( code = code, sources = [ _module( scale ) ] ), res = loom.out( res ) )
+    return host( res.value ).reshape( -1 ).tolist()
+
+
+if test( "a_module_written_by_the_program_is_compiled_and_linked" ):
+    assert _scaled_by_module( 2 ) == [ 2, 4, 6 ]
+    assert _scaled_by_module( 5 ) == [ 5, 10, 15 ]
+
+
+if test( "a_module_has_a_stable_name_made_of_its_text" ):
+    a, b, c = _module( 2 ), _module( 2 ), _module( 3 )
+    assert a.stem == b.stem and a.stem != c.stem and a.source_path == b.source_path

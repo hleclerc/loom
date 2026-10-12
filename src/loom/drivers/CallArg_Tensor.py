@@ -106,8 +106,12 @@ class CallArg_Tensor( CallArg ):
         # a dense one first. Decided here, on the very value the call will receive: `PointerFfi`
         # hands it over with its strides exactly when this is set. A layout of our own (a padded
         # batch) is a layout and not a framework's strides, so it keeps its literals.
+        # XLA's buffers are dense (`xla::ffi::Buffer` has no strides to read): under Jax a strided numpy input is
+        # handed over as a dense array, so the kernel reads it as one.
+        from . import framework_defaults
         self.runtime_strides = bool(
             self.io_category.is_input and inst.raw is not None and not inst.is_fill
+            and framework_defaults.framework_name() != "jax"
             and inst.buffer_layout.is_identity and inst.storage.is_strided() )
 
     # Where an INPUT lives is in the type of its view (`memory_space`), so the queue knows what it must transfer
@@ -211,16 +215,32 @@ class CallArg_Tensor( CallArg ):
         return None if n is None else f"Ct<SI, { n }>()"
 
     def cpp_logical_shape_tuple( self ):
-        # the LOGICAL extents as literals -- used with a NON-contiguous layout, where the buffer's
-        # physical dims (flattened/reordered) no longer match the logical axes, so `jax_dim` (which
-        # reads the buffer) cannot serve them. Batch extents are prescribed and the rest are the
-        # capacities this call allocates: all known at trace time.
-        return "tuple( " + ", ".join( self._cpp_extent( d ) or f"SI( { int( e ) } )"
-                                      for d, e in enumerate( self.shape ) ) + " )"
+        # the LOGICAL extents -- used with a NON-contiguous layout, where the buffer's physical dims (flattened/reordered)
+        # no longer match the logical axes, so `jax_dim` (which reads the buffer) cannot serve them. Batch extents are
+        # prescribed and the rest are the capacities this call allocates: known at trace time, hence they cross as FFI
+        # ATTRIBUTES ( `jax_attrs` ), never as literals: the same kernel serves every size.
+        return "tuple( " + ", ".join( self._cpp_extent( d ) or f"SI( { self._layout_attr_name( 'ext', d ) } )"
+                                      for d in range( len( self.shape ) ) ) + " )"
 
     def cpp_strides_tuple( self ):
-        # the per-LOGICAL-axis BYTE strides of the physical layout (what `tensor_view`'s 4th arg wants).
-        return "tuple( " + ", ".join( f"SI( { s } )" for s in self.layout.strides_bytes( self.itemsize ) ) + " )"
+        # the per-LOGICAL-axis BYTE strides of the physical layout (what `tensor_view`'s 4th arg wants), by attribute like the extents
+        return "tuple( " + ", ".join( f"SI( { self._layout_attr_name( 'stride', d ) } )"
+                                      for d in range( len( self.shape ) ) ) + " )"
+
+    def _layout_attr_name( self, kind, d ):
+        return f"{ kind }_{ self.ffi_name }_{ d }"
+
+    def jax_attrs( self ):
+        """The extents and byte strides of a buffer whose layout is NOT the identity (a device that aligns its batches): the
+        view spells them, and they depend on the sizes of this call. They cross as attributes, not as literals of the source --
+        otherwise every size would be another kernel, and a catalogue could only serve the sizes it was built with."""
+        if self.runtime_strides or not self.io_category.is_bound or getattr( self.inst, "is_fill", False ) or self.layout.is_identity:
+            return []
+        res = [ ( self._layout_attr_name( "ext", d ), "int64_t", int( e ) )
+                for d, e in enumerate( self.shape ) if self._dim_ct_extent[ d ] is None ]
+        res += [ ( self._layout_attr_name( "stride", d ), "int64_t", int( s ) )
+                 for d, s in enumerate( self.layout.strides_bytes( self.itemsize ) ) ]
+        return res
 
     def cpp_runtime_strides_type( self ):
         # the strides this buffer carries, read at run time: one byte stride per dimension, never a literal

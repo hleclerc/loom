@@ -72,3 +72,8 @@ class Framework:
 
     def _make_operations( self ):
         raise NotImplementedError
+
+
+class UnsupportedDevice( ValueError ):
+    """The framework cannot run on this device (numpy: not a card; cupy: not the CPU). A script that visits every piece of
+    hardware (`compilation/catalogue.py: build`) skips the hardware it was raised for."""

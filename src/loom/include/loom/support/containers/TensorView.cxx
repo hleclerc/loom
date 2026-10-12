@@ -102,6 +102,10 @@ UTP HD auto DTP::squeeze( auto axis_index ) const {
         return squeeze( Ct<int,pos>(), axis_index.index );
 }
 
+UTP HD typename DTP::Strides DTP::strides() const {
+    return _strides;
+}
+
 UTP HD auto DTP::row( auto index ) const {
     return squeeze( Ct<int,0>(), index );
 }
@@ -258,10 +262,18 @@ UTP    auto DTP::_fill_with( TF value, auto &&run ) {
 }
 
 UTP    auto DTP::fill_with( auto &&queue_list, TF value ) {
+    // a card with the support unit linked fills a view it already holds without instantiating a kernel for its type ( `CudaQueue.h` )
+    if constexpr ( requires { cuda_fill_view( queue_list, *this, value ); } )
+        return cuda_fill_view( queue_list, *this, value );
+    else
     return _fill_with( value, [&]( auto &&...a ) { return run_parallel( FORWARD( queue_list ), FORWARD( a )... ); } );
 }
 
 UTP    auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {
+    if constexpr ( requires { cuda_fill_view( queue_list, *this, value ); } ) {
+        deps.wait_all();
+        return cuda_fill_view( queue_list, *this, value );
+    } else
     return _fill_with( value, [&]( auto &&...a ) { return run_parallel( FORWARD( queue_list ), FORWARD( deps ), FORWARD( a )... ); } );
 }
 

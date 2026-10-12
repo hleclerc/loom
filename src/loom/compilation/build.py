@@ -60,7 +60,7 @@ import json
 import sys
 import os
 
-from . import build_dir, include_dirs, loom_include_root, _dev_repo_root
+from . import build_dir, include_dirs, loom_include_root
 from ..util.encode_base_62 import encode_base_62
 from .. import env
 
@@ -502,6 +502,7 @@ class Build:
         self.compiler = device.compiler
         self.root = build_dir()
         self.sig = _short_hash( self.compiler.build_signature )
+        self.unit_needs = {}          # unit library -> the unit libraries it links ( `unit_library` )
         commands = self.compiler.commands()
         self.common = _Graph( self.root, self.sig, commands )
         self.own = _Graph( work_dir, self.sig, commands, relative = True ) if work_dir is not None else self.common
@@ -572,6 +573,23 @@ class Build:
         out = Path( out )
         self.own.add_edge( out, self._rule( "link_executable" ), objects, implicit = libraries,
                               libs = self.compiler.link_libraries( libraries ) )
+        return out
+
+    def unit_library( self, src: Path, defines: dict, runtime: Path ) -> Path:
+        """The domain unit `src` compiled with `defines`, as a shared library of the common graph: one per (source,
+        defines, compiler), linked by every kernel that names it (see `make_library`). A unit that is an `FfiModule` with
+        `needs` links those units too (`<stem>.needs.json` beside it); `self.unit_needs` says which."""
+        private = Path( src ).with_name( Path( src ).stem + ".d" )          # the headers of an `FfiModule` (`files`)
+        obj = self.object( src, defines, include_first = [ private ] if private.is_dir() else [] )
+        sidecar = Path( src ).with_name( Path( src ).stem + ".needs.json" )
+        needs = []
+        if sidecar.is_file():
+            from ..drivers.FfiSource import _resolve_source
+            needs = [ self.unit_library( _resolve_source( p ), dict( d ), runtime ) for p, d in json.loads( sidecar.read_text() ) ]
+        out = self.shared_library(
+            self.common.root / "units" / self.compiler.library_file_name( f"loom_unit_{ Path( src ).stem }_{ _short_hash( self.sig, obj, *needs ) }" ),
+            [ obj ], [ runtime, *needs ], shared = True )
+        self.unit_needs[ out ] = needs
         return out
 
     def runtime_library( self ) -> Path:
@@ -669,10 +687,5 @@ class Build:
 
 
 def runtime_sources() -> list:
-    """The sources of `libloom_runtime` (`loom/cpp/runtime/*.cpp`), from a checkout or a wheel."""
-    dev_root = _dev_repo_root()
-    if dev_root is not None:
-        root = dev_root / "loom" / "cpp" / "runtime"
-    else:
-        root = Path( __file__ ).resolve().parents[ 1 ] / "_cpp" / "runtime"
-    return sorted( root.glob( "*.cpp" ) )
+    """The sources of `libloom_runtime` (`cpp/runtime/*.cpp`, next to this package)."""
+    return sorted( ( Path( __file__ ).resolve().parents[ 1 ] / "cpp" / "runtime" ).glob( "*.cpp" ) )

@@ -70,6 +70,7 @@ def __getattr__(name: str):
         "AxisList":        (".tensor.AxisList",       "AxisList"),
         "CtShapeVar":      (".tensor.CtShapeVar",     "CtShapeVar"),
         "FfiCode":         (".compilation.FfiCode",   "FfiCode"),
+        "FfiModule":       (".compilation.FfiModule", "FfiModule"),
         "ShapeVar":        (".tensor.ShapeVar",       "ShapeVar"),
         "ShapeArray":      (".tensor.ShapeArray",     "ShapeArray"),
         "Tensor":          (".tensor.Tensor",         "Tensor"),
@@ -117,6 +118,9 @@ def __getattr__(name: str):
         "ops":             (".drivers.framework_defaults", "ops"),
         "resolved_framework": (".drivers.framework_defaults", "framework"),
         "resolved_device": (".drivers.framework_defaults", "device"),
+        "kernel_parameters_for": (".choices", "kernel_parameters_for"),
+        "bench_loop":      (".benchmark", "bench_loop"),
+        "register_choices": (".choices", "register_choices"),
         "resolved_dtype":  (".drivers.framework_defaults", "ftype"),
         "resolved_itype":  (".drivers.framework_defaults", "itype"),
         "new_batch_axis":  (".tensor.batch",          "new_batch_axis"),
@@ -127,6 +131,13 @@ def __getattr__(name: str):
         "scratch":         (".calls",                 "scratch"),
         "unbound":         (".calls",                 "unbound"),
     }
+
+    # the modules of the catalogue's vocabulary: `from loom import catalogue, hardware`
+    if name in ( "catalogue", "hardware" ):
+        import importlib
+        mod = importlib.import_module( { "catalogue": ".compilation.catalogue", "hardware": ".devices.hardware" }[ name ], package = __package__ )
+        globals()[ name ] = mod
+        return mod
 
     if name in ( "default_dtype", "default_itype" ):
         # created on first use (a `Dtype` lives in the heavy part of loom), then a plain module attribute

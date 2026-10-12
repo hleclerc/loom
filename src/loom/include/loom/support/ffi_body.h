@@ -89,5 +89,8 @@ template<class E> using BufferR2 = BufferTyped<E,2>;
 template<class E> using BufferR3 = BufferTyped<E,3>;
 template<class E> using BufferR4 = BufferTyped<E,4>;
 template<class E> using BufferR5 = BufferTyped<E,5>;
+template<class E> using BufferR6 = BufferTyped<E,6>;
+template<class E> using BufferR7 = BufferTyped<E,7>;
+template<class E> using BufferR8 = BufferTyped<E,8>;
 
 } // namespace loom_raw

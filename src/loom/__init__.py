@@ -130,6 +130,10 @@ def __getattr__(name: str):
         "mutable":         (".calls",                 "mutable"),
         "scratch":         (".calls",                 "scratch"),
         "unbound":         (".calls",                 "unbound"),
+        # the boundary with the user: what a public function returns is in the caller's framework
+        "public":          (".boundary",              "public"),
+        "export":          (".boundary",              "export"),
+        "universe_of":     (".boundary",              "universe_of"),
     }
 
     # the modules of the catalogue's vocabulary: `from loom import catalogue, hardware`

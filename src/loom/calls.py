@@ -300,7 +300,11 @@ def _scan( value, tracing, plain, seen ):
     from .tensor.Tensor import Tensor
     from .tensor.storage.buffers import buffer_class_for
     from .util.Aggregate import Aggregate
+    # the imports once, and not at each level of the walk: they were most of its cost
+    _walk( value, tracing, plain, seen, Tensor, buffer_class_for, Aggregate )
 
+
+def _walk( value, tracing, plain, seen, Tensor, buffer_class_for, Aggregate ):
     if isinstance( value, Arg ):
         value = value.value
     if value is None or isinstance( value, ( str, int, float, bool ) ) or id( value ) in seen:
@@ -316,13 +320,13 @@ def _scan( value, tracing, plain, seen ):
         storage = None
     if isinstance( value, ( list, tuple ) ):
         for v in value:
-            _scan( v, tracing, plain, seen )
+            _walk( v, tracing, plain, seen, Tensor, buffer_class_for, Aggregate )
     elif isinstance( value, dict ):
         for v in value.values():
-            _scan( v, tracing, plain, seen )
+            _walk( v, tracing, plain, seen, Tensor, buffer_class_for, Aggregate )
     elif isinstance( value, Aggregate ):
         for v in vars( value ).values():
-            _scan( v, tracing, plain, seen )
+            _walk( v, tracing, plain, seen, Tensor, buffer_class_for, Aggregate )
     else:
         if storage is None:
             cls = buffer_class_for( value )

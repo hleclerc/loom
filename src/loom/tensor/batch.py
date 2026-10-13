@@ -47,7 +47,7 @@ The PREFIX separates the families (`thread_0` for work-items, `cell_0` for cells
 readable in a Python display and isolates the numberings, but it no longer shows in the generated
 source.
 
-= The `gc.collect()` is a SAFETY NET, and it should never be needed anymore
+= There used to be a `gc.collect()` here
 
 Borrowing assumes giving back, and giving back assumes the axis DIES. It was not dying: two rings
 of references held it, and a ring is only undone by the cyclic garbage collector.
@@ -61,10 +61,12 @@ of references held it, and a ring is only undone by the cyclic garbage collector
     default argument. Weak too now (the reference to the TENSOR already was).
 
 Verified by disabling the cyclic garbage collector: axes are given back by plain reference
-counting. The `gc.collect()` below only fires if the reserve is empty -- that is, at the very
-moment a compilation would be paid for -- and should therefore never have anything left to give
-back. It remains as a safety net: a ring reintroduced elsewhere would cost 9 ms instead of 9 s,
-and `in_use( prefix )` would tell.
+counting. `take` collected the cycles when its reserve was empty, as a safety net -- it is gone:
+since the renaming at lowering, a fresh name no longer costs a compilation, so there was nothing
+left to save. And an empty reserve is the NORMAL state when the axes are alive -- under torch
+autograd, the forward keeps them all until `backward` -- where each new axis then paid a full
+collection for nothing ( 50 ms each, 1 s of the 1.3 s of a differentiable transport ). A leak
+( an axis held somewhere ) shows in `in_use( prefix )`.
 
 = The definitive remedy: IN PLACE
 
@@ -82,7 +84,6 @@ happens there.
 What remains for the pool is its other role, which has not moved: distinct names between axes
 alive at the same time.
 """
-import gc
 import threading
 import weakref
 
@@ -97,10 +98,6 @@ class _NamePool:
     two runs of the same program borrow in the same order, however the borrows overlapped.
     """
 
-    # collect before creating a fresh name. Downside: a caller making MANY very short calls
-    # that would rather pay for the compilations. See the module docstring.
-    collect_when_empty = True
-
     def __init__( self ):
         self._lock = threading.Lock()
         self._free = {}                 # prefix -> set of given-back indices
@@ -111,16 +108,8 @@ class _NamePool:
         if index is not None:
             return index
 
-        # the reserve is empty: this is where, and only where, we are about to pay for a
-        # compilation. A cyclic collection gives back the axes of previous calls (the shapes graph
-        # is cyclic, they do not go away by themselves) -- and if it gives back none, they are
-        # really alive, and we create the name.
-        if self.collect_when_empty:
-            gc.collect()
-            index = self._take( prefix )
-            if index is not None:
-                return index
-
+        # the reserve is empty: the axes of this prefix are all alive, a new name it is ( no collection
+        # first: see the module docstring )
         with self._lock:
             index = self._next.get( prefix, 0 )
             self._next[ prefix ] = index + 1

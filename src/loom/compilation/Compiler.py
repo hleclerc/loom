@@ -130,6 +130,33 @@ def _probe_openmp( cxx, sysroot ) -> list:
     return [ _openmp_flag() ] if ok else []
 
 
+def shared_suffix() -> str:
+    """The extension of a shared library on this system."""
+    return ".dylib" if sys.platform == "darwin" else ".dll" if os.name == "nt" else ".so"
+
+
+_dll_directories = {}
+
+
+def load_library( path ):
+    """`ctypes.CDLL( path )`. A Windows DLL looks for its dependencies in a few system places and beside itself, not where its
+    linker found them ( no rpath ): the places loom builds the libraries a kernel needs are added first."""
+    import ctypes
+    if os.name == "nt":
+        from . import cache_root
+        for d in ( Path( path ).parent, cache_root() / "build" / "runtime", cache_root() / "build" / "units" ):
+            if d.is_dir() and d not in _dll_directories:     # once each: a long list of them makes LoadLibrary fail ( out of memory )
+                _dll_directories[ d ] = os.add_dll_directory( str( d ) )
+    try:
+        return ctypes.CDLL( str( path ) )
+    except OSError as e:
+        raise OSError( f"loom: cannot load { path }: { e }" ) from e
+
+
+def is_elf() -> bool:
+    return sys.platform != "darwin" and os.name != "nt"
+
+
 def openmp_flags( cxx: str | None, sysroot: list = () ) -> list:
     """`[ "-fopenmp" ]` when `cxx` compiles, links AND runs a program that uses it, else `[]`. Probed once per
     compiler."""
@@ -331,7 +358,7 @@ class Compiler:
         return ".cpp"
 
     def library_file_name( self, name: str ) -> str:
-        return f"lib{ name }.dylib" if sys.platform == "darwin" else f"lib{ name }.so"
+        return f"lib{ name }{ shared_suffix() }"
 
     def describe( self ) -> list:
         """Lines (`name`, `value`) for `sdot-toolchain`."""
@@ -407,7 +434,7 @@ class HostCxx( Compiler ):
 
     def flags( self ) -> list:
         return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
-                 "-fPIC", "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
+                 *( [] if os.name == "nt" else [ "-fPIC" ] ), "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
                  *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *self.user_flags() ]
 
     @property
@@ -439,7 +466,7 @@ class HostCxx( Compiler ):
         self._require()
         # ELF: bind each INTERNAL reference to the local definition -- no PLT for the calls
         # of a generated library to its own template instantiations.
-        bsymbolic = [] if sys.platform == "darwin" else [ "-Wl,-Bsymbolic" ]
+        bsymbolic = [ "-Wl,-Bsymbolic" ] if is_elf() else [ "-Wl,--export-all-symbols" ] if os.name == "nt" else []
         return {
             "cxx":             ( [ self.cxx, *self.flags(), "{includes}", "{defines}", "{extra}",
                                    "-MMD", "-MF", "{depfile}", "-c", "{in}", "-o", "{out}" ],
@@ -462,11 +489,11 @@ class HostCxx( Compiler ):
         for lib in libraries:
             lib = Path( lib )
             name = lib.name
-            for prefix, suffix in ( ( "lib", ".so" ), ( "lib", ".dylib" ) ):
+            for prefix, suffix in ( ( "lib", ".so" ), ( "lib", ".dylib" ), ( "lib", ".dll" ) ):
                 if name.startswith( prefix ) and name.endswith( suffix ):
                     name = name[ len( prefix ):-len( suffix ) ]
             flags += [ f"-L{ lib.parent }", f"-l{ name }" ]
-        if libraries:
+        if libraries and os.name != "nt":      # Windows has no rpath: `os.add_dll_directory` / preloading, on the Python side
             # next to ITSELF first, then where it was built: a kernel copied into a catalogue loads the runtime that is
             # copied beside it, not the one of the machine that made it; one that stays in the cache has none beside it.
             # (`$$`: this string goes into a ninja file, where `$` introduces a variable; and it is quoted, for the shell
@@ -476,6 +503,9 @@ class HostCxx( Compiler ):
         return " ".join( flags )
 
     def soname_flags( self, out ):
+        if os.name == "nt":
+            # the import library the next link will find as `-l<name>`, even under `-static` ( which only looks for `lib<name>.a` )
+            return f"-Wl,--out-implib,{ Path( out ).with_suffix( '.a' ).as_posix() }"
         return f"-Wl,-install_name,@rpath/{ Path( out ).name }" if sys.platform == "darwin" else ""
 
     def describe( self ):
@@ -626,7 +656,7 @@ class Nvcc( Compiler ):
             raise RuntimeError( "loom: nvcc not found (pip install nvidia-cuda-nvcc-cu13, or LOOM_NVCC=/path/nvcc)" )
         # `.cpp` files keep the host command: a CUDA device compiles both kinds of source
         res = dict( self.host.commands() )
-        bsymbolic = [] if sys.platform == "darwin" else [ "-Xlinker", "-Bsymbolic" ]
+        bsymbolic = [ "-Xlinker", "-Bsymbolic" ] if is_elf() else []
         ccbin = f"-ccbin={ self.host.cxx }"
         # the `.cpp` units are compiled by the host compiler with its OpenMP flag ( `openmp_flags` ): the link must
         # bring the runtime too, which nvcc does not know about -- through the host compiler, as its own link does

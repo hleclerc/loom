@@ -1031,7 +1031,13 @@ class Tensor( Attribute ):
     def stop_gradient( self ):
         """Detached from the gradient tape (`driver.stop_gradient`) -- same values, no derivative
         flows back through them. Used where a quantity is needed for its VALUE only, its derivative
-        being supplied by another (better conditioned) route."""
+        being supplied by another (better conditioned) route.
+
+        A numpy buffer has no tape: its values are kept as they are ( a new tensor on them ). Going through the
+        default framework would turn a CONSTANT into a tracer under `jax.jit`, which nothing can read on the
+        host any more."""
+        if self.storage.framework == "numpy":
+            return self._map( lambda a: a )
         return self._map( self._ops().stop_gradient )
 
     def __eq__( self, o ): return self._binary( o, lambda a, b: a == b )

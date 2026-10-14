@@ -800,6 +800,21 @@ if test( "every_operation_has_both_forms" ):
                  RealTensor[ i ]( [ 0.0, 0.5 ] ).arcsin() )
 
 
+if test( "a_numpy_constant_stays_readable_once_detached" ):
+    # numpy has no tape: detaching a numpy buffer keeps it numpy. Through the default framework, under
+    # `jax.jit`, it became a tracer -- and a geometry read on the host ( the support of an image ) was lost
+    need( "jax" )
+    import jax
+    i = Axis( "i" )
+
+    def body( x ):
+        d = RealTensor[ i ]( numpy.array( [ 1.0, 2.0 ] ) ).stop_gradient()
+        assert isinstance( d.value, numpy.ndarray ), type( d.value )
+        return x
+
+    jax.jit( body )( jax.numpy.ones( 2 ) )
+
+
 if test( "an_aggregate_detaches_entirely" ):
     # `loom.stop_gradient` TAKES THE AGGREGATE: it detaches the tensors and SHARES everything else.
     # Without that, every caller copied its fields one by one -- code that goes stale the day a field

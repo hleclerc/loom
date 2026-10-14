@@ -67,7 +67,8 @@ def shim_include_dir() -> str:
 
 
 def _lib_suffix() -> str:
-    return ".dylib" if sys.platform == "darwin" else ".so"
+    from ..compilation.Compiler import shared_suffix
+    return shared_suffix()
 
 
 _FLAVOR = "pointer"
@@ -107,7 +108,8 @@ def _load( source: str, device, prefix: str, sources, code_name, signature, head
                 include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
             )
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
-        lib = ctypes.CDLL( str( lib_path ) )
+        from ..compilation.Compiler import load_library
+        lib = load_library( lib_path )
         entry = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
         catalogue.publish( lib_path, source, sources, device, code_name, signature, _FLAVOR )

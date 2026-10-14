@@ -6,8 +6,6 @@ class Device:
 
     driver_version: any
 
-    _default_device = None
-
     @staticmethod
     def factory( value ) -> 'Device':
         if isinstance( value, Device ):
@@ -37,19 +35,11 @@ class Device:
 
     @staticmethod
     def default() -> 'Device':
-        if Device._default_device is None:
-            from ..drivers import framework_defaults
-            from .Cpu import Cpu
-            Device._default_device = Cpu()
-            if framework_defaults.ops().available_gpus:
-                # the card is there, but it is only a device for us if we can compile for it
-                # (`device_is_present` asks the compiler): until the CUDA backend is ported, a GPU
-                # machine works on its CPU.
-                from .CudaGpu import CudaGpu
-                gpu = CudaGpu( 0 )
-                if gpu.device_is_present:
-                    Device._default_device = gpu
-        return Device._default_device
+        """The device of the settings in force (`loom.default_device`, else the one the framework picks for itself: its
+        card if we can compile for it). Not remembered here: it follows `loom.default_device`, which `hardware.behave_as`
+        changes for the length of a block (a copy cached from the first call sent a CPU run's tensors to the card)."""
+        from ..drivers import framework_defaults
+        return framework_defaults.device()
 
     @property
     def name( self ) -> str:

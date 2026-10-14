@@ -52,6 +52,7 @@ compiler, the syntax to whoever renders the command -- and neither layer knows t
 from contextlib import suppress
 from pathlib import Path
 import subprocess
+import shlex
 import threading
 import hashlib
 import shutil
@@ -254,6 +255,11 @@ def _to_ninja_syntax( argv ) -> str:
     """An argv template as a ninja command line. Arguments that are not holes
     pass through unchanged."""
     return " ".join( _NINJA_PLACEHOLDERS.get( a, a ) for a in argv )
+
+
+def _shell_quote( arg ) -> str:
+    """One argument of the command ninja runs ( cmd.exe on Windows, sh elsewhere ): a path with a space stays one."""
+    return subprocess.list2cmdline( [ str( arg ) ] ) if os.name == "nt" else shlex.quote( str( arg ) )
 
 
 def _ninja_escape( s: str ) -> str:
@@ -552,7 +558,7 @@ class Build:
             obj, self._rule( self.compiler.rule_for( src ) ), [ src ],
             includes = " ".join( f"-I { _ninja_escape( d ) }" for d in [ *include_first, *roots ] ),
             defines  = " ".join( f"-D{ k }={ v }" if v is not None else f"-D{ k }" for k, v in defines.items() ),
-            extra    = " ".join( extra_flags ),
+            extra    = " ".join( _shell_quote( f ) for f in extra_flags ),
         )
         return obj
 

@@ -130,8 +130,10 @@ def __getattr__(name: str):
         "mutable":         (".calls",                 "mutable"),
         "scratch":         (".calls",                 "scratch"),
         "unbound":         (".calls",                 "unbound"),
-        # the boundary with the user: what a public function returns is in the caller's framework
-        "public":          (".boundary",              "public"),
+        # the boundary with the user: what a package exports returns the caller's framework ( `export_namespace` )
+        "export_namespace": (".boundary",             "export_namespace"),
+        "View":            (".boundary",              "View"),
+        "unwrap":          (".boundary",              "unwrap"),
         "export":          (".boundary",              "export"),
         "universe_of":     (".boundary",              "universe_of"),
     }

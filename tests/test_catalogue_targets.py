@@ -166,6 +166,11 @@ class _FakeLib:
         self.sdot_ffi_entry = f"handler of { Path( path ).parent.name }/{ Path( path ).name }"
 
 
+def _ffi_api_version():
+    from loom.drivers.JaxFfi import ffi_api_version
+    return ffi_api_version()
+
+
 def _publish_env( d ):
     """Publishing without compiling: the runtime library of the build graph is a file of ours."""
     runtime = Path( d ) / "libloom_runtime_test.so"
@@ -187,6 +192,9 @@ if test( "a_collected_kernel_lands_under_the_tag_of_the_architecture_the_device_
                     assert ( where.parent / "libloom_runtime_test.so" ).read_bytes() == b"runtime"   # beside it
         assert sorted( catalogue.index( out ) ) == [ "cpu-x86-64-v3", "cpu-x86-64-v4" ]
         assert catalogue.index( out )[ "cpu-x86-64-v3" ][ k ][ "name" ] == "kernel_a"
+        # a Jax kernel: the XLA FFI API version it was compiled against is recorded beside it
+        recorded = json.loads( ( Path( out ) / "cpu-x86-64-v3" / "xla-ffi.json" ).read_text() )[ "api_version" ]
+        assert tuple( recorded ) == _ffi_api_version()
     assert catalogue.publish( lib, "int a;", [], Cpu() ) is None      # outside `collect`: nothing
 
 
@@ -198,6 +206,7 @@ if test( "the_lookup_looks_in_one_tag_only_and_never_falls_back_on_a_poorer_arch
         for tag in ( "cuda-sm_80", "cuda-sm_70" ):
             ( Path( root ) / tag ).mkdir()
             ( Path( root ) / tag / ( k + suffix ) ).write_bytes( b"" )
+            catalogue._write_ffi_version( Path( root ) / tag, _ffi_api_version() )
         try:
             catalogue._roots[ : ] = [ Path( root ) ]
             assert catalogue.lookup( "s", [], _cuda( 8, 0 ) )[ 1 ] == "handler of cuda-sm_80/" + k + suffix
@@ -219,6 +228,7 @@ if test( "the_catalogue_is_not_consulted_while_it_is_collected" ):
         k = catalogue.key( "s", [] )
         ( Path( root ) / "cuda-sm_70" ).mkdir()
         ( Path( root ) / "cuda-sm_70" / ( k + catalogue.library_suffix() ) ).write_bytes( b"" )
+        catalogue._write_ffi_version( Path( root ) / "cuda-sm_70", _ffi_api_version() )
         try:
             catalogue._roots[ : ] = [ Path( root ) ]
             assert catalogue.lookup( "s", [], _cuda( 7, 0 ) ) is not None
@@ -286,3 +296,24 @@ if test( "the_origin_rpath_survives_the_shell_ninja_runs_the_command_with" ):
         seen = subprocess.run( f"printf '%s\\n' {flags}", shell = True, capture_output = True, text = True ).stdout.split()
         if sys.platform != "darwin":
             assert any( a.endswith( "rpath,$ORIGIN" ) for a in seen ), seen   # not expanded to nothing
+
+
+if test( "a_jaxlib_takes_only_the_jax_kernels_of_an_ffi_api_it_knows" ):
+    # a handler of a newer XLA FFI API than the jaxlib's is refused at registration: the catalogue does not serve it
+    from loom.drivers import JaxFfi
+    saved = JaxFfi.ffi_api_version
+    JaxFfi.ffi_api_version = lambda: ( 0, 3 )
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            tag = Path( d ) / "cpu-armv8-a"
+            tag.mkdir()
+            assert not catalogue._takes_jax_kernels_of( tag )           # no version recorded: not trusted
+            for built, taken in ( ( ( 0, 3 ), True ), ( ( 0, 1 ), True ), ( ( 0, 4 ), False ), ( ( 1, 0 ), False ) ):
+                ( tag / "xla-ffi.json" ).unlink( missing_ok = True )
+                catalogue._write_ffi_version( tag, built )
+                assert catalogue._takes_jax_kernels_of( tag ) == taken, built
+            # merged from several jaxlib: the newest is recorded
+            catalogue._write_ffi_version( tag, ( 0, 2 ) )
+            assert json.loads( ( tag / "xla-ffi.json" ).read_text() )[ "api_version" ] == [ 1, 0 ]
+    finally:
+        JaxFfi.ffi_api_version = saved

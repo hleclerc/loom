@@ -49,6 +49,13 @@ export default defineConfig( {
             { text: 'Compilation and catalogue', link: '/guide/compilation' },
           ]
         },
+        {
+          text: 'Tensors',
+          items: [
+            { text: 'Tensors',                  link: '/guide/tensors' },
+            { text: 'The FFI boundary',         link: '/guide/ffi-internals' },
+          ]
+        },
       ],
 
       '/tutorials/': [

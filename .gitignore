@@ -28,3 +28,9 @@ node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 .pytest_cache/
+
+# the wheel `make wheels` builds
+/dist/
+
+# what only this machine knows ( hosts, paths ): see errand-envs.py
+errand-vars.py

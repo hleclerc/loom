@@ -5,6 +5,7 @@ It is a DIRECTORY, and the directory is the index:
     <root>/<tag>/<key>.so                 one library per kernel
     <root>/<tag>/libloom_runtime_*.so     the runtime they share (found through `$ORIGIN` / `@loader_path`)
     <root>/<tag>/index.json               what is in it, for humans and for `report` -- never read to look up
+    <root>/<tag>/xla-ffi.json             the XLA FFI API version its Jax kernels were compiled against
 
 A TAG is `<kind>-<target>` (`cpu-x86-64-v3`, `cuda-sm_80`): the architecture the kernels of that directory were
 compiled for (`Device.catalogue_tag`). A KEY is the hash of the kernel's source and of its domain sources -- nothing of
@@ -35,6 +36,14 @@ the device really behaves as it (`devices/hardware.py`); a kernel whose source d
 The directory can be fed from several machines (a CPU one, a GPU one): the tags are disjoint, merge the directories.
 It is the wheel that ships it, registered at import time by `register_catalogue`.
 
+= The XLA FFI API version
+
+A Jax kernel declares the XLA FFI API version of the jaxlib headers it was compiled with, and a jaxlib refuses a handler
+of a NEWER version than its own ( an older one is fine ). `xla-ffi.json` records it per tag, when the catalogue is
+collected; a jaxlib older than that does not take the Jax kernels of the tag: they are compiled, as with no catalogue.
+Collect with a jaxlib old enough for the users ( the version does not change the kernels' code, only this check ). The
+Pointer kernels ( Torch, Cupy, Numpy ) do not depend on jaxlib.
+
 `LOOM_KERNELS`: `auto` (catalogue, otherwise compile -- the default), `catalogue` (never compile: an absence is an
 error that names the kernel), `compile` (always compile, ignore the catalogue -- which is what a development checkout
 does anyway, it has none).
@@ -56,6 +65,8 @@ _roots = []           # catalogue directories, in registration order
 _loaded_libs = {}     # path -> CDLL
 _collecting = None    # the directory being fed, or None
 _published = {}       # tag -> { key: { "name", "signature", "owners" } }, of this process
+_published_ffi = {}   # tag -> the XLA FFI API version of the Jax kernels published under it, by this process
+_ffi_of_tag = {}      # tag directory -> the XLA FFI API version it records ( None: none recorded )
 _owner = None         # who is asking for the kernels being compiled right now: a kernel's choice (`choices.directory_name`), or None
 
 
@@ -67,7 +78,8 @@ def policy() -> str:
 
 
 def library_suffix() -> str:
-    return ".dylib" if sys.platform == "darwin" else ".so"
+    from .Compiler import shared_suffix
+    return shared_suffix()
 
 
 def key( source: str, sources, flavor: str = "" ) -> str:
@@ -107,12 +119,32 @@ def lookup( source: str, sources, device, flavor: str = "" ):
     name = key( source, sources, flavor ) + library_suffix()
     for root in _roots:
         path = root / tag / name
-        if path.is_file():
+        if path.is_file() and ( flavor or _takes_jax_kernels_of( root / tag ) ):
             lib = _loaded_libs.get( path )
             if lib is None:
-                lib = _loaded_libs[ path ] = ctypes.CDLL( str( path ) )
+                from .Compiler import load_library
+                lib = _loaded_libs[ path ] = load_library( path )
             return lib, getattr( lib, _HANDLER_SYMBOL )
     return None
+
+
+def serves_jax_kernels( tag: str ) -> bool:
+    """Whether a registered catalogue serves this jaxlib the Jax kernels of `tag` ( see `_takes_jax_kernels_of` )."""
+    return any( _takes_jax_kernels_of( root / tag ) for root in _roots if ( root / tag ).is_dir() )
+
+
+def _takes_jax_kernels_of( tag_dir: Path ) -> bool:
+    """Whether this jaxlib accepts the Jax kernels of `tag_dir`: compiled against an XLA FFI API of the same major and of
+    a minor not newer than its own. A tag that records no version ( collected before it was recorded ) is not trusted."""
+    if tag_dir not in _ffi_of_tag:
+        path = tag_dir / "xla-ffi.json"
+        _ffi_of_tag[ tag_dir ] = tuple( json.loads( path.read_text() )[ "api_version" ] ) if path.is_file() else None
+    built = _ffi_of_tag[ tag_dir ]
+    if built is None:
+        return False
+    from ..drivers.JaxFfi import ffi_api_version
+    here = ffi_api_version()
+    return built[ 0 ] == here[ 0 ] and built[ 1 ] <= here[ 1 ]
 
 
 # ── producing ───────────────────────────────────────────────────────────────
@@ -128,12 +160,15 @@ def collect( out ):
     _collecting = Path( out ).resolve()
     _collecting.mkdir( parents = True, exist_ok = True )
     _published.clear()
+    _published_ffi.clear()
     try:
         yield _collecting
     finally:
         try:
             for tag, entries in _published.items():
                 _write_index( _collecting / tag, entries )
+            for tag, version in _published_ffi.items():
+                _write_ffi_version( _collecting / tag, version )
         finally:
             _collecting = None
 
@@ -167,6 +202,16 @@ def _write_index( tag_dir: Path, entries: dict ):
     tmp.replace( path )
 
 
+def _write_ffi_version( tag_dir: Path, version: tuple ):
+    """Record the XLA FFI API version of the Jax kernels of `tag_dir`. A directory fed by several jaxlib ( merged from
+    several machines ) records the newest: the one a jaxlib must reach to take all of them."""
+    path = tag_dir / "xla-ffi.json"
+    if path.is_file():
+        version = max( version, tuple( json.loads( path.read_text() )[ "api_version" ] ) )
+    path.write_text( json.dumps( { "api_version": list( version ) } ) + "\n" )
+    _ffi_of_tag.pop( tag_dir, None )
+
+
 def publish( library, source: str, sources, device, code_name = None, signature = None, flavor: str = "" ):
     """Copy the library of a kernel that was just compiled into the catalogue being collected, under the tag of the
     architecture the device behaves as. Does nothing outside `collect`. Returns the path it wrote (None if none)."""
@@ -179,6 +224,9 @@ def publish( library, source: str, sources, device, code_name = None, signature 
 
     tag = device.catalogue_tag( target )
     k = key( source, sources, flavor )
+    if not flavor:
+        from ..drivers.JaxFfi import ffi_api_version
+        _published_ffi[ tag ] = max( _published_ffi.get( tag, ( 0, 0 ) ), ffi_api_version() )
     if k in _published.get( tag, {} ):
         _own( _published[ tag ][ k ] )
         return _collecting / tag / ( k + library_suffix() )

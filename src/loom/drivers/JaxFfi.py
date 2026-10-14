@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 
 import ctypes
+import functools
+import re
 import time
 from pathlib import Path
 import sys
@@ -69,7 +71,8 @@ _loaded: dict[ str, ctypes.CDLL ] = {}
 
 
 def _lib_suffix() -> str:
-    return ".dylib" if sys.platform == "darwin" else ".so"
+    from ..compilation.Compiler import shared_suffix
+    return shared_suffix()
 
 
 def _ffi_include_flags() -> list:
@@ -80,6 +83,15 @@ def _ffi_include_flags() -> list:
 
 def ffi_include_dir() -> str:
     return jax.ffi.include_dir()
+
+
+@functools.cache
+def ffi_api_version() -> tuple:
+    """`( major, minor )` of the XLA FFI API of this jaxlib -- the one a handler compiled here declares, and the one this
+    jaxlib accepts at most: a handler of a NEWER minor is refused at registration ( "the handler's API version (0.4) is
+    incompatible with the framework's API version (0.3)" ), an older one is fine. Read from the header jaxlib ships."""
+    text = ( Path( ffi_include_dir() ) / "xla" / "ffi" / "api" / "c_api.h" ).read_text()
+    return tuple( int( re.search( rf"#define XLA_FFI_API_{ part }\s+(\d+)", text ).group( 1 ) ) for part in ( "MAJOR", "MINOR" ) )
 
 
 def render_source( body: str ) -> str:
@@ -114,8 +126,9 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
     # changes the binary as much as the source does, and a GPU architecture belongs there too.
     # The C++ ROOTS belong to it too: the closure of headers is not in the text (ninja knows it), and
     # two checkouts sharing the cache directory must not share a kernel that includes different ones.
+    # The XLA FFI API version too: two environments ( two jaxlib ) sharing it must not share a handler one of them refuses.
     name = prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|{ include_roots() }"
-                                    + headers_key( headers ) )
+                                    + f"|ffi{ ffi_api_version() }" + headers_key( headers ) )
     from ..compilation import catalogue
     if name in _loaded:
         # a catalogue being collected wants it too, if an earlier call compiled it outside the block (no-op otherwise)
@@ -133,7 +146,10 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
         journal.record( name, code_name, signature, "catalogue" )
     else:
         if catalogue.policy() == "catalogue":
-            raise RuntimeError( f"sdot: kernel `{ name }` is not in the catalogue and SDOT_KERNELS=catalogue forbids compiling it" )
+            tag = device.current_catalogue_tag()
+            why = "" if tag is None or catalogue.serves_jax_kernels( tag ) else \
+                f" ( the Jax kernels of `{ tag }` are not for this jaxlib: XLA FFI API { ffi_api_version() }, see `xla-ffi.json` )"
+            raise RuntimeError( f"loom: kernel `{ name }` is not in the catalogue{ why } and LOOM_KERNELS=catalogue forbids compiling it" )
 
         # ONE DIRECTORY PER KERNEL: the generated source, its object and its library live there,
         # and are removed in one go when no longer wanted -- see the docstring of `build.py`. The
@@ -155,7 +171,8 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
                 include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
             )
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
-        lib = ctypes.CDLL( str( lib_path ) )
+        from ..compilation.Compiler import load_library
+        lib = load_library( lib_path )
         handler = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
         catalogue.publish( lib_path, source, sources, device, code_name, signature )

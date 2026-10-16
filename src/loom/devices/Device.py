@@ -142,8 +142,9 @@ class Device:
         return f"{ self.catalogue_kind() }-{ target }"
 
     def current_catalogue_tag( self ):
-        """The one tag this device is served from: the architecture it behaves as. No other is tried -- a poorer
-        architecture's build is another kernel (other code, other results), chosen by `choices.py` or not at all."""
+        """The one tag this device is served from: the architecture it behaves as. No other is tried: a poorer
+        architecture is served only when the device behaves as it -- by a mask, by `choices.py`, or because the
+        catalogues hold nothing better for it ( `loom.prefer_catalogue`, see `catalogue.served_target` )."""
         target = self.catalogue_target()
         return None if target is None else self.catalogue_tag( target )
 

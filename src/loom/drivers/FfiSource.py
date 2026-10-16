@@ -100,6 +100,7 @@ static ffi::Error sdot_ffi_impl( {params} ) {{
     {{
 {body}
     }}
+{after_body}
     return ffi::Error::Success();
 }}
 
@@ -367,9 +368,13 @@ def _render_source( code, ca, device, raw_frame = False ):
     # the headers the arguments ask for (an aggregate names its struct header), then whatever the
     # body itself listed. Collected blind: the call never knows which node brought a header, nor
     # that any of it is hand-written or generated behind the scenes.
+    # the buffers of the `loom.scratch` arguments: the handler takes them from the allocator ( `_scratch_loop` )
+    scratch_nodes = ca.scratch_buffers
     includes = []
-    if code.wants_allocator:
+    if code.wants_allocator or scratch_nodes:
         includes.append( "loom/support/kernels/Scratch.h" )
+    if scratch_nodes:
+        includes.append( "loom/support/kernels/ScratchBuffer.h" )
     for inc in [ i for arg_ca in ca.args.values() for i in arg_ca.cpp_includes() ] + list( code.includes ):
         if inc not in includes:
             includes.append( inc )
@@ -406,7 +411,7 @@ def _render_source( code, ca, device, raw_frame = False ):
     # its place in the signature is that of its `Bind()` clause -- right after the stream, before
     # the arguments. And it is added ONLY if the body asked for it: a kernel's name is the hash
     # of its source, so a clause added unconditionally would recompile the whole repository.
-    scratch = code.wants_allocator
+    scratch = code.wants_allocator or bool( scratch_nodes )
     if scratch and device.cpp_scratch_param():
         params.append( device.cpp_scratch_param() )
 
@@ -433,6 +438,10 @@ def _render_source( code, ca, device, raw_frame = False ):
     # the body dereferences nothing, and it is here that the refusal becomes an error for XLA again.
     queue_decl = device.cpp_queue_decl()
     body = code.code_for( ca )
+    grads_struct, grads_decl, grads_check = _computed_grads( code )
+    if grads_decl and not code.is_handler:
+        # a `per_item` body runs on the device: its flags are set by its host hook, before the launch
+        body = f"    {{\n{ code.forward.computed_grads }\n    }}\n" + body
 
     # THE ASSEMBLED ARGUMENTS -- two structs, because they do not live in the same place.
     #
@@ -465,7 +474,11 @@ def _render_source( code, ca, device, raw_frame = False ):
         # -- a call's work buffers. Two different things bore the same name: this one ALLOCATES
         # during the call, those are already allocated. The name now says which is which.
         if scratch:
-            fields_h.append( ( "allocator", "scratch", True ) )
+            fields_h.append( ( "allocator", "loom_alloc", True ) )
+        # what an ADJOINT says it computes ( see `Kernels.computed_grads` ): written by the body,
+        # host side, read back once it returns
+        if grads_decl:
+            fields_h.append( ( "computed_grads", "computed_grads", True ) )
         for n in names:
             fields_h.append( ( n, n, False ) )
             fields_h.append( ( f"{ n }_io", ca.args[ n ].cpp_io_expr(), False ) )
@@ -493,6 +506,7 @@ def _render_source( code, ca, device, raw_frame = False ):
             f"        return { kargs }{{ " + ", ".join( passed ) + " };\n    }\n};\n" )
 
         body = ( f"    { hargs } args{{ " + ", ".join( e for _, e, _ in fields_h ) + " };\n" ) + body
+    body = grads_decl + body + grads_check
 
     if scratch:
         queue_decl += "\n    " + device.cpp_scratch_decl()
@@ -500,8 +514,10 @@ def _render_source( code, ca, device, raw_frame = False ):
         # `DiagnosticEngine` that `Handler::Call` only consults on a DECODING failure, and returns
         # `nullopt` without it. The message is therefore `Scratch`'s: the size refused, what the call
         # had taken, and what the body said of itself ( `scratch.why` ).
-        body += ( '\n        if ( scratch.failed )\n'
-                  '            return ffi::Error( ffi::ErrorCode::kResourceExhausted, scratch.refusal_message() );' )
+        body += ( '\n        if ( loom_alloc.failed )\n'
+                  '            return ffi::Error( ffi::ErrorCode::kResourceExhausted, loom_alloc.refusal_message() );' )
+    scratch_open, after_body = _scratch_loop( ca, scratch_nodes )
+    decls = [ scratch_open ] + decls if scratch_open else decls
 
     from ..tensor.AbstractAxis import AbstractAxis
     from ..tensor.AbstractAxis import AbstractAxis
@@ -510,7 +526,7 @@ def _render_source( code, ca, device, raw_frame = False ):
         queue_decl    = queue_decl,
         queue_include = device.cpp_queue_include,
         queue_type    = device.cpp_queue_type,
-        preamble      = args_struct + code.preamble_for( ca ),
+        preamble      = grads_struct + args_struct + code.preamble_for( ca ),
         extra_includes = "".join( f'#include "{ inc }"\n' for inc in includes ),
         axis_includes = "".join( f'#include "{ AbstractAxis.cpp_shared_header( n ) }"\n'
                                  for n in ca.axis_names ),
@@ -519,6 +535,7 @@ def _render_source( code, ca, device, raw_frame = False ):
         decls         = "\n".join( decls ),
         seeds         = "\n".join( s for s in seeds if s ),
         body          = body,
+        after_body    = after_body,
         binds         = binds,
         support_defines = '#define LOOM_CUDA_SUPPORT_UNIT 1\n' if cuda_support else '',
         ffi_include   = '#include <loom/support/ffi_body.h>' if shared else '#include "xla/ffi/api/ffi.h"',
@@ -530,6 +547,124 @@ def _render_source( code, ca, device, raw_frame = False ):
     import hashlib
     symbol = "loom_body_" + hashlib.sha256( text.encode() ).hexdigest()[ :20 ]
     return _entry_stub( symbol, inputs, outputs, attrs, raw_frame, bool( stream_param ) ), inputs, outputs, attrs, tuple( sources ), ( text, symbol )
+
+
+def _scratch_loop( ca, scratch_nodes ):
+    """`( opening, closing )` of what runs the body on the SCRATCH buffers -- empty strings for a call that has none.
+
+    The buffers of the `loom.scratch` arguments are the handler's, taken from the call's allocator ( `kernels/ScratchBuffer.h` ),
+    with the extents of `cpp_scratch_dims`: the capacities of the scratch counts start at what Python gave ( `max_<count>` ) and
+    live in `loom_scratch_caps`. The body runs in a loop: after a run, the overflows of those counts ( read back from the error
+    buffer ) grow them, the buffers are replaced -- the old ones given back -- and the body runs again, from the declarations on (
+    the outputs seeded again, the error buffer zeroed). In the call: under a `jit` as eagerly. What overflows that is not the
+    scratch's ( an output's capacity ) stays in the error buffer, for Python."""
+    if not scratch_nodes:
+        return "", ""
+    counts = ca.scratch_counts
+    caps = ", ".join( f"SI( { n._jax_attr_name() } )" for n in counts ) or "SI( 0 )"
+    ids = ", ".join( f"SI( { n.error_id } )" for n in counts ) or "SI( -1 )"
+    lines = [ "    // the buffers of the scratch, the handler's ( `FfiSource._scratch_loop` ): the body runs again on larger ones when they overflow",
+              f"    SI loom_scratch_caps[ { max( len( counts ), 1 ) } ] = {{ { caps } }};",
+              f"    const SI loom_scratch_ids[ { max( len( counts ), 1 ) } ] = {{ { ids } }};" ]
+    lines += [ f"    { n.cpp_scratch_type() } { n.ffi_name };" for n in scratch_nodes ]
+    lines += [ "    for ( int loom_run = 0; ; ++loom_run ) {" ]
+    lines += [ f"    { n.ffi_name } = scratch_buffer( loom_alloc, { n.ffi_name }, {{ { ', '.join( n.cpp_scratch_dims() ) } }} );"
+               for n in scratch_nodes ]
+    lines += [ "    if ( loom_alloc.failed )",
+               "        return ffi::Error( ffi::ErrorCode::kResourceExhausted, loom_alloc.refusal_message() );" ]
+    opening = "\n".join( lines )
+    if counts:
+        closing = ( f"    if ( loom_run >= 24 || ! grow_scratch_capacities( queue, { ca.errors.jax_data_ptr() }, { ca.errors.jax_dim( 0 ) }, "
+                    f"loom_scratch_ids, loom_scratch_caps, { len( counts ) } ) )\n"
+                    "        break;\n    }" )
+    else:
+        closing = "    break;\n    }"
+    return opening, closing
+
+
+def _c_string( text ):
+    return text.replace( "\\", "\\\\" ).replace( '"', '\\"' )
+
+
+def _computed_grads( code ):
+    """`( struct, declaration, check )` -- the C++ of `computed_grads` for an ADJOINT, or three
+    empty strings for a forward.
+
+    One `bool` per pair ( output, input ) of differentiable leaves, `false` until the body says it
+    computes that derivative. The check runs once the body returned: every pair THIS variant is asked
+    for ( `grad_pair_is_asked`, a fact of the types ) must have been set, otherwise the call fails
+    with the list of what is missing -- a gradient without one of its terms is wrong, silently.
+
+    TWO VIEWS OF THE SAME FLAGS:
+
+      * NESTED, where they live: `computed_grads.from_<output>.<input>.<member>`, the output flattened
+        by `_`, the input following its aggregates. It is what lets a piece of C++ that only knows
+        ITS aggregate set its own flags: `dist.set_computed_grads( computed_grads.from_res.distribution )`
+        writes `flags.values = true` with its own member names, whatever the call named it. Every
+        level has `set_all( bool = true )`.
+      * FLAT, for the simple cases: `computed_grads.<input>_from_<output>`, a reference to the nested
+        flag."""
+    pairs = getattr( code, "computed_grads", None )
+    if pairs is None:
+        return "", "", ""
+    struct_name = code.cpp_base_name() + "_computed_grads"
+
+    # the tree: { "from_<output>": { input level: ... { leaf: None } } }
+    tree, nested_of = {}, {}
+    for field, out_name, in_name, _, _ in pairs:
+        path = [ "from_" + out_name.replace( ".", "_" ) ] + in_name.split( "." )
+        if "set_all" in path:
+            raise ValueError( f"computed_grads: `{ in_name }` / `{ out_name }` -- `set_all` is reserved" )
+        node = tree
+        for level in path[ :-1 ]:
+            node = node.setdefault( level, {} )
+            if node is None:
+                raise ValueError( f"computed_grads: `{ '.'.join( path ) }` is both a flag and a level" )
+        if node.get( path[ -1 ], None ) is not None:
+            raise ValueError( f"computed_grads: `{ '.'.join( path ) }` is both a flag and a level" )
+        node[ path[ -1 ] ] = None
+        nested_of[ field ] = ".".join( path )
+
+    def members( node, indent ):
+        pad = " " * indent
+        out = ""
+        for name, sub in node.items():
+            if sub is None:
+                out += f"{ pad }bool { name } = false;\n"
+            else:
+                out += f"{ pad }struct {{\n{ members( sub, indent + 4 ) }{ pad }}} { name };\n"
+        calls = " ".join( f"{ n }{ '' if sub is None else '.set_all( v )' }{ ' = v' if sub is None else '' };"
+                          for n, sub in node.items() )
+        return out + f"{ pad }void set_all( bool v = true ) {{ { calls } }}\n"
+
+    flat = "".join( f"    bool &{ f } = { nested_of[ f ] }; ///< d { o } / d { i }\n"
+                    for f, o, i, _, _ in pairs )
+    struct = ( "#include <loom/support/computed_grads.h>\n"
+               "\n// the derivatives this adjoint vouches for, one flag per pair ( see `Kernels.computed_grads` )\n"
+               f"struct { struct_name } {{\n{ members( tree, 4 ) }"
+               "\n    // the flat names: references to the flags above\n"
+               f"{ flat }"
+               f"\n    { struct_name }() {{}}\n"
+               f"    { struct_name }( const { struct_name } & ) = delete; ///< the flat names refer to OUR flags\n"
+               "};\n" )
+    decl = f"    { struct_name } computed_grads;\n"
+    tests = "".join(
+        f"            if constexpr ( grad_pair_is_asked<decltype( { oc } ), decltype( { ic } )>() )\n"
+        f"                if ( ! computed_grads.{ nested_of[ f ] } )\n"
+        f'                    missing += "\\n    d { o } / d { i }  ( computed_grads.{ nested_of[ f ] } )";\n'
+        for f, o, i, oc, ic in pairs )
+    call_name = code.name[ : -len( "_bwd" ) ] if code.name.endswith( "_bwd" ) else code.name
+    message = ( f"loom.ffi_call( '{ _c_string( call_name ) }' ): the backward does not say it computes these derivatives, "
+                "which this differentiation needs -- the gradient would miss their terms. Set the flags "
+                "( `args.computed_grads.from_<output>.<input> = true`, or the `computed_grads` hook of a "
+                "`per_item` body ) where the derivative is computed:" )
+    check = ( "\n        {\n"
+              "            std::string missing;\n"
+              f"{ tests }"
+              "            if ( ! missing.empty() )\n"
+              f'                return ffi::Error( ffi::ErrorCode::kFailedPrecondition, "{ message }" + missing );\n'
+              "        }" )
+    return struct, decl, check
 
 
 def _resolve_source( path ):

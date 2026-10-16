@@ -71,10 +71,13 @@ def is_cuda_target( target: str ) -> bool:
 def apply_mask( real: str, family: list ) -> str:
     """The target the device behaves as: `real`, or the mask if it is a weaker target of the same family
     (`family` lists the targets of the device's kind, richest first; for CUDA the order is that of the
-    capability). A mask of another family is ignored; an unknown or stronger one is an error."""
+    capability). A mask of another family is ignored; an unknown or stronger one is an error. With no mask, the
+    architecture the catalogues serve this machine as ( `catalogue.served_target`: `real`, or a weaker one when
+    `loom.prefer_catalogue` and they hold no build for `real` )."""
     m = mask()
     if m is None:
-        return real
+        from ..compilation import catalogue
+        return catalogue.served_target( real, family )
     if m not in known_targets():
         raise ValueError( f"LOOM_TARGET={ m !r}: unknown target (expected one of { ', '.join( known_targets() ) })" )
     if is_cuda_target( m ) != is_cuda_target( real ):

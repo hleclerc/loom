@@ -32,6 +32,15 @@ CpuThreadPool::~CpuThreadPool() {
         th.join();
 }
 
+/// One launch at a time: the pool holds ONE job ( `_current_job`, `_nb_remaining`, `_generation` ), and several threads may launch
+/// it at once -- XLA runs independent custom calls of one program on its own threads ( measured: two adjoints of a `jax.jit`
+/// waited forever, each worker having taken the other's generation ). The callers queue here; a job still never relaunches
+/// the pool ( not reentrant ).
+static std::mutex &launch_mutex() {
+    static std::mutex m;
+    return m;
+}
+
 void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )> &job ) {
     if ( nb_threads <= 0 )
         return;
@@ -41,6 +50,7 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
             job( t );
         return;
     }
+    std::lock_guard<std::mutex> launch( launch_mutex() );
     _ensure_workers();
 
     {

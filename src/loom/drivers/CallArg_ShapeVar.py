@@ -74,6 +74,11 @@ class CallArg_ShapeVar( CallArg ):
         # for good if we need none.
         self.error_id = -1
 
+        # the count of a `loom.scratch` argument: its buffer is the handler's ( `CallArgsAnalysis.scratch_paths` ), and its capacity
+        # a variable of the handler, which grows it when the body overflows it ( `scratch_rank`: its slot in `loom_scratch_caps` )
+        self.is_scratch = self.io_category.is_output and call_args_analysis.is_scratch_path( path )
+        self.scratch_rank = -1
+
     # the count itself travels as an FFI attribute, not in the source: all the source reads of it is
     # whether the host KNOWS it (`as_scalar`). Skipped, or the key would change with every value.
     _render_key_skip = CallArg._render_key_skip + ( "_static_count", )
@@ -103,7 +108,7 @@ class CallArg_ShapeVar( CallArg ):
                  and self._static_count is not None )
 
     def is_ffi_buffer( self ):
-        return self.io_category.is_bound and not self.as_scalar
+        return self.io_category.is_bound and not self.as_scalar and not self.is_scratch
 
     def wants_error_id( self ):
         """Whether we need a slot in the error buffer: only a count this call WRITES, and that
@@ -148,6 +153,8 @@ class CallArg_ShapeVar( CallArg ):
             return "SI( -1 )"
         if not self.io_category.is_bound:
             return f"SI( { self.max_bound } )"
+        if self.scratch_rank >= 0:
+            return f"loom_scratch_caps[ { self.scratch_rank } ]"
         return f"SI( { self._jax_attr_name() } )"
 
     def _cpp_shape_type( self ):
@@ -239,6 +246,22 @@ class CallArg_ShapeVar( CallArg ):
     def _jax_buffer_shape( self ):
         # rank-0 count -> a 1-element buffer (avoid xla FFI rank-0 buffers).
         return self.shape if self.shape else [ 1 ]
+
+    # -- a SCRATCH count: allocated by the handler ( `FfiSource._scratch_loop` ) --
+    def cpp_scratch_dims( self ):
+        """its extents: one count per batch item ( an attribute: the batch size ), or one"""
+        from .CallArgsAnalysis import batch_attr_name
+        caa_axes = self.batch_axes
+        res = []
+        for d, e in enumerate( self._jax_buffer_shape() ):
+            if d < len( caa_axes ):
+                res.append( f"std::int64_t( { batch_attr_name( caa_axes[ d ] ) } )" )
+            else:
+                res.append( f"std::int64_t( { int( e ) } )" )
+        return res
+
+    def cpp_scratch_type( self ):
+        return f"ScratchBuffer<std::int32_t, { len( self._jax_buffer_shape() ) }>"
 
     def jax_ffi_type( self ):
         return f"ffi::BufferR{ len( self._jax_buffer_shape() ) }<ffi::S32>"

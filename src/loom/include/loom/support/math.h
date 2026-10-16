@@ -13,10 +13,10 @@
 namespace sdot {
 
 #ifdef __CUDA_ARCH__
-using ::sqrt; using ::fabs; using ::exp; using ::log; using ::atan; using ::atan2; using ::erf;
+using ::sqrt; using ::fabs; using ::exp; using ::log; using ::atan; using ::atan2; using ::erf; using ::erfc;
 using ::sin; using ::cos; using ::pow; using ::floor; using ::ceil; using ::fmin; using ::fmax;
 #else
-using std::sqrt; using std::fabs; using std::exp; using std::log; using std::atan; using std::atan2; using std::erf;
+using std::sqrt; using std::fabs; using std::exp; using std::log; using std::atan; using std::atan2; using std::erf; using std::erfc;
 using std::sin; using std::cos; using std::pow; using std::floor; using std::ceil; using std::fmin; using std::fmax;
 #endif
 

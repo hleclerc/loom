@@ -145,6 +145,11 @@ def kernel_parameters_for( name: str, *, device = None, **extra_keys ) -> Kernel
         got = read( name, extra_keys, real )
         if got is not None:
             use, measured_on = got
+            # no richer than what the catalogues serve this machine as, when it is not itself ( `loom.prefer_catalogue` );
+            # an entry stronger than the machine is still refused below
+            served = device.catalogue_target()
+            if served != real:
+                use = hardware.clip( use, served )
             with hardware.masked( use ):
                 device.catalogue_target()     # refuses a target the machine cannot be (stronger, unknown)
             target, origin = use, "table" if measured_on == real else f"table:{ measured_on }"

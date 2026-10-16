@@ -55,10 +55,10 @@ class CallArgsAnalysis:
 
     def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = (), groups = None, call_name = "", nb_items = None ) -> None:
         self.device = device
-        # SCRATCH outputs: allocated + written like any output in the FORWARD, but the BACKWARD does
-        # NOT receive them as residuals (their forward values are transient per-thread garbage). It
-        # re-allocates a fresh writable buffer under the same name and re-derives what it needs (a
-        # re-sort). Read by `_call_backward`; the forward treats them as ordinary outputs.
+        # SCRATCH: the call's own working buffers. Written like outputs, but they are NOT FFI buffers: the generated handler takes
+        # them from the call's allocator ( `kernels/ScratchBuffer.h` ), grows them and runs the body again when one of their counts
+        # overflows -- in the call, under a `jit` too --, and nothing of them comes back ( no write-back, no residual for the
+        # adjoint, which takes its own ). See `scratch_buffers`, `FfiSource._scratch_loop`.
         self.scratch_paths = list( scratch_attributes )
         # BYTE alignment for the flattened batch dimension of the tensors THIS call lays out (see
         # `PhysicalLayout` / `CallArg_Tensor`): the per-call value if given, else the device default.
@@ -175,6 +175,7 @@ class CallArgsAnalysis:
         # over the nodes, never a push as each was built (see `nodes`, `_name_buffers`).
         self._name_buffers()
         self._number_error_vars()
+        self._link_scratch_dims()
 
         # a path that reached nothing is a typo, and a silent one would turn an output into an
         # unbound attribute (the kernel would write into the void). An exception that suppressed
@@ -204,13 +205,46 @@ class CallArgsAnalysis:
         both are the tree order, so `error_vars[ id ]` is the very node numbered `id`."""
         return [ n for n in self.nodes() if getattr( n, "error_id", -1 ) >= 0 ]
 
+    @property
+    def scratch_buffers( self ):
+        """The buffers of the `loom.scratch` arguments ( tensors and the counts they size on ): not FFI buffers, the handler takes
+        them from the call's allocator ( see `scratch_paths` )."""
+        return [ n for n in self.nodes() if getattr( n, "is_scratch", False ) ]
+
+    @property
+    def scratch_counts( self ):
+        """The counts of the scratch that can overflow ( an error id ): the capacities the handler grows in the call."""
+        return [ n for n in self.scratch_buffers if getattr( n, "error_id", -1 ) >= 0 ]
+
+    def is_scratch_path( self, path ):
+        return any( path == p or path.startswith( p + "." ) for p in self.scratch_paths )
+
+    def _link_scratch_dims( self ):
+        """For each dimension of a scratch tensor, the scratch count whose CAPACITY it is ( `None`: a fixed extent ) -- what the
+        handler resizes when that count grows. Found by evaluating the axes with that capacity moved: a dimension that follows it
+        exactly is its capacity ( `num_word` of `nb_words` ); any other relation is a fixed extent for the call."""
+        counts = self.scratch_counts
+        for k, sv in enumerate( counts ):
+            sv.scratch_rank = k
+        for node in self.scratch_buffers:
+            if not hasattr( node, "dim_counts" ):
+                continue
+            base = node.shape
+            for k, sv in enumerate( counts ):
+                probe = 1_000_003 + 7 * k
+                moved = self.output_shape( node.inst, node.path, { sv.inst: probe } )
+                for d, ( a, b ) in enumerate( zip( base, moved ) ):
+                    if b == probe and a == sv.max_bound:
+                        node.dim_counts[ d ] = k
+
     def _name_buffers( self ):
         """Give every FFI buffer a unique name in the handler's ONE flat namespace (shared with the
         call's arguments): named after the attribute, disambiguated when two collide. Only the
         buffer is renamed -- the struct member keeps the attribute name the C++ body uses. Done in
-        binding order, once the tree is built, so the names are a function of the whole call."""
+        binding order, once the tree is built, so the names are a function of the whole call.
+        The scratch buffers take theirs in the same namespace: the handler declares them under it."""
         named = []
-        for tensor in self.tensors:
+        for tensor in self.tensors + self.scratch_buffers:
             name = _FFI_PREFIX + tensor.name
             while name in named:
                 name += "_"
@@ -293,7 +327,7 @@ class CallArgsAnalysis:
         for node in res.nodes():
             node._rebind_analysis( res )
 
-        for tensor in res.tensors:
+        for tensor in res.tensors + res.scratch_buffers:
             if not tensor.takes_batch_axis():
                 continue
             if tensor.io_category.is_output or tensor.ffi_name in batched_inputs:
@@ -322,7 +356,8 @@ class CallArgsAnalysis:
         allocated from), so any carrier answers the same thing."""
         if axis_name in self.declared_batch_size:
             return self.declared_batch_size[ axis_name ]
-        for node in self.tensors:
+        # ( the scratch carries batch axes too -- the work-items of a sweep -- and may be the only one )
+        for node in self.tensors + self.scratch_buffers:
             names = getattr( node, "axis_names", None ) or []
             if axis_name in names and len( names ) == len( node.shape ):
                 return int( node.shape[ names.index( axis_name ) ] )
@@ -363,8 +398,11 @@ class CallArgsAnalysis:
         """Where the buffers of this call already live -- part of the type of every view we emit."""
         return self.device.cpp_memory_space
 
-    def capacity_of( self, shape_var, path ):
-        """How much to allocate for `shape_var` in this call (see the class docstring)."""
+    def capacity_of( self, shape_var, path, override = None ):
+        """How much to allocate for `shape_var` in this call (see the class docstring). `override`: capacities to take instead
+        ( `_link_scratch_dims` )."""
+        if override and shape_var in override:
+            return override[ shape_var ]
         if shape_var in self.capacities:
             return self.capacities[ shape_var ]
 
@@ -381,11 +419,11 @@ class CallArgsAnalysis:
             f"to the call ( capacities = {{ '...{ shape_var.name }': n }} )"
         )
 
-    def output_shape( self, tensor, path ):
+    def output_shape( self, tensor, path, override = None ):
         """The extents to allocate `tensor` with: its axes, evaluated on the capacities."""
         res = []
         for axis in tensor.axes:
-            res += axis.capacity_list( lambda sv: self.capacity_of( sv, path ) )
+            res += axis.capacity_list( lambda sv: self.capacity_of( sv, path, override ) )
         return res
 
     def io_category( self, path, has_value ) -> IoCategory:

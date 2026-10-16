@@ -50,8 +50,14 @@ class CallArg_Tensor( CallArg ):
         self._caa = weakref.ref( call_args_analysis )
         self.memory_space = self._memory_space_of( inst, call_args_analysis )
 
+        self.path = path
+        # a buffer of a `loom.scratch` argument: the handler takes it from the call's allocator ( see `CallArgsAnalysis.scratch_paths` );
+        # `dim_counts[ d ]`: the scratch count ( its rank in `scratch_counts` ) whose capacity dimension `d` is, or `None`
+        self.is_scratch = self.io_category.is_output and call_args_analysis.is_scratch_path( path )
         if self.io_category.is_output:
             self.shape = [ int( s ) for s in call_args_analysis.output_shape( inst, path ) ]
+            if self.is_scratch:
+                self.dim_counts = [ None ] * len( self.shape )
         elif self.io_category.is_input:
             self.shape = [ int( s ) for s in inst.capacity ]
         else:
@@ -145,7 +151,7 @@ class CallArg_Tensor( CallArg ):
     @property
     def layout( self ):
         from ..tensor.PhysicalLayout import PhysicalLayout
-        if self._has_vmap:
+        if self._has_vmap or self.is_scratch:                   # ( a scratch is ours: contiguous, at any size )
             return PhysicalLayout.contiguous( self.shape )      # vmap owns its leading dim -> contiguous
         if self.io_category.is_output:
             # the device's physical-order POLICY (None by default -> logical order, identity layout);
@@ -163,7 +169,7 @@ class CallArg_Tensor( CallArg ):
     # which still spells its axes in its type (`Tuple<_num_cut, _dim>`) -- so `cpp_axis_names`
     # answers them either way, and the analysis folds those in for their `DEFINE_AXIS`.
     def is_ffi_buffer( self ):
-        return self.io_category.is_bound
+        return self.io_category.is_bound and not self.is_scratch
 
     @property
     def is_differentiable( self ) -> bool:
@@ -185,6 +191,8 @@ class CallArg_Tensor( CallArg ):
         self.shape = [ int( size ) ] + self.shape
         self._dim_ct_extent = [ None ] + self._dim_ct_extent
         self._has_vmap = True   # the framework owns this leading dim -> stay contiguous (see `layout`)
+        if self.is_scratch:
+            self.dim_counts = [ None ] + self.dim_counts
 
     def batch_dim_expr( self, name ):
         # whether we can serve an extent at all depends on what backs us (a fill cannot: it has only
@@ -233,7 +241,11 @@ class CallArg_Tensor( CallArg ):
     def jax_attrs( self ):
         """The extents and byte strides of a buffer whose layout is NOT the identity (a device that aligns its batches): the
         view spells them, and they depend on the sizes of this call. They cross as attributes, not as literals of the source --
-        otherwise every size would be another kernel, and a catalogue could only serve the sizes it was built with."""
+        otherwise every size would be another kernel, and a catalogue could only serve the sizes it was built with.
+        A SCRATCH buffer passes the extents the handler allocates it with ( those that follow no scratch count, see `cpp_scratch_dims` )."""
+        if self.is_scratch:
+            return [ ( self._scratch_dim_attr( d ), "int64_t", int( e ) ) for d, e in enumerate( self.shape )
+                     if self._scratch_dim_kind( d ) == "attr" ]
         if self.runtime_strides or not self.io_category.is_bound or getattr( self.inst, "is_fill", False ) or self.layout.is_identity:
             return []
         res = [ ( self._layout_attr_name( "ext", d ), "int64_t", int( e ) )
@@ -241,6 +253,40 @@ class CallArg_Tensor( CallArg ):
         res += [ ( self._layout_attr_name( "stride", d ), "int64_t", int( s ) )
                  for d, s in enumerate( self.layout.strides_bytes( self.itemsize ) ) ]
         return res
+
+    # -- a SCRATCH buffer: allocated by the handler ( `FfiSource._scratch_loop` ) --
+    def _scratch_dim_attr( self, d ):
+        return f"sdim_{ self.ffi_name }_{ d }"
+
+    def _scratch_dim_kind( self, d ):
+        if self.dim_counts[ d ] is not None:
+            return "count"
+        if self._dim_ct_extent[ d ] is not None:
+            return "ct"
+        caa = self._caa()
+        if caa is not None and self.axis_names[ d ] in caa.batch_axes:
+            return "batch"
+        return "attr"
+
+    def cpp_scratch_dims( self ):
+        """The extents the handler allocates this buffer with, as C++ expressions: the capacity of a scratch count ( which grows
+        in the call ), a compile-time extent, a batch size, or an attribute -- never a literal that changes with the call."""
+        from .CallArgsAnalysis import batch_attr_name
+        res = []
+        for d in range( len( self.shape ) ):
+            kind = self._scratch_dim_kind( d )
+            if kind == "count":
+                res.append( f"std::int64_t( loom_scratch_caps[ { self.dim_counts[ d ] } ] )" )
+            elif kind == "ct":
+                res.append( f"std::int64_t( { self._dim_ct_extent[ d ] } )" )
+            elif kind == "batch":
+                res.append( f"std::int64_t( { batch_attr_name( self.axis_names[ d ] ) } )" )
+            else:
+                res.append( f"std::int64_t( { self._scratch_dim_attr( d ) } )" )
+        return res
+
+    def cpp_scratch_type( self ):
+        return f"ScratchBuffer<{ self.cpp_scalar() }, { len( self.shape ) }>"
 
     def cpp_runtime_strides_type( self ):
         # the strides this buffer carries, read at run time: one byte stride per dimension, never a literal

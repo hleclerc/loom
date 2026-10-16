@@ -366,6 +366,14 @@ void render_bwd( auto &&queue, auto &&batch_axes, auto &&args ) {
     // A NULL COTANGENT HAS NOTHING TO PROPAGATE: the test is on the LAUNCH, not inside the body --
     // a symbolic zero is another TYPE, with neither a domain nor values to read.
     constexpr int D = SPLATS_NB_DIMS( args );
+
+    // what this adjoint computes ( loom checks every pair a differentiation asks for ): the image
+    // with respect to each real member of the splats
+    args.computed_grads.splats_centers_from_image   = true;
+    args.computed_grads.splats_cov_inv_from_image   = true;
+    args.computed_grads.splats_colors_from_image    = true;
+    args.computed_grads.splats_opacities_from_image = true;
+
     if constexpr ( ! DECAYED_TYPE_OF( args.grad_of_outputs.image )::surely_null )
         queue.run_parallel( RenderPixelBwd<D,SIDE>{},
                             batch_axes + args.grad_of_outputs.image.domain(

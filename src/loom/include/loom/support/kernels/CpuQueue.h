@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CpuKernelMemorySpace.h"
+#include <cstring>
 #include "CpuHostMemorySpace.h"
 #include "../common_macros.h"
 #include "../common_types.h"
@@ -82,6 +83,13 @@ struct CpuQueue {
 
     CpuThreadPool *pool;
 };
+
+/// `nb_bytes` read back to the host, once what the queue launched is done ( a CPU queue's launches are: they wait on their
+/// event ) -- what a handler reads of its own buffers between two launches ( the error buffer, `ScratchBuffer.h` )
+inline void read_to_host( const CpuQueue &, void *dst, const void *src, SI nb_bytes ) {
+    std::memcpy( dst, src, std::size_t( nb_bytes ) );
+}
+
 
 /// Transfer cost (seconds per byte) to make a source area accessible from this
 /// execution context. A context knows the areas it can reach (not the reverse),

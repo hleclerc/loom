@@ -163,6 +163,8 @@ def _make_op( code, ca, device, prefix, item = None ):
                 # nothing differentiates through a kernel that has no backward: its outputs are constants
                 ctx.mark_non_differentiable( *outs )
                 return
+            # an unused output's cotangent stays `None` -- what tells `backward` it is not asked for
+            ctx.set_materialize_grads( False )
             ctx.perturbed = [ bool( needs ) and t.is_differentiable for needs, t in zip( ctx.needs_input_grad, inputs ) ]
             ctx.save_for_backward( *values, *outs )
             ctx.mark_non_differentiable( *[ o for o in outs if not o.is_floating_point() ] )
@@ -171,8 +173,11 @@ def _make_op( code, ca, device, prefix, item = None ):
         def backward( ctx, *cotangents ):
             saved = ctx.saved_tensors
             full_in, out_values = saved[ : len( inputs ) ], saved[ len( inputs ) : ]
-            # a cotangent the autograd did not materialize is a zero of the output's shape
-            cotangents = [ torch.zeros_like( o ) if c is None else c for c, o in zip( cotangents, out_values ) ]
+            # a cotangent the autograd did not materialize is Torch's SYMBOLIC zero ( a `meta` tensor,
+            # see `TorchOperations.is_symbolic_zero` ), as Jax hands its `SymbolicZero`: it lowers to a
+            # `ZeroTensor`, so the adjoint is not asked for its pairs ( `computed_grads` ) and no
+            # buffer of zeros is moved
+            cotangents = [ torch.empty_like( o, device = "meta" ) if c is None else c for c, o in zip( cotangents, out_values ) ]
             if item is None:
                 grads = call_backward( code, ca, device, prefix, inputs, outputs,
                                        full_in, out_values, ctx.perturbed, cotangents, _run_op )

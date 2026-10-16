@@ -87,7 +87,11 @@ struct GpuScope {
     Context                  context;
     std::vector<std::pair<void *,std::size_t>> blocks;
 
-    explicit GpuScope( const XLA_FFI_CallFrame *f ) : frame( f ) { context.allocate = &GpuScope::allocate; context.allocate_context = this; }
+    explicit GpuScope( const XLA_FFI_CallFrame *f ) : frame( f ) {
+        context.allocate = &GpuScope::allocate;
+        context.free = &GpuScope::free;
+        context.allocate_context = this;
+    }
     GpuScope( const GpuScope & ) = delete;
 
     XLA_FFI_Error *begin() {
@@ -123,22 +127,36 @@ struct GpuScope {
         return a.data;
     }
 
-    ~GpuScope() {
-        for ( auto &b : blocks ) {
-            XLA_FFI_DeviceMemory_Free_Args a;
-            a.struct_size = XLA_FFI_DeviceMemory_Free_Args_STRUCT_SIZE;
-            a.extension_start = nullptr;
-            a.ctx = frame->ctx;
-            a.size = b.second;
-            a.data = b.first;
-            if ( XLA_FFI_Error *e = frame->api->XLA_FFI_DeviceMemory_Free( &a ) ) {
-                XLA_FFI_Error_Destroy_Args d;
-                d.struct_size = XLA_FFI_Error_Destroy_Args_STRUCT_SIZE;
-                d.extension_start = nullptr;
-                d.error = e;
-                frame->api->XLA_FFI_Error_Destroy( &d );
+    /// a block given back before the call returns ( a scratch replaced by a larger one ): XLA frees it now, and the scope forgets it
+    static void free( void *self, void *ptr ) {
+        GpuScope *g = static_cast<GpuScope *>( self );
+        for ( std::size_t i = 0; i < g->blocks.size(); ++i )
+            if ( g->blocks[ i ].first == ptr ) {
+                g->free_block( g->blocks[ i ] );
+                g->blocks.erase( g->blocks.begin() + i );
+                return;
             }
+    }
+
+    void free_block( const std::pair<void *,std::size_t> &b ) {
+        XLA_FFI_DeviceMemory_Free_Args a;
+        a.struct_size = XLA_FFI_DeviceMemory_Free_Args_STRUCT_SIZE;
+        a.extension_start = nullptr;
+        a.ctx = frame->ctx;
+        a.size = b.second;
+        a.data = b.first;
+        if ( XLA_FFI_Error *e = frame->api->XLA_FFI_DeviceMemory_Free( &a ) ) {
+            XLA_FFI_Error_Destroy_Args d;
+            d.struct_size = XLA_FFI_Error_Destroy_Args_STRUCT_SIZE;
+            d.extension_start = nullptr;
+            d.error = e;
+            frame->api->XLA_FFI_Error_Destroy( &d );
         }
+    }
+
+    ~GpuScope() {
+        for ( auto &b : blocks )
+            free_block( b );
     }
 };
 

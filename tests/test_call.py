@@ -459,7 +459,7 @@ if test( "der" ):
     backward = FfiCode.per_item( """
             if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
                 grad_of_inputs.inp = 2 * grad_of_outputs.out;
-        """ )
+        """, computed_grads = "computed_grads.inp_from_out = true;" )
     def fwd_of( x ):
         inp = RealTensor()
         inp.set( x )
@@ -492,7 +492,7 @@ if test( "der_symbolic_zero" ):
         """ )
     backward = FfiCode.per_item( """
             grad_of_inputs.inp = 2 * grad_of_outputs.out_a + 3 * grad_of_outputs.out_b;
-        """ )
+        """, computed_grads = "computed_grads.inp_from_out_a = computed_grads.inp_from_out_b = true;" )
     def only_a( x ):
         inp = RealTensor()
         inp.set( x )
@@ -534,7 +534,7 @@ if test( "der_non_perturbed" ):
                 grad_of_inputs.inp = grad_of_outputs.out;
             if constexpr ( grad_of_inputs.bias.is_valid )
                 grad_of_inputs.bias = grad_of_outputs.out;
-        """ )
+        """, computed_grads = "computed_grads.inp_from_out = computed_grads.bias_from_out = true;" )
     def loss( x ):
         inp = RealTensor()
         inp.set( x )
@@ -558,6 +558,60 @@ if test( "der_non_perturbed" ):
     assert float( g ) == 1
 
 
+if test( "der_computed_grads" ):
+    need( "grad" )
+    # the adjoint SAYS which derivatives it computes: one flag per pair ( output, input ),
+    # `computed_grads.<input>_from_<output>`, false until the C++ sets it. Every pair a
+    # differentiation asks for ( a cotangent that is not a symbolic zero, times an input that is
+    # perturbed ) must be set, otherwise the call fails -- instead of a gradient without its term.
+    #
+    # Here the adjoint only knows d out_a / d inp. A loss on `out_a` passes ( `out_b`'s cotangent is a
+    # symbolic zero, the pair is not asked ); a loss on `out_b` is refused.
+    forward = FfiCode.per_item( code = """
+            outputs.out_a = 2 * inputs.inp;
+            outputs.out_b = 3 * inputs.inp;
+        """ )
+    per_item = FfiCode.per_item( """
+            if constexpr ( grad_of_inputs.inp.is_valid )
+                grad_of_inputs.inp = 2 * grad_of_outputs.out_a;
+        """, computed_grads = "computed_grads.inp_from_out_a = true;" )
+    # a handler sets them in `args`, where it chooses what it computes -- in an `if`, here
+    handler = FfiCode( code = """
+        namespace {
+            struct Bwd {
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    args.grad_of_inputs.inp( coords ) = 2 * args.grad_of_outputs.out_a( coords );
+                }
+            };
+
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                if constexpr ( DECAYED_TYPE_OF( args.grad_of_inputs.inp )::is_valid ) {
+                    queue.run_parallel( Bwd(), args.grad_of_inputs.inp.domain(), args, batch_axes );
+                    args.computed_grads.from_out_a.inp = true;   // the nested view, same flag
+                }
+            }
+        }
+    """ )
+    def run( bwd, which ):
+        def loss( x ):
+            inp = RealTensor()
+            inp.set( x )
+            out_a, out_b = loom.ffi_call( "test_call_der_cg", forward, bwd,
+                                          out_a = loom.out( RealTensor() ),
+                                          out_b = loom.out( RealTensor() ), inp = inp )
+            return ( out_a if which == "a" else out_b ).raw
+        return float( loom.grad( loss )( loom.array( 5.0 ) ) )
+
+    for bwd in ( per_item, handler ):
+        assert run( bwd, "a" ) == 2
+        try:
+            run( bwd, "b" )
+        except Exception as e:
+            assert "d out_b / d inp" in str( e ) and "computed_grads.from_out_b.inp" in str( e ), str( e )
+        else:
+            raise AssertionError( "expected a refusal" )
+
+
 if test( "der_shape_var" ):
     need( "grad" )
     # a differentiable tensor whose shape is driven by a `ShapeVar`: the gradient of an input is
@@ -575,7 +629,7 @@ if test( "der_shape_var" ):
                 grad_of_inputs.vec( n = 0 ) = 2 * grad_of_outputs.out( n = 0 );
                 grad_of_inputs.vec( n = 1 ) = 3 * grad_of_outputs.out( n = 1 );
             }
-        """ )
+        """, computed_grads = "computed_grads.vec_from_out = true;" )
     def loss( x ):
         vec = RealTensor[ ax ]()
         vec.set( x )            # length-2 vector -> `n` is solved to 2 from the data
@@ -616,7 +670,7 @@ if test( "der_aggregate" ):
                 grad_of_inputs.cell.data( n = 0 ) = 2 * grad_of_outputs.out;
                 grad_of_inputs.cell.data( n = 1 ) = 3 * grad_of_outputs.out;
             }
-        """ )
+        """, computed_grads = "computed_grads.cell_data_from_out = true;" )
     def loss( x ):
         cell = Vec( nn = 2 )
         cell.data = x           # a float INPUT member

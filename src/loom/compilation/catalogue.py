@@ -11,10 +11,21 @@ A TAG is `<kind>-<target>` (`cpu-x86-64-v3`, `cuda-sm_80`): the architecture the
 compiled for (`Device.catalogue_tag`). A KEY is the hash of the kernel's source and of its domain sources -- nothing of
 the machine, of the compiler or of the architecture, so it is the same for everyone. To serve a kernel, a machine
 looks in ONE tag: the architecture its device behaves as for that kernel (`Device.current_catalogue_tag`) -- a `stat`,
-no index to load, and only the libraries that are used get loaded. There is NO fall back on a poorer architecture: its
-build is another code (other results, other timings), and which architecture a kernel runs as is a decision that
-belongs to `choices.py`, taken from measurements. A kernel the tag does not hold is compiled (`auto`) or missing
-(`catalogue`).
+no index to load, and only the libraries that are used get loaded. A kernel the tag does not hold is compiled (`auto`)
+or missing (`catalogue`).
+
+= A machine the catalogue was not built for
+
+The catalogue holds the architectures of the hardware it was collected on. A machine of another one ( a newer card, a
+CPU with AVX-512 when no such machine built it ) is served anyway when `loom.prefer_catalogue` is True ( the default ):
+with no `LOOM_TARGET` mask, it BEHAVES as the richest architecture the catalogues hold that it can run
+( `served_target` ), exactly as a masked run of the collection did -- the Python that asks the device sees that
+architecture, so it generates the same sources, and finds them. A little slower maybe ( no code for what the machine
+has more ), nothing to compile. For a card: a build of the same generation ( its cubin runs on a newer minor ), or
+else the poorest build of the catalogue, which carries its PTX for the driver to compile ( once, it keeps it ).
+
+With `loom.prefer_catalogue = False`, a machine is served only from the build of its own architecture, and compiles
+what is missing for it: the fastest code, after a compilation.
 
 = Producing it: run the program, on every hardware
 
@@ -67,6 +78,7 @@ _collecting = None    # the directory being fed, or None
 _published = {}       # tag -> { key: { "name", "signature", "owners" } }, of this process
 _published_ffi = {}   # tag -> the XLA FFI API version of the Jax kernels published under it, by this process
 _ffi_of_tag = {}      # tag directory -> the XLA FFI API version it records ( None: none recorded )
+_tags_of_roots = ( None, [] )   # ( the roots, their tags ): `registered_tags`, listed again only when the roots change
 _owner = None         # who is asking for the kernels being compiled right now: a kernel's choice (`choices.directory_name`), or None
 
 
@@ -104,7 +116,35 @@ def register_catalogue( root ):
 
 
 def registered_tags() -> list:
-    return sorted( { d.name for root in _roots for d in root.iterdir() if d.is_dir() } )
+    global _tags_of_roots
+    if _tags_of_roots[ 0 ] != tuple( _roots ):
+        _tags_of_roots = ( tuple( _roots ), sorted( { d.name for root in _roots for d in root.iterdir() if d.is_dir() } ) )
+    return _tags_of_roots[ 1 ]
+
+
+def served_target( real: str, family: list ) -> str:
+    """The architecture a machine of architecture `real` behaves as when no mask says otherwise ( see "A machine the
+    catalogue was not built for" above ): `real`, unless `loom.prefer_catalogue` and the registered catalogues hold
+    builds of its kind but none for `real` -- then the richest one they hold that it runs. `family`: the CPU levels,
+    richest first ( unused for a card ). Not while a catalogue is collected, nor under `LOOM_KERNELS=compile`."""
+    import loom
+    if not getattr( loom, "prefer_catalogue", True ) or _collecting is not None or not _roots or policy() == "compile":
+        return real
+    from ..devices.hardware import is_cuda_target, sm_number
+    kind = "cuda" if is_cuda_target( real ) else "cpu"
+    held = [ t.split( "-", 1 )[ 1 ] for t in registered_tags() if t.startswith( kind + "-" ) ]
+    if real in held or not held:
+        return real
+    if kind == "cuda":
+        lower = [ t for t in held if is_cuda_target( t ) and sm_number( t ) <= sm_number( real ) ]
+        same = [ t for t in lower if sm_number( t )[ 0 ] == sm_number( real )[ 0 ] ]
+        if same:
+            return max( same, key = sm_number )             # its cubin runs on a newer minor
+        return min( lower, key = sm_number ) if lower else real     # the poorest build carries the PTX
+    if real not in family:
+        return real
+    poorer = [ t for t in family[ family.index( real ): ] if t in held ]
+    return poorer[ 0 ] if poorer else real
 
 
 def lookup( source: str, sources, device, flavor: str = "" ):

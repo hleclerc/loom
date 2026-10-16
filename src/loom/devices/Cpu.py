@@ -38,7 +38,7 @@ class Cpu( Device ):
     # the handler runs on the host and its buffers ARE host memory: `aligned_alloc`,
     # freed on exit. Nothing to receive from XLA, hence neither a parameter nor a `Bind()` clause.
     def cpp_scratch_decl( self ):
-        return f"auto scratch = host_scratch<{ self.cpp_memory_space }>();"
+        return f"auto loom_alloc = host_scratch<{ self.cpp_memory_space }>();"
 
     @property
     def compiler( self ):

@@ -29,6 +29,15 @@ from . import env as _env
 default_framework = None
 default_device    = None
 
+# ---- WHERE the kernels come from ----------------------------------------------------------------------------
+#     loom.prefer_catalogue = True          ( the default; `LOOM_PREFER_CATALOGUE=0` for False )
+#
+# True: a machine the registered catalogues hold no build for ( a newer card, a richer CPU ) behaves as the richest
+# architecture they hold that it can run, and is served from there -- nothing to compile, a little slower maybe.
+# False: it is served only from the build of its own architecture, and compiles for it what is missing.
+# See `compilation/catalogue.py`. Set it before the first kernel: what a kernel decided is kept.
+prefer_catalogue = _env.flag( "PREFER_CATALOGUE", True )
+
 
 class _Loom( _types.ModuleType ):
     """The module, watching its defaults: a name is checked the moment it is assigned (a typo fails THERE, not

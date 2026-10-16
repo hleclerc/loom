@@ -53,6 +53,13 @@ if test( "nvcc_builds_a_cubin_alone_or_with_its_ptx" ):
         del os.environ[ "LOOM_CUDA_PTX" ]
     assert "-gencode=arch=compute_80,code=sm_80" in cubin and "-arch=sm_80" not in cubin
 
+    # while a catalogue is collected: the cubin alone, except for the poorest architecture ( what a newer generation is served )
+    from loom.compilation.Compiler import nvcc_supported_archs, find_nvcc
+    poorest = nvcc_supported_archs( find_nvcc() )[ -1 ]
+    with tempfile.TemporaryDirectory() as out, catalogue.collect( out ):
+        assert not Nvcc( arch = "sm_80" if poorest != "sm_80" else "sm_86" ).ptx
+        assert Nvcc( arch = poorest ).ptx
+
 
 # ── the mask: a machine pretends to be a weaker one ──────────────────────────────────────────────────
 X86 = [ "x86-64-v4", "x86-64-v3", "x86-64-v2", "x86-64" ]
@@ -199,8 +206,11 @@ if test( "a_collected_kernel_lands_under_the_tag_of_the_architecture_the_device_
 
 
 if test( "the_lookup_looks_in_one_tag_only_and_never_falls_back_on_a_poorer_architecture" ):
+    # `loom.prefer_catalogue = False`: a card is served from the build of its own architecture, or not at all
+    import loom
     with tempfile.TemporaryDirectory() as root, _publish_env( root ):
-        saved = list( catalogue._roots ), dict( catalogue._loaded_libs )
+        saved = list( catalogue._roots ), dict( catalogue._loaded_libs ), loom.prefer_catalogue
+        loom.prefer_catalogue = False
         suffix = catalogue.library_suffix()
         k = catalogue.key( "s", [] )
         for tag in ( "cuda-sm_80", "cuda-sm_70" ):
@@ -220,6 +230,41 @@ if test( "the_lookup_looks_in_one_tag_only_and_never_falls_back_on_a_poorer_arch
             os.environ.pop( "LOOM_KERNELS", None )
             catalogue._roots[ : ] = saved[ 0 ]
             catalogue._loaded_libs.clear(); catalogue._loaded_libs.update( saved[ 1 ] )
+            loom.prefer_catalogue = saved[ 2 ]
+
+
+if test( "a_machine_the_catalogue_was_not_built_for_behaves_as_the_richest_build_it_runs" ):
+    # `loom.prefer_catalogue = True` ( the default ): nothing to compile for the common cases
+    import loom
+    with tempfile.TemporaryDirectory() as root:
+        saved = list( catalogue._roots ), loom.prefer_catalogue
+        for tag in ( "cuda-sm_80", "cuda-sm_75", "cpu-x86-64-v3", "cpu-x86-64" ):
+            ( Path( root ) / tag ).mkdir()
+        try:
+            catalogue._roots[ : ] = [ Path( root ) ]
+            loom.prefer_catalogue = True
+            assert _cuda( 8, 0 ).sm_arch == "sm_80"                       # its own build
+            assert _cuda( 8, 6 ).sm_arch == "sm_80"                       # the same generation: the cubin runs
+            assert _cuda( 9, 0 ).sm_arch == "sm_75"                       # another one: the poorest build, its PTX
+            assert _cuda( 12, 0 ).current_catalogue_tag() == "cuda-sm_75"
+            assert _cuda( 7, 0 ).sm_arch == "sm_70"                       # nothing it can run: itself, compiled
+            with _x86( "x86-64-v4" ):
+                assert Cpu().catalogue_target() == "x86-64-v3" and Cpu().real_target() == "x86-64-v4"
+            with _x86( "x86-64-v2" ):
+                assert Cpu().catalogue_target() == "x86-64"
+            with _x86( "x86-64-v4", mask = "x86-64-v2" ):                  # a mask is obeyed
+                assert Cpu().catalogue_target() == "x86-64-v2"
+            os.environ[ "LOOM_KERNELS" ] = "compile"                        # compiling anyway: for this machine
+            assert _cuda( 8, 6 ).sm_arch == "sm_86"
+            del os.environ[ "LOOM_KERNELS" ]
+            loom.prefer_catalogue = False
+            assert _cuda( 8, 6 ).sm_arch == "sm_86"
+            with _x86( "x86-64-v4" ):
+                assert Cpu().catalogue_target() == "x86-64-v4"
+        finally:
+            os.environ.pop( "LOOM_KERNELS", None )
+            catalogue._roots[ : ] = saved[ 0 ]
+            loom.prefer_catalogue = saved[ 1 ]
 
 
 if test( "the_catalogue_is_not_consulted_while_it_is_collected" ):

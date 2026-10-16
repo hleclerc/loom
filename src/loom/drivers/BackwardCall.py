@@ -93,6 +93,12 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
                      for j, t in enumerate( outputs ) if hasattr( t, "inst" ) }
     perturbed_of = { id( t.inst ): perturbed[ k ] for k, t in enumerate( inputs ) if hasattr( t, "inst" ) }
 
+    # every differentiable leaf, as `( name the body sees, C++ expression of its gradient )`: the
+    # rows and the columns of `computed_grads` ( see `Kernels.computed_grads` ). ALL of them, not
+    # only those this differentiation asks for: the struct is the same for every variant, and it
+    # is the C++ that tells, from the types ( `surely_null`, `is_valid` ), which pairs are asked.
+    grad_outputs, grad_inputs = [], []
+
     output_paths = []
     grad_obj_of = {}   # id( primal input leaf ) -> its gradient tensor (a backward output)
 
@@ -108,13 +114,13 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
         obj.batch_axes = list( getattr( inst, "batch_axes", [] ) )
         return obj
 
-    def _build( inst, path ):
+    def _build( inst, path, name, cpp ):
         """`( residual, grad )` mirroring `inst` (a tensor or a whole aggregate subtree)."""
         if _is_agg( inst ):
             residual, grad = _blank( inst ), _blank( inst )
             for mname in annotations( type( inst ) ):
                 member = get_attribute( mname, inst )
-                r, g = _build( member, f"{ path }.{ mname }" )
+                r, g = _build( member, f"{ path }.{ mname }", f"{ name }.{ mname }", f"{ cpp }.{ mname }" )
                 residual.__dict__[ mname ], grad.__dict__[ mname ] = r, g
             return residual, grad
 
@@ -144,11 +150,15 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
             # framework's symbolic zero (a `ZeroTensor`): both just get stored, `_grad_tensor` /
             # `is_symbolic_zero` tell them apart, no special case here.
             grad = _grad_tensor( inst, cotangent_of.get( id( inst ) ) )
+            grad_outputs.append( ( name, cpp ) )
         elif io == "input" and inst.is_differentiable and perturbed_of.get( id( inst ), False ):
             grad = Tensor.like( inst )
             output_paths.append( path )
             grad_obj_of[ id( inst ) ] = grad
+            grad_inputs.append( ( name, cpp ) )
         else:
+            if io == "input" and inst.is_differentiable:
+                grad_inputs.append( ( name, cpp ) )
             grad = Tensor.like( inst )   # non-differentiable or non-perturbed -> a NoneTensor
         return residual, grad
 
@@ -210,7 +220,8 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
             _place( group, member, path, _fresh_scratch( arg.inst ) )
             output_paths.append( path )
             continue
-        residual, grad = _build( arg.inst, "grad_for_" + path )
+        residual, grad = _build( arg.inst, "grad_for_" + path, member,
+                                 "grad_for_" + path if group is None else f"grad_of_{ group }.{ member }" )
         _place( group, member, path, residual )
         _place( None if group is None else f"grad_of_{ group }", member,
                 "grad_for_" + path, grad )
@@ -218,7 +229,7 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
     # the backward runs as an ordinary forward whose body is our backward one -- of the same kind,
     # so a `FfiCode` scaffolds it over the residual+gradient arguments just as it did the
     # forward over the primal ones.
-    bwd_kernel = code.for_backward()
+    bwd_kernel = code.for_backward( computed_grads_pairs( grad_outputs, grad_inputs ) )
     # the forward's `input_exceptions` hold for the backward too: they say what THIS KERNEL has no
     # business touching (`Cell.measure` never reads the H-representation), and the adjoint of a body
     # that does not read something does not read it either. Passing them on is not an optimization
@@ -242,9 +253,14 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
     # with its axes. A domain declared by the call ( `nb_items` ) is carried by no object -- that is
     # its whole point -- so it only crosses over if we pass it. Without that the adjoint ran on ONE
     # item and returned a wrong derivative, without any warning.
+    # THE SCRATCH IS THE HANDLER'S in the backward too ( `CallArgsAnalysis.scratch_paths` ): taken from the allocator, grown in the
+    # call. Its counts start at the capacities the forward was given -- no buffer of Python's carries them any more.
+    scratch_capacities = { n.path: n.max_bound for n in ca.scratch_counts }
     bwd_ca = CallArgsAnalysis( kwargs, device, output_attributes = output_paths,
+                               capacities = scratch_capacities,
                                output_attribute_exceptions = bwd_output_exceptions,
                                input_exceptions = bwd_input_exceptions,
+                               scratch_attributes = ca.scratch_paths,
                                groups = bwd_groups, call_name = prefix + "bwd",
                                nb_items = next( iter( ca.declared_batch_size.values() ), None ) )
     bwd_outputs, bwd_results = run( bwd_kernel, bwd_ca, device, prefix + "bwd_" )
@@ -262,3 +278,23 @@ def call_backward( code, ca, device, prefix, inputs, outputs,
             # `float0`/dtype ceremony needed, and it is well-defined for an integer primal too.
             grads.append( None )
     return tuple( grads )
+
+
+def computed_grads_pairs( grad_outputs, grad_inputs ):
+    """`( flat field, output name, input name, C++ of the cotangent, C++ of the input gradient )`, one
+    per pair of differentiable leaves: what `Kernels.computed_grads` renders ( see
+    `FfiSource._computed_grads` for the two views, flat and nested ). The flat field is
+    `<input>_from_<output>`, aggregate levels flattened by `_` -- two pairs that would give the same
+    identifier are refused, rather than one silently answering for the other."""
+    res, seen = [], {}
+    for out_name, out_cpp in grad_outputs:
+        for in_name, in_cpp in grad_inputs:
+            field = f"{ in_name }_from_{ out_name }".replace( ".", "_" )
+            if field in seen and seen[ field ] != ( out_name, in_name ):
+                raise ValueError( f"computed_grads: `d { seen[ field ][ 0 ] } / d { seen[ field ][ 1 ] }` and "
+                                  f"`d { out_name } / d { in_name }` would both be named `{ field }` -- "
+                                  "rename an argument" )
+            if field not in seen:
+                seen[ field ] = ( out_name, in_name )
+                res.append( ( field, out_name, in_name, out_cpp, in_cpp ) )
+    return tuple( res )

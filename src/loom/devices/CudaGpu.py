@@ -109,12 +109,17 @@ class CudaGpu( Device ):
         return ".Ctx<ffi::ScratchAllocator>()"
 
     def cpp_scratch_decl( self ):
-        return ( f"Scratch<{ self.cpp_memory_space }> scratch(\n"
+        return ( f"Scratch<{ self.cpp_memory_space }> loom_alloc(\n"
                  "        []( void *ctx, SI nb_bytes, SI alignment ) -> void * {\n"
                  "            auto res = reinterpret_cast<ffi::ScratchAllocator *>( ctx )->Allocate( nb_bytes, alignment );\n"
                  "            return res.has_value() ? *res : nullptr;\n"
                  "        },\n"
-                 "        &xla_scratch\n"
+                 "        &xla_scratch, nullptr,\n"
+                 # a block given back before the end of the call ( a scratch replaced by a larger one ), when the pool can
+                 "        []( void *ctx, void *ptr ) {\n"
+                 "            []( auto *a, void *p ) { if constexpr ( requires { a->Free( p ); } ) a->Free( p ); }\n"
+                 "                ( reinterpret_cast<ffi::ScratchAllocator *>( ctx ), ptr );\n"
+                 "        }\n"
                  "    );" )
 
     def catalogue_kind( self ):

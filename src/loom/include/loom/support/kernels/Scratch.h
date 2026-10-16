@@ -55,9 +55,12 @@ struct Scratch {
     using        AllocFn     = void *( * )( void *ctx, SI nb_bytes, SI alignment );
     /// `nullptr` when the pool frees by itself at the end of the call ( XLA's case ).
     using        FreeFn      = void ( * )( void *ctx, void *ptr );
+    /// gives a block back BEFORE the end of the call ( `release` ): what a buffer that is replaced by a larger one frees, so that
+    /// the call does not hold both. `nullptr` when the pool cannot: the block then stays taken until the call returns.
+    using        ReleaseFn   = void ( * )( void *ctx, void *ptr );
 
-    /* */        Scratch     ( AllocFn alloc_fn, void *ctx = nullptr, FreeFn free_fn = nullptr )
-                                : alloc_fn( alloc_fn ), free_fn( free_fn ), ctx( ctx ) {}
+    /* */        Scratch     ( AllocFn alloc_fn, void *ctx = nullptr, FreeFn free_fn = nullptr, ReleaseFn release_fn = nullptr )
+                                : alloc_fn( alloc_fn ), free_fn( free_fn ), release_fn( release_fn ), ctx( ctx ) {}
     /* */        Scratch     ( const Scratch & ) = delete;
     Scratch&     operator=   ( const Scratch & ) = delete;
 
@@ -90,6 +93,43 @@ struct Scratch {
         return tensor_view<MemorySpace>( ptr, tuple( n ) );
     }
 
+    /// the same as a raw pointer ( `nullptr` on a refusal, recorded as for `view` ): what the buffers of a `loom.scratch`
+    /// argument are taken from, in the generated handler ( `ScratchBuffer.h` )
+    template<class T>
+    T           *raw         ( SI n ) {
+        if ( n <= 0 )
+            return nullptr;
+        T *ptr = nullptr;
+        const SI nb_bytes = n * SI( sizeof( T ) );
+        if ( ! failed )
+            ptr = reinterpret_cast<T *>( alloc_fn( ctx, nb_bytes, SI( alignof( T ) ) ) );
+        if ( ptr == nullptr ) {
+            if ( ! failed )
+                refused = nb_bytes;
+            failed = true;
+        } else {
+            taken += nb_bytes;
+            if ( free_fn )
+                blocks.push_back( ptr );
+        }
+        return ptr;
+    }
+
+    /// gives `ptr` ( a block of `raw` or `view` ) back now, when the pool can ( see `ReleaseFn` ); a no-op otherwise
+    void         release     ( void *ptr ) {
+        if ( ! ptr )
+            return;
+        if ( free_fn ) {
+            for ( std::size_t i = 0; i < blocks.size(); ++i )
+                if ( blocks[ i ] == ptr ) {
+                    free_fn( ctx, ptr );
+                    blocks.erase( blocks.begin() + i );
+                    return;
+                }
+        } else if ( release_fn )
+            release_fn( ctx, ptr );
+    }
+
     /// what the handler reports when `failed`
     std::string  refusal_message() const {
         auto mb = []( SI b ) { return std::to_string( ( b + ( 1 << 19 ) ) >> 20 ) + " MB"; };
@@ -103,6 +143,7 @@ struct Scratch {
 
     AllocFn             alloc_fn;
     FreeFn              free_fn;
+    ReleaseFn           release_fn;
     void               *ctx;
     std::vector<void *> blocks;          ///< empty when the pool frees by itself
     bool                failed = false; ///< at least one refusal ( read by the generated handler )

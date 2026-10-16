@@ -17,7 +17,7 @@
 
 namespace loom_raw {
 
-enum class ErrorCode { kResourceExhausted };
+enum class ErrorCode { kResourceExhausted, kFailedPrecondition };
 
 /// the result of a handler: success, or a message ( copied: the caller's string may be a temporary )
 struct Error {
@@ -42,6 +42,8 @@ struct Context {
     void *stream = nullptr;
     void *( *allocate )( void *context, std::size_t nb_bytes, std::size_t alignment ) = nullptr;
     void *allocate_context = nullptr;
+    /// gives a block back before the call returns ( a scratch replaced by a larger one, `ScratchBuffer.h` ); null when the pool cannot
+    void  ( *free )( void *context, void *ptr ) = nullptr;
 };
 
 /// `xla::ffi::ScratchAllocator`, over a `Context`
@@ -53,6 +55,11 @@ public:
         if ( ! p )
             return std::nullopt;
         return p;
+    }
+    /// `ptr` given back now, when the pool can ( a no-op otherwise: the block is then freed when the call returns )
+    void Free( void *ptr ) {
+        if ( c && c->free && ptr )
+            c->free( c->allocate_context, ptr );
     }
 private:
     const Context *c;

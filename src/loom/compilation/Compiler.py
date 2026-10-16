@@ -608,8 +608,10 @@ class Nvcc( Compiler ):
         self.nvcc = find_nvcc()
         self.arch = arch or env.var( "CUDA_ARCH" ) or "native"
         # `LOOM_CUDA_PTX=0`: the cubin alone, no PTX for the driver to compile for a newer card. A catalogue
-        # build per architecture has no use for it, except in its poorest target (which is the fallback).
-        self.ptx = env.flag( "CUDA_PTX", not catalogue.collecting() )
+        # build per architecture has no use for it, except in its poorest target: what a card of another
+        # generation, newer than every build, is served ( `catalogue.served_target` ).
+        poorest = nvcc_supported_archs( self.nvcc )[ -1: ]
+        self.ptx = env.flag( "CUDA_PTX", not catalogue.collecting() or [ self.arch ] == list( poorest ) )
         # `LOOM_CUDART=shared`: the kernel needs `libcudart.so` beside the framework's instead of carrying its own copy (static: ~300 kB
         # of host code per kernel)
         self.cudart = env.var( "CUDART", "shared" if catalogue.collecting() else "static" )

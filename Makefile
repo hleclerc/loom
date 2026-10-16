@@ -43,8 +43,8 @@ anim:
 
 
 # ── the wheel ──
-# loom-ffi is pure Python, so it is built anywhere. The sdot wheels pin this exact version: they are released together,
-# by sdot-ffi ( `make local_wheels` there writes both ), which is where the version is bumped.
+# loom-ffi is pure Python, so it is built anywhere. The sdot wheels require at least this version: they are released together,
+# by sdot-ffi ( `scripts/wheels.py --version next` there writes both ), which is where the version is bumped.
 
 PYTHON ?= python
 

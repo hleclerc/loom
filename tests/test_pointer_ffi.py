@@ -167,7 +167,7 @@ if test( "a_gradient_goes_through_a_vmap" ):
     backward = FfiCode.per_item( """
             if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
                 grad_of_inputs.inp( batch_index ) = 2 * grad_of_outputs.out( batch_index );
-        """ )
+        """, computed_grads = "computed_grads.inp_from_out = true;" )
 
     def fwd_of( x ):
         inp = RealTensor()
@@ -209,7 +209,7 @@ if test( "a_gradient_goes_through_a_jit" ):
     backward = FfiCode.per_item( """
             if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
                 grad_of_inputs.inp = 2 * grad_of_outputs.out;
-        """ )
+        """, computed_grads = "computed_grads.inp_from_out = true;" )
 
     def loss( x ):
         inp = RealTensor()

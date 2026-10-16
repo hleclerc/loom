@@ -92,6 +92,17 @@ class FfiCode( AbstractFfiCode ):
     when the body was per item and could not express a pre-pass; a body that is the
     handler no longer needs it.
 
+    `computed_grads` -- for a `per_item` BACKWARD only -- is the host C++ that says which
+    derivatives the body computes ( see `Kernels.computed_grads` ): `per_item` bodies run on the
+    device, where no host flag can be set, so they set them here, in the handler, before the launch:
+
+        FfiCode.per_item( body, computed_grads = "computed_grads.inp_from_out = true;" )
+
+    A handler written by hand sets them itself, in `args.computed_grads`. Two views of the same
+    flags: flat, `<input>_from_<output>`, and nested, `from_<output>.<input>.<member>` -- the one to
+    hand to a piece of C++ that only knows its own aggregate ( `dist.computed_grads(
+    computed_grads.from_res.distribution )` sets `flags.values` under its own member names ).
+
     `allocator = True` makes it bind XLA's allocator, hence `args.allocator.view<T>( n )` in the body: memory
     sized at execution time, at a size that only the kernel knows, under `jit` as in
     eager. See `support/kernels/Scratch.h` and `tests/test_scratch_gpu.py`.
@@ -115,7 +126,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  allocator = False, _scaffold = False ) -> None:
+                  allocator = False, computed_grads = "", _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -123,6 +134,9 @@ class FfiCode( AbstractFfiCode ):
         if local_mem_elems and not group_size:
             raise ValueError( "FfiCode: `local_mem_elems` without `group_size` -- there is no "
                               "work-group to share it" )
+        if computed_grads and not _scaffold:
+            raise ValueError( "FfiCode: `computed_grads` is for a `per_item` body -- a handler sets "
+                              "`args.computed_grads.from_<output>.<input> = true` itself" )
         if ( max_nb_threads or group_size or local_mem_elems ) and not _scaffold:
             raise ValueError( "FfiCode: a launch geometry (`max_nb_threads`, "
                               "`group_size`, `local_mem_elems`) is made of METHODS of the generated "
@@ -160,6 +174,7 @@ class FfiCode( AbstractFfiCode ):
         self.includes = tuple( includes )
         self.include_roots = tuple( include_roots )
         self.allocator = bool( allocator )
+        self.computed_grads = computed_grads
         self._scaffold = _scaffold
 
         # the bodies of the hooks that `run_parallel` detects on the functor -- C++, not
@@ -321,6 +336,7 @@ class FfiCode( AbstractFfiCode ):
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, self.include_roots or other.include_roots,
                        allocator = self.allocator,
+                       computed_grads = self.computed_grads,
                        _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
@@ -337,7 +353,7 @@ class Kernels( AbstractFfiCode ):
     because these last three questions are about the PAIR, not about one kernel.
     """
 
-    def __init__( self, name, forward, backward = None, batch_axes = () ) -> None:
+    def __init__( self, name, forward, backward = None, batch_axes = (), computed_grads = None ) -> None:
         if not name:
             raise ValueError( "loom.ffi_call: `name` is required -- it names the functors, prefixes "
                               "the compiled target and groups the compilation journal" )
@@ -345,6 +361,12 @@ class Kernels( AbstractFfiCode ):
         self.forward = forward
         self.backward = backward
         self.batch_axes = tuple( batch_axes )
+        # ON AN ADJOINT ( see `for_backward` ): one flag per pair ( output, input ) of differentiable
+        # leaves, `false` until the C++ says it computes that derivative. A tuple of
+        # `( flat field, output, input, C++ of the cotangent, C++ of the input gradient )`, from
+        # `BackwardCall.computed_grads_pairs`. `None` on a forward -- an adjoint with no pair still
+        # has the ( empty ) struct, so a body that names `args.computed_grads` compiles.
+        self.computed_grads = None if computed_grads is None else tuple( computed_grads )
 
     # what the source rendering reads on us, directly
     @property
@@ -389,16 +411,17 @@ class Kernels( AbstractFfiCode ):
         """Having an adjoint is what makes a call differentiable."""
         return self.backward is not None
 
-    def for_backward( self ):
+    def for_backward( self, computed_grads ):
         """The adjoint, ready to be launched like an ordinary forward: the backward becomes the kernel
         of a pair with no backward, under a derived name. It keeps OUR batch axes -- what a `vmap`
-        added to the call holds for both directions."""
+        added to the call holds for both directions. `computed_grads`: the pairs it must vouch for."""
         return Kernels( self.name + "_bwd", self.backward.inheriting( self.forward ),
-                        batch_axes = self.batch_axes )
+                        batch_axes = self.batch_axes, computed_grads = computed_grads )
 
     def with_batch_axis( self ):
         """The same pair, mapped over one more axis: what a `vmap` launches. The axis name is
         derived from the number already present, so a nested `vmap` gets a fresh one, in a
         deterministic way."""
         name = f"vmap_{ len( self.batch_axes ) }"
-        return name, Kernels( self.name, self.forward, self.backward, self.batch_axes + ( name, ) )
+        return name, Kernels( self.name, self.forward, self.backward, self.batch_axes + ( name, ),
+                              self.computed_grads )

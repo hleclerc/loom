@@ -112,6 +112,13 @@ inline const Machine &cuda_machine() {
 
 inline Machine CudaQueue::machine() const { return cuda_machine(); }
 
+/// `nb_bytes` read back to the host, once what the queue's stream holds is done -- what a handler reads of its own buffers between two
+/// launches ( the error buffer, `ScratchBuffer.h` )
+inline void read_to_host( const CudaQueue &queue, void *dst, const void *src, SI nb_bytes ) {
+    cuda_check( cudaMemcpyAsync( dst, src, size_t( nb_bytes ), cudaMemcpyDeviceToHost, queue.stream ), "memcpy device -> host ( read_to_host )" );
+    cuda_check( cudaStreamSynchronize( queue.stream ), "sync ( read_to_host )" );
+}
+
 // ── host re-read / write of an element in global memory (`Ptr::value` / `Ptr::set`) ──
 template<class T>
 void copy( Ptr<T,CpuHostMemorySpace> dst, Ptr<const T,CudaGlobalMemorySpace> src, SI n ) {

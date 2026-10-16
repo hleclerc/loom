@@ -134,6 +134,9 @@ _backward = loom.FfiCode(
 
             void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
                 queue.run_parallel( OneStepAdjoint(), args.inputs.temperature.domain(), args, batch_axes );
+                // what loom checks a differentiation against: the step with respect to the grid it
+                // read -- not `coef`, whose flag stays false ( see the `static_assert` above )
+                args.computed_grads.temperature_from_temperature = true;
             }
         }
     """,

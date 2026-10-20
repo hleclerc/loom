@@ -79,7 +79,7 @@ UTP T_T HD auto DTP::operator[]( T &&index ) const {
 UTP T_TA HD void DTP::set( T &&index, A &&value ) {
     if constexpr ( HAS_STATIC_VALUE( index ) ) { // requires { DECAYED_TYPE_OF( index )::value; }
         if constexpr ( DECAYED_TYPE_OF( index )::value )
-            tail[ index - Ct<int,1>() ].set( FORWARD( value ) );
+            tail.set( index - Ct<int,1>(), FORWARD( value ) );
         else
             head = FORWARD( value );
     } else {
@@ -88,7 +88,7 @@ UTP T_TA HD void DTP::set( T &&index, A &&value ) {
         else if ( index == 0 )
             head = FORWARD( value );
         else
-            tail[ index - 1_c ].set( value );
+            tail.set( index - 1, FORWARD( value ) );
     }
 }
 

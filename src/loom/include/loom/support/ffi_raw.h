@@ -26,12 +26,15 @@ namespace loom_raw {
 static_assert( F32::dtype == XLA_FFI_DataType_F32 && F64::dtype == XLA_FFI_DataType_F64 && S32::dtype == XLA_FFI_DataType_S32
             && S64::dtype == XLA_FFI_DataType_S64 && U32::dtype == XLA_FFI_DataType_U32 && U64::dtype == XLA_FFI_DataType_U64 );
 
+/// ( the body returns its message only, `FfiSource._BODY_EXPORT`: a refusal of the scratch pool, `Scratch::refusal_message`, is
+/// told by its words, and is RESOURCE_EXHAUSTED as with the typed API -- what XLA's own pool says when it is full )
 inline XLA_FFI_Error *fail( const XLA_FFI_CallFrame *f, const char *message ) {
+    static constexpr char refusal[] = "loom: the scratch pool refused ";
     XLA_FFI_Error_Create_Args a;
     a.struct_size = XLA_FFI_Error_Create_Args_STRUCT_SIZE;
     a.extension_start = nullptr;
     a.message = message;
-    a.errc = XLA_FFI_Error_Code_INVALID_ARGUMENT;
+    a.errc = std::strncmp( message, refusal, sizeof( refusal ) - 1 ) == 0 ? XLA_FFI_Error_Code_RESOURCE_EXHAUSTED : XLA_FFI_Error_Code_INVALID_ARGUMENT;
     return f->api->XLA_FFI_Error_Create( &a );
 }
 

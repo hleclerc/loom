@@ -27,6 +27,12 @@ else the poorest build of the catalogue, which carries its PTX for the driver to
 With `loom.prefer_catalogue = False`, a machine is served only from the build of its own architecture, and compiles
 what is missing for it: the fastest code, after a compilation.
 
+This is also how a level the catalogue does not ship is covered ( `build( levels = ... )` drops the CPU levels that gain
+too little ), and the one way: never by taking a kernel file of another tag. Behaving as the level means that everything
+sees it -- the Python that lays out the buffers of a call ( padding, scratch, `nb_threads` ), the kernel found in the
+catalogue, the one compiled on the spot when it is missing ( `HostCxx`: that level, not `-march=native` ), and the
+backward of the call. The layout of the data and the kernel that reads it always agree.
+
 = Producing it: run the program, on every hardware
 
 There is nothing to record and nothing to compile elsewhere. The program that exercises the kernels (for `sdot`,
@@ -396,7 +402,7 @@ def prune( root, choices_roots = None ) -> list:
     return removed
 
 
-def build( package: str, usage ):
+def build( package: str, usage, targets = None, levels = None, tolerance: float = 0.05 ):
     """Build the catalogue of `package` -- all of it, from a script of a few lines:
 
         # my_package/catalogue.py
@@ -410,7 +416,21 @@ def build( package: str, usage ):
     `usage` is run on every piece of hardware present, as every architecture it can behave as; the kernels it compiles are
     collected into `<package>/precompiled-kernels/`. The loops of `loom.bench_loop` are timed on every run, which decides
     which architecture each kernel runs as (`<package>/choices/`); what no machine will ask for is then removed (`prune`).
-    Nothing to configure: the places are the package's, the hardware is what is present."""
+    The places are the package's, the hardware is what is present.
+
+    `targets` (`[ "x86-64-v3", "x86-64" ]`) narrows the architectures built for: a family that has some in the list is built
+    only for those, the others ( `armv8-a`, the cards ) are untouched. A machine of a level left out is served by the
+    richest level held that it runs ( `served_target` ): fewer, bigger steps, a smaller wheel.
+
+    `levels` ( `{ name: workload }`, or a function that returns it, called only when there is something to decide ) lets the MEASURE decide which CPU levels are worth shipping: each workload is timed at
+    every candidate level first ( see `choose_levels` ), and `usage` is then collected at the levels kept only. The poorest
+    level is always kept; a richer one only if it gains more than `tolerance` ( the threshold of the per-kernel choices
+    too ) over the last one kept, and more than the noise of the timings -- in doubt, it is not shipped. The decision is
+    written in `<out>/levels.json`, and a later build into the same directory ( the next framework of a wheel build )
+    reuses it, so that every framework ships the same levels. Without `levels`, every candidate is shipped.
+
+    A level that is not shipped is never replaced file by file: the machine BEHAVES as the level kept ( `served_target` ),
+    the Python that lays out the buffers of a call ( padding, scratch ) as well as the kernel that reads them."""
     from importlib.util import find_spec
     from ..devices import hardware
     from ..benchmark import Measurements
@@ -418,15 +438,22 @@ def build( package: str, usage ):
     from .. import choices
     base = Path( find_spec( package ).submodule_search_locations[ 0 ] )
     out, chosen = base / "precompiled-kernels", base / "choices"
-    runs = hardware.runs()
+    from ..devices.Device import Device
+    families = { kind: Device.factory( kind ).catalogue_targets() for kind in { r.device.split( ":" )[ 0 ] for r in hardware.runs() } }
+    if targets is not None:
+        families = { kind: [ t for t in family if t in targets ] if set( family ) & set( targets ) else family
+                     for kind, family in families.items() }
+    runs = [ r for r in hardware.runs() if r.target in families[ r.device.split( ":" )[ 0 ] ] ]
+    if levels:
+        kept = _levels_of( out, [ r for r in runs if r.device == "cpu" ], levels, tolerance )
+        runs = [ r for r in runs if r.device != "cpu" or r.target in kept ]
     if not runs:
         raise SystemExit( f"loom: no hardware to build the catalogue of { package } on" )
-    from ..devices.Device import Device
-    for kind in sorted( { r.device.split( ":" )[ 0 ] for r in runs } ):
-        missing = hardware.uncovered( runs, kind, Device.factory( kind ).catalogue_targets() )
+    for kind in sorted( families ):
+        missing = hardware.uncovered( runs, kind, families[ kind ] )
         if missing:
             print( f"{ kind }: no hardware here can run { ', '.join( missing ) } -- no build for them" )
-    with Measurements( chosen ) as measures, collect( out ):
+    with Measurements( chosen, tolerance = tolerance ) as measures, collect( out ):
         for run in runs:
             print( f"== { run.device } as { run.target }", flush = True )
             try:
@@ -441,3 +468,101 @@ def build( package: str, usage ):
     removed = prune( out, [ chosen ] )
     print( f"pruned { len( removed ) } kernel(s) that no machine will ask for" )
     print( report( out ) )
+
+
+# ── which CPU levels are worth shipping ─────────────────────────────────────
+
+def choose_levels( times: dict, spreads: dict, tolerance: float ) -> list:
+    """The levels to ship, richest first. `times`: `{ level: { workload: seconds } }`, richest first, the poorest level
+    last ( it is always kept ); `spreads`: the same shape, the uncertainty of each time ( the dispersion of the runs,
+    `benchmark.spread`, over the square root of their number: what is known of a median, not of one run ).
+
+    Going up from the poorest, a level is kept when the mean of its times relative to the last level kept gains more
+    than `tolerance`, and more than the noise of the two ( the mean of the larger spread of each workload ): in doubt,
+    a level is not shipped."""
+    order = list( times )[ ::-1 ]
+    kept = [ order[ 0 ] ]
+    for level in order[ 1: ]:
+        ref = kept[ -1 ]
+        names = [ w for w in times[ level ] if w in times[ ref ] ]
+        if not names:
+            continue
+        ratio = sum( times[ level ][ w ] / times[ ref ][ w ] for w in names ) / len( names )
+        noise = sum( max( spreads[ level ][ w ], spreads[ ref ][ w ] ) for w in names ) / len( names )
+        gain = 1 / ratio - 1
+        if gain > tolerance and gain > noise:
+            kept.append( level )
+    return kept[ ::-1 ]
+
+
+def _levels_of( out, runs, workloads: dict, tolerance: float ) -> list:
+    """The CPU levels of `runs` to collect: those of `<out>/levels.json` when an earlier build into `out` decided for
+    the same candidates, otherwise measured now ( `choose_levels` ) and written there."""
+    candidates = [ r.target for r in runs ]
+    if len( candidates ) < 2:
+        return candidates
+    path = Path( out ) / "levels.json"
+    if path.is_file():
+        try:
+            known = json.loads( path.read_text() ).get( "cpu", {} )
+        except ValueError:
+            known = {}
+        if sorted( known.get( "candidates", [] ) ) == sorted( candidates ):
+            print( f"cpu levels: { ', '.join( known[ 'kept' ] ) } ( decided by an earlier build, { path } )", flush = True )
+            return known[ "kept" ]
+    times, spreads = _time_levels( runs, workloads() if callable( workloads ) else workloads )
+    if not any( times.values() ):
+        # nothing could be timed ( a framework without the CPU ): nothing to decide, and nothing written for the others
+        return candidates
+    kept = choose_levels( times, spreads, tolerance )
+    base = candidates[ -1 ]
+    print( f"cpu levels: time relative to { base } ( < 1: faster ), spread in brackets", flush = True )
+    for name in times[ base ]:
+        print( f"  { name:30s}" + "".join( f"  { l } { times[ l ][ name ] / times[ base ][ name ]:.3f} ( { spreads[ l ][ name ]:.2f} )"
+                                         for l in candidates if name in times[ l ] ), flush = True )
+    print( f"cpu levels kept: { ', '.join( kept ) } ( a gain over { tolerance:.0%} and over the noise )", flush = True )
+    from ..benchmark import machine_description
+    Path( out ).mkdir( parents = True, exist_ok = True )
+    path.write_text( json.dumps( { "cpu": { "candidates": candidates, "kept": kept, "tolerance": tolerance,
+                                            "seconds": times, "spreads": spreads, **machine_description() } }, indent = 1 ) + "\n" )
+    return kept
+
+
+def _time_levels( runs, workloads: dict ):
+    """`( times, spreads )` of every workload at every level of `runs` ( `choose_levels` ), compiled on the spot for
+    each: the catalogue is not consulted. A workload the device does not take is left out."""
+    from ..devices import hardware
+    from ..drivers.Framework import UnsupportedDevice
+    from ..benchmark import spread, synchronise
+    import statistics
+    import time
+    times, spreads = {}, {}
+    previous = os.environ.get( env.PREFIX + "KERNELS" )
+    env.set_var( "KERNELS", "compile" )
+    try:
+        for run in runs:
+            times[ run.target ], spreads[ run.target ] = {}, {}
+            with hardware.behave_as( run ):
+                for name, workload in workloads.items():
+                    try:
+                        synchronise( workload() )               # compilation, caches
+                    except UnsupportedDevice:
+                        continue
+                    ts = []
+                    while len( ts ) < 5 or ( sum( ts ) < 0.5 and len( ts ) < 200 ):
+                        t = time.perf_counter()
+                        synchronise( workload() )
+                        ts.append( time.perf_counter() - t )
+                    times[ run.target ][ name ] = statistics.median( ts )
+                    spreads[ run.target ][ name ] = spread( ts ) / len( ts ) ** 0.5
+                    print( f"   { run.target:12s} { name:30s} { times[ run.target ][ name ] * 1e3:9.2f} ms", flush = True )
+    finally:
+        if previous is None:
+            os.environ.pop( env.PREFIX + "KERNELS", None )
+        else:
+            os.environ[ env.PREFIX + "KERNELS" ] = previous
+    # a workload missing at some level is left out everywhere: the levels are compared on the same work
+    common = set.intersection( *( set( t ) for t in times.values() ) ) if times else set()
+    times = { l: { w: s for w, s in t.items() if w in common } for l, t in times.items() }
+    spreads = { l: { w: s for w, s in t.items() if w in common } for l, t in spreads.items() }
+    return times, spreads

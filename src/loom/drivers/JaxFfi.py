@@ -35,6 +35,7 @@ import numpy
 
 from ..compilation import build_dir, include_roots, journal, make_library
 from ..compilation.build import KernelDir
+from ..devices import hardware
 from ..compilation.generated_headers import headers_key, write_overlay
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
@@ -209,12 +210,17 @@ def _make_op( code, ca, device, prefix ):
 
     The derived call is an op of the same kind, so a nested `vmap` just derives again.
     """
+    # Jax may trace the op again later ( a `lax.scan` being differentiated, a `vmap` ): it is then compiled and
+    # looked up as the architecture of the call that made it ( `kernel_parameters_for` ), not the machine's
+    level = hardware.kernel_mask()
+
     @jax.custom_batching.custom_vmap
     def op( *arrays ):
-        source, _, outputs, attrs, sources, headers = _render_call( code, ca, device, raw = True )
-        target = compile_and_register( source, device, prefix, sources,
-                                       code_name = code.name, signature = call_signature( ca ),
-                                       headers = headers )
+        with hardware.masked( level ):
+            source, _, outputs, attrs, sources, headers = _render_call( code, ca, device, raw = True )
+            target = compile_and_register( source, device, prefix, sources,
+                                           code_name = code.name, signature = call_signature( ca ),
+                                           headers = headers )
         results = jax.ffi.ffi_call( target, [ b.jax_out_spec() for b in outputs ] )(
             *arrays, **{ name: numpy.int64( value ) for name, _, value in attrs }
         )
@@ -231,7 +237,8 @@ def _make_op( code, ca, device, prefix ):
         axis_name, batched_code = code.with_batch_axis()
         batched_ca = ca.batched( axis_name, axis_size, batched_inputs )
 
-        results = _make_op( batched_code, batched_ca, device, prefix )( *arrays )
+        with hardware.masked( level ):
+            results = _make_op( batched_code, batched_ca, device, prefix )( *arrays )
 
         # ... and one output per item, save what belongs to the CALL rather than to an item: the
         # error buffer is one, and comes back unbatched.
@@ -300,6 +307,7 @@ def _call_with_vjp( code, ca, device, prefix ):
     in_arrays = tuple( jax.device_put( t.jax_input_array(), device.driver_version ) for t in inputs )
 
     fwd_op = _make_op( code, ca, device, prefix )
+    level = hardware.kernel_mask()      # the backward runs as the architecture of its forward ( `_make_op` )
 
     @jax.custom_vjp
     def op( values ):
@@ -315,8 +323,12 @@ def _call_with_vjp( code, ca, device, prefix ):
 
     def op_bwd( residuals, cotangents ):
         full_in, out_values, perturbed = residuals
-        grads = _call_backward( code, ca, device, prefix, inputs, outputs,
-                                full_in, out_values, perturbed, cotangents )
+        # ( and on Jax's driver: Jax runs it later, out of the `framework_defaults.using` of the forward's `ffi_call` -- in a Torch
+        #   process, what it builds from the defaults would be Torch's )
+        from . import framework_defaults
+        with hardware.masked( level ), framework_defaults.using( "jax" ):
+            grads = _call_backward( code, ca, device, prefix, inputs, outputs,
+                                    full_in, out_values, perturbed, cotangents )
         return ( grads, )
 
     op.defvjp( op_fwd, op_bwd, symbolic_zeros = True )

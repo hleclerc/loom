@@ -36,6 +36,7 @@ loom: the result is then handed back as it is, and no view is made. Arguments th
 and an object it returns has no universe -- it weighs nothing in the calls it enters ( `Polygon( [ ... ] )`
 given to a function with numpy arrays leaves the result in numpy ), and what is read on it comes out in the
 default framework of the moment."""
+import contextlib
 import functools
 import inspect
 
@@ -212,11 +213,16 @@ def _bound( method, view ):
 
 
 def _call( fn, universe, args, kwargs ):
-    """`fn( *args, **kwargs )` across the boundary, in `universe`"""
+    """`fn( *args, **kwargs )` across the boundary, in `universe` -- on its driver when that is another framework than the
+    default ( Jax tracers in a Torch process ): what the internals decide from `loom.resolved_device()` ( the card or the
+    CPU ) then follows the operands, as their calls do ( `ffi_call` ). Numpy gives way to the default, as in `promote`."""
+    from .drivers import framework_defaults
     args = tuple( _unwrap( a, universe ) for a in args )
     kwargs = { k: _unwrap( v, universe ) for k, v in kwargs.items() }
+    other = universe not in ( None, "loom", "numpy" ) and universe != framework_defaults.framework_name()
     try:
-        res = fn( *args, **kwargs )
+        with framework_defaults.using( universe ) if other else contextlib.nullcontext():
+            res = fn( *args, **kwargs )
     except BaseException as e:
         if universe != "loom":
             for k, v in list( vars( e ).items() ):

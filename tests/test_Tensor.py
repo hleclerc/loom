@@ -1302,3 +1302,78 @@ if test( "a_buffer_knows_its_framework" ):
         assert t.framework == "torch" and not t.traces and not t.is_strided()
         assert Storage.of( torch.ones( 2, 3, requires_grad = True ) ).traces
         assert t.astype( t.dtype.__class__.fp( 64 ) ).dtype == torch.float64
+
+
+if test( "numpy_operands_are_taken_in_by_the_default_framework" ):
+    # A numpy buffer votes for nothing, so an op on it runs with the DEFAULT framework's operations
+    # -- which must then be handed their own arrays: torch's do not read numpy as jax's do (it used
+    # to fail with `'numpy.ndarray' object has no attribute 'permute'` in the aligned transpose).
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None:
+        old = loom.default_framework
+        try:
+            loom.default_framework = "torch"
+            x = Axis( ShapeVar(), name = "row" )
+            y = Axis( ShapeVar(), name = "col" )
+            a = RealTensor[ x, y ]( numpy.arange( 6.0 ).reshape( 2, 3 ) )
+            b = RealTensor[ y, x ]( numpy.arange( 6.0 ).reshape( 3, 2 ) )
+            c = RealTensor[ y ]( numpy.arange( 1.0, 4.0 ) )
+            assert a.storage.framework == "numpy"            # an existing value keeps its framework
+
+            ab = a * b                                       # `b` transposed onto `a`'s axis order
+            assert ab.storage.framework == "torch"
+            assert numpy.allclose( numpy.asarray( ab ), numpy.arange( 6.0 ).reshape( 2, 3 ) * numpy.arange( 6.0 ).reshape( 3, 2 ).T )
+            assert numpy.allclose( numpy.asarray( a / c ), numpy.arange( 6.0 ).reshape( 2, 3 ) / numpy.arange( 1.0, 4.0 ) )
+            assert numpy.allclose( numpy.asarray( a * 2.0 ), 2 * numpy.arange( 6.0 ).reshape( 2, 3 ) )
+            assert numpy.allclose( numpy.asarray( a.T ), numpy.arange( 6.0 ).reshape( 2, 3 ).T )
+            assert numpy.allclose( numpy.asarray( a.sum( "col" ) ), [ 3.0, 12.0 ] )
+            assert numpy.allclose( numpy.asarray( a.exp() ), numpy.exp( numpy.arange( 6.0 ).reshape( 2, 3 ) ) )
+        finally:
+            loom.default_framework = old
+
+
+if test( "a_torch_operand_carries_the_op_under_a_jax_default" ):
+    # operations follow their operands: a numpy tensor divided by a torch one is a TORCH op whatever
+    # the default -- it used to align the numpy operand with the default's (jax) transpose, then
+    # fail on `jax.Array / torch.Tensor`.
+    try:
+        import torch, jax
+    except ImportError:
+        torch = None
+    if torch is not None:
+        old = loom.default_framework
+        try:
+            loom.default_framework = "jax"
+            x = Axis( ShapeVar(), name = "row" )
+            y = Axis( ShapeVar(), name = "col" )
+            a = RealTensor[ x, y ]( numpy.arange( 6.0 ).reshape( 2, 3 ) )
+            m = RealTensor[ y, x ]( torch.arange( 1.0, 7.0, dtype = torch.float64 ).reshape( 3, 2 ) )
+            assert a.storage.framework == "numpy" and m.storage.framework == "torch"
+            for r in ( a / m, m * a ):
+                assert r.storage.framework == "torch"
+            assert numpy.allclose( numpy.asarray( a / m ), numpy.arange( 6.0 ).reshape( 2, 3 ) / numpy.arange( 1.0, 7.0 ).reshape( 3, 2 ).T )
+        finally:
+            loom.default_framework = old
+
+
+if test( "a_raw_jax_operand_carries_the_op_under_a_torch_default" ):
+    # a RAW operand votes as a `Tensor` does: numpy tensor * jax array is a jax op even under a torch
+    # default -- taking the numpy side into torch first would leave `torch.Tensor * jax.Array`.
+    try:
+        import torch, jax.numpy as jnp
+    except ImportError:
+        torch = None
+    if torch is not None:
+        old = loom.default_framework
+        try:
+            loom.default_framework = "torch"
+            x = Axis( ShapeVar(), name = "row" )
+            a = RealTensor[ x ]( numpy.arange( 3.0 ) )
+            r = a * jnp.asarray( 2.0, dtype = jnp.float32 )
+            assert r.storage.framework in ( "jax", "numpy" )
+            assert numpy.allclose( numpy.asarray( r ), [ 0.0, 2.0, 4.0 ] )
+        finally:
+            loom.default_framework = old

@@ -208,3 +208,33 @@ if test( "a_declared_universe_is_not_moved_by_what_the_internals_cache" ):
     src = ns[ "Source" ]( numpy.arange( 3.0 ) )
     for _ in range( 2 ):
         assert isinstance( ns[ "total" ]( src ), ( numpy.ndarray, numpy.generic ) ), loom.universe_of( ( src, ) )
+
+
+if test( "the_internals_run_on_the_driver_of_the_callers_framework" ):
+    # Jax tracers in a Torch process: what the internals decide from the driver ( `loom.resolved_framework()`, the device:
+    # the card or the CPU ) follows the arguments, as their calls do -- sdot built its tree for the card ( torch's ) and ran
+    # the call on Jax's CPU. Numpy gives way to the default
+    import numpy
+    import loom
+    from loom.drivers import framework_defaults
+
+    def seen( x ):
+        return str( loom.resolved_framework() )
+
+    pub = _package( seen = seen )[ "seen" ]
+    default = framework_defaults.framework_name()
+    assert pub( numpy.arange( 3.0 ) ) == default
+    others = []
+    try:
+        import jax.numpy as jnp
+        others.append( ( "jax", jnp.arange( 3.0 ) ) )
+    except ImportError:
+        pass
+    try:
+        import torch
+        others.append( ( "torch", torch.arange( 3.0 ) ) )
+    except ImportError:
+        pass
+    for name, x in others:
+        assert pub( x ) == name, ( default, name, pub( x ) )
+    assert framework_defaults.framework_name() == default            # ( and back to the default after the call )

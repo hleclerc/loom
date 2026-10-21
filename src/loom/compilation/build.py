@@ -276,7 +276,13 @@ class Manifest:
         self.rules = {}
         self.edges = {}
         if self.path.is_file():
-            data = json.loads( self.path.read_text() )
+            try:
+                data = json.loads( self.path.read_text() )
+            except ( ValueError, UnicodeDecodeError ):
+                # a machine stopped mid-write ( the rename reached the disk, not the content ): starting from an empty
+                # graph is safe, every build declares again what it needs ( `prune` )
+                print( f"loom: { self.path } is unreadable, starting from an empty build graph", file = sys.stderr )
+                data = {}
             self.rules = data.get( "rules", {} )
             self.edges = data.get( "edges", {} )
 

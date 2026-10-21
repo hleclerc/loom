@@ -3,6 +3,9 @@
 #include "../containers/TensorView.h"
 #include "../common_types.h"
 #include <cstdlib>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include <string>
 #include <vector>
 
@@ -130,7 +133,7 @@ struct Scratch {
             release_fn( ctx, ptr );
     }
 
-    /// what the handler reports when `failed`
+    /// what the handler reports when `failed` ( its first words tell a refusal to the raw entry, `ffi_raw.h::fail` )
     std::string  refusal_message() const {
         auto mb = []( SI b ) { return std::to_string( ( b + ( 1 << 19 ) ) >> 20 ) + " MB"; };
         std::string res = "loom: the scratch pool refused " + mb( refused ) + " ( " + std::to_string( refused ) +
@@ -161,10 +164,20 @@ Scratch<MemorySpace> host_scratch() {
             // `aligned_alloc` wants a size that is a multiple of the alignment
             SI a = alignment < SI( sizeof( void * ) ) ? SI( sizeof( void * ) ) : alignment;
             SI s = ( nb_bytes + a - 1 ) / a * a;
+            #ifdef _WIN32
+            return _aligned_malloc( size_t( s ), size_t( a ) ); // the UCRT has no `aligned_alloc`
+            #else
             return std::aligned_alloc( size_t( a ), size_t( s ) );
+            #endif
         },
         nullptr,
-        []( void *, void *ptr ) { std::free( ptr ); }
+        []( void *, void *ptr ) {
+            #ifdef _WIN32
+            _aligned_free( ptr );
+            #else
+            std::free( ptr );
+            #endif
+        }
     );
 }
 

@@ -816,13 +816,23 @@ class Tensor( Attribute ):
     # and the values that hold no buffer (a zero, a fill) vote for nothing: every framework reads them.
     def _ops( self, *others ):
         """The driver that carries the operations on us and `others`: that of the first operand held by
-        a framework of its own, else the default one."""
+        a framework of its own, else the default one. A RAW operand votes too (a jax array, a torch
+        tensor given as is): its buffer is what counts, as for a `Tensor`'s."""
         for t in ( self, *others ):
-            if isinstance( t, Tensor ):
-                name = t.storage.framework
-                if name is not None and name != "numpy":
-                    return framework_defaults.ops_named( name )
+            name = t.storage.framework if isinstance( t, Tensor ) else framework_defaults.framework_name_of( t )
+            if name is not None and name != "numpy":
+                return framework_defaults.ops_named( name )
         return framework_defaults.ops_named( None )
+
+    def _raw_for( self, ops ):
+        """Our value as `ops` reads it. A numpy buffer belongs to no framework (it votes for nothing,
+        see `_ops`), so the framework carrying the op takes it in -- zero-copy on the host. Without
+        it torch's operations would be handed a numpy array (`a.permute`), which jax's happen to
+        accept; jax's `array` keeps a host value in numpy anyway (see `JaxOperations.array`)."""
+        raw = self.value
+        if raw is None or self.storage.framework != "numpy":
+            return raw
+        return ops.array( raw, framework_defaults.concrete( self.dtype ), self.device )
 
     def _clashes( self, others ):
         """Are some operands held by DIFFERENT frameworks of their own?"""
@@ -878,12 +888,13 @@ class Tensor( Attribute ):
                 if lb is not None:
                     return self._ref_binary( other, la, lb, op )
             else:
-                raw = op( self.value, other )
-                if getattr( raw, "shape", () ) == getattr( self.value, "shape", () ):
+                mine = self._raw_for( ops )
+                raw = op( mine, other )
+                if getattr( raw, "shape", () ) == getattr( mine, "shape", () ):
                     return self._wrap_axes( raw, la )   # scalar/array broadcast: our axes survive
-        b = other.value if isinstance( other, Tensor ) else other
+        b = other._raw_for( ops ) if isinstance( other, Tensor ) else other
         names = self._dim_names()
-        return self._wrap( op( self.value, b ), names if len( names ) == self.rank else None )
+        return self._wrap( op( self._raw_for( ops ), b ), names if len( names ) == self.rank else None )
 
     def _ref_layout( self ):
         """One axis OBJECT per array dimension when each dim means a DISTINCT axis (so a map by
@@ -931,7 +942,7 @@ class Tensor( Attribute ):
                     _refuse_mismatched_window( ax, order )
                     order.append( ax )
         try:
-            raw = op( *[ _aligned_to( t.value, l, order ) for t, l in zip( operands, layouts ) ] )
+            raw = op( *[ _aligned_to( ops, t._raw_for( ops ), l, order ) for t, l in zip( operands, layouts ) ] )
         except ( ValueError, RuntimeError ) as e:
             # numpy says `ValueError` and torch `RuntimeError` where jax says `TypeError` for shapes
             # that do not combine: one error type whatever the driver
@@ -953,8 +964,8 @@ class Tensor( Attribute ):
         res = self._ref_apply( [ a, b ], ops.where )
         if res is not None:
             return res
-        unwrap = lambda v: v.value if isinstance( v, Tensor ) else v
-        return self._wrap( ops.where( self.value, unwrap( a ), unwrap( b ) ), self._dim_names() )
+        unwrap = lambda v: v._raw_for( ops ) if isinstance( v, Tensor ) else v
+        return self._wrap( ops.where( self._raw_for( ops ), unwrap( a ), unwrap( b ) ), self._dim_names() )
 
     def _wrap_axes( self, raw, dim_axes ):
         """A detached tensor around `raw` whose dimensions ARE `dim_axes` -- the very axis OBJECTS, so
@@ -1000,8 +1011,9 @@ class Tensor( Attribute ):
         if self._clashes( ( o, ) ):
             me, o = self._promoted( ( o, ) )
             return me @ o
-        b = o.value if isinstance( o, Tensor ) else o
-        return self._wrap( self._ops( o ).matmul( self.value, b ), None )
+        ops = self._ops( o )
+        b = o._raw_for( ops ) if isinstance( o, Tensor ) else o
+        return self._wrap( ops.matmul( self._raw_for( ops ), b ), None )
 
     def dot( self, other, over ):
         """Contract with `other` over the SHARED axis `over` -- the reference-based analogue of a
@@ -1017,7 +1029,7 @@ class Tensor( Attribute ):
 
     # ---- elementwise maps: shape (hence every axis OBJECT) is preserved, like `__neg__` ----
     def _map( self, op ):
-        return self._wrap_axes( op( self.value ), self._dim_axes() )
+        return self._wrap_axes( op( self._raw_for( self._ops() ) ), self._dim_axes() )
 
     def sqrt  ( self ): return self._map( self._ops().sqrt )
     def arcsin( self ): return self._map( self._ops().arcsin )
@@ -1063,7 +1075,8 @@ class Tensor( Attribute ):
                 axes = tuple( axes[ 0 ] )
             perm = tuple( self._axis_pos( a ) for a in axes )
         dims = self._dim_axes()
-        return self._wrap_axes( self._ops().transpose( self.value, perm ),
+        ops = self._ops()
+        return self._wrap_axes( ops.transpose( self._raw_for( ops ), perm ),
                                 [ dims[ p ] for p in perm if p < len( dims ) ] )
 
     @property
@@ -1076,7 +1089,7 @@ class Tensor( Attribute ):
         (padding) that would corrupt the result -- a 0 surviving a `max`, a 1 lost in a `prod` -- so
         they are first filled with the operation's IDENTITY. A dense (or unrolled) tensor has no
         holes: `_hole_mask` returns `None` and the fast path is untouched."""
-        data  = self.value
+        data  = self._raw_for( self._ops() )
         holes = self._hole_mask()
         if holes is not None:
             data = self._ops().where( holes, identity, data )
@@ -1109,7 +1122,7 @@ class Tensor( Attribute ):
         padding would enter the partial sums that FOLLOW it.
         """
         pos = self._axis_position( axis )
-        data = self.value
+        data = self._raw_for( self._ops() )
         holes = self._hole_mask()
         if holes is not None:
             data = self._ops().where( holes, 0, data )
@@ -1296,14 +1309,15 @@ def _is_unrolled( axis ):
     return isinstance( axis, AxisList )
 
 
-def _aligned_to( arr, dims, order ):
+def _aligned_to( ops, arr, dims, order ):
     """`arr`, whose dimensions are the axis objects `dims`, viewed with its dimensions permuted into
     `order` and a size-1 axis inserted wherever `order` holds an axis `arr` does not have. After this
     both operands of an elementwise op share the SAME axis order, so a plain broadcast is a map by
-    reference (a missing -- hence size-1 -- axis broadcasts). Matched by IDENTITY (`dims` distinct)."""
+    reference (a missing -- hence size-1 -- axis broadcasts). Matched by IDENTITY (`dims` distinct).
+    `ops` are those of the op, which `arr` is already held by (see `Tensor._raw_for`)."""
     pos = { ax.coordinate: i for i, ax in enumerate( dims ) }
     present = [ ax for ax in order if ax.coordinate in pos ]
-    arr = framework_defaults.ops( arr ).transpose( arr, [ pos[ ax.coordinate ] for ax in present ] )
+    arr = ops.transpose( arr, [ pos[ ax.coordinate ] for ax in present ] )
     return arr[ tuple( slice( None ) if ax.coordinate in pos else None for ax in order ) ]
 
 

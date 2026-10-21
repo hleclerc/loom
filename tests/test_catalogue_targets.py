@@ -362,3 +362,88 @@ if test( "a_jaxlib_takes_only_the_jax_kernels_of_an_ffi_api_it_knows" ):
             assert json.loads( ( tag / "xla-ffi.json" ).read_text() )[ "api_version" ] == [ 1, 0 ]
     finally:
         JaxFfi.ffi_api_version = saved
+
+
+if test( "a_machine_served_as_a_poorer_level_compiles_what_is_missing_as_that_level" ):
+    # the Python that sized the call saw the served level: the kernel compiled on the spot is of that level too
+    import loom
+    with tempfile.TemporaryDirectory() as root:
+        saved = list( catalogue._roots ), loom.prefer_catalogue
+        for tag in ( "cpu-x86-64-v3", "cpu-x86-64" ):
+            ( Path( root ) / tag ).mkdir()
+        try:
+            catalogue._roots[ : ] = [ Path( root ) ]
+            loom.prefer_catalogue = True
+            with _x86( "x86-64-v4" ):
+                assert "-march=x86-64-v3" in C.HostCxx( "c++" ).march_flags()
+            with _x86( "x86-64-v3" ):                                       # its own level is held: this machine
+                assert "-march=native" in C.HostCxx( "c++" ).march_flags()
+        finally:
+            catalogue._roots[ : ] = saved[ 0 ]
+            loom.prefer_catalogue = saved[ 1 ]
+
+
+if test( "a_level_is_shipped_only_when_it_gains_more_than_the_tolerance_and_the_noise" ):
+    quiet = lambda times: { l: { w: 0.01 for w in t } for l, t in times.items() }
+    # what lmo measured: v3 gains 6 %, v4 is slower than v3, v2 gains nothing
+    times = { "x86-64-v4": { "a": 0.982 }, "x86-64-v3": { "a": 0.937 }, "x86-64-v2": { "a": 1.002 }, "x86-64": { "a": 1.0 } }
+    assert catalogue.choose_levels( times, quiet( times ), 0.05 ) == [ "x86-64-v3", "x86-64" ]
+    # a richer level is compared with the last one KEPT: v4 against v3 here, against the baseline when v3 is dropped
+    times = { "x86-64-v4": { "a": 0.80 }, "x86-64-v3": { "a": 0.97 }, "x86-64": { "a": 1.0 } }
+    assert catalogue.choose_levels( times, quiet( times ), 0.05 ) == [ "x86-64-v4", "x86-64" ]
+    # the mean over the workloads decides
+    times = { "x86-64-v3": { "a": 0.85, "b": 1.15 }, "x86-64": { "a": 1.0, "b": 1.0 } }
+    assert catalogue.choose_levels( times, quiet( times ), 0.05 ) == [ "x86-64" ]
+    # in doubt, not shipped: a gain within the spread of the timings
+    times = { "x86-64-v3": { "a": 0.90 }, "x86-64": { "a": 1.0 } }
+    noisy = { "x86-64-v3": { "a": 0.20 }, "x86-64": { "a": 0.02 } }
+    assert catalogue.choose_levels( times, noisy, 0.05 ) == [ "x86-64" ]
+    assert catalogue.choose_levels( times, quiet( times ), 0.05 ) == [ "x86-64-v3", "x86-64" ]
+
+
+if test( "the_levels_decided_by_a_build_are_reused_by_the_next_build_into_the_same_directory" ):
+    from loom.devices.hardware import Run
+    runs = [ Run( "cpu", t ) for t in ( "x86-64-v3", "x86-64" ) ]
+    def never():
+        raise AssertionError( "timed again" )
+    with tempfile.TemporaryDirectory() as out:
+        ( Path( out ) / "levels.json" ).write_text( json.dumps( { "cpu": { "candidates": [ "x86-64", "x86-64-v3" ], "kept": [ "x86-64" ] } } ) )
+        assert catalogue._levels_of( out, runs, { "w": never }, 0.05 ) == [ "x86-64" ]
+        # other candidates: the decision does not apply
+        assert catalogue._levels_of( out, runs[ 1: ], { "w": never }, 0.05 ) == [ "x86-64" ]     # one level: nothing to decide
+
+
+if test( "the_backward_of_a_call_runs_as_the_architecture_of_its_forward" ):
+    # a kernel whose table entry says `x86-64` runs its backward as `x86-64` too, although the pullback is called
+    # after the forward's scope has closed ( `jax.vjp`, `loss.backward()` ): its buffers were sized at that level
+    import loom
+    from loom import RealTensor
+    from loom.compilation.FfiCode import FfiCode
+    from loom.devices import hardware
+    from loom.testing import need
+    need( "grad" )
+    forward = FfiCode.per_item( code = "outputs.out = 3 * inputs.inp;" )
+    backward = FfiCode.per_item( """
+            if ( ! grad_of_outputs.out.surely_null && grad_of_inputs.inp.is_valid )
+                grad_of_inputs.inp = 3 * grad_of_outputs.out;
+        """, computed_grads = "computed_grads.inp_from_out = true;" )
+    def f( x ):
+        inp, out = RealTensor(), RealTensor()
+        inp.set( x )
+        loom.ffi_call( "test_catalogue_bwd_level", forward, backward, out = loom.out( out ), inp = inp )
+        return out.raw
+    seen, real_lookup = [], catalogue.lookup
+    def spy( *a, **k ):
+        seen.append( hardware.mask() )
+        return real_lookup( *a, **k )
+    catalogue.lookup = spy
+    try:
+        with hardware.masked( "x86-64" ):
+            out, pullback = loom.vjp( f, loom.array( 2.0 ) )
+        assert hardware.mask() is None
+        grad = pullback( loom.array( 1.0 ) )
+    finally:
+        catalogue.lookup = real_lookup
+    g = grad[ 0 ] if isinstance( grad, ( tuple, list ) ) else grad
+    assert float( g ) == 3
+    assert len( seen ) >= 2 and all( m == "x86-64" for m in seen ), seen

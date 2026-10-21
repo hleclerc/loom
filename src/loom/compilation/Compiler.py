@@ -396,10 +396,15 @@ class HostCxx( Compiler ):
     @staticmethod
     def _masked_variant():
         """Under a `LOOM_TARGET` mask the machine is compiled for the level it pretends to be, not for what it is:
-        otherwise the "weaker" run would execute `-march=native` code and test nothing."""
+        otherwise the "weaker" run would execute `-march=native` code and test nothing. Likewise when the catalogue
+        serves it as a poorer level ( `catalogue.served_target` ): the Python that sized the call's buffers saw that
+        level, so the kernel compiled for the call is of that level too."""
         from ..devices import hardware
         mask = hardware.mask()
-        return mask if mask in cpu_targets() else None
+        if mask in cpu_targets():
+            return mask
+        served = cpu_variant()
+        return served if served != real_cpu_variant() else None
 
     def is_available( self ) -> bool:
         return self.cxx is not None
@@ -433,8 +438,9 @@ class HostCxx( Compiler ):
         return flags
 
     def flags( self ) -> list:
+        # `_USE_MATH_DEFINES`: MinGW hides `M_PI` & co. under a strict -std, and kernel bodies use them
         return [ "-std=c++20", *self.opt_flags(), *self.march_flags(), *self.diagnostic_flags(),
-                 *( [] if os.name == "nt" else [ "-fPIC" ] ), "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
+                 *( [ "-D_USE_MATH_DEFINES" ] if os.name == "nt" else [ "-fPIC" ] ), "-pthread", "-fvisibility=hidden", "-fvisibility-inlines-hidden", *sysroot_flags( self.cxx ),
                  *openmp_flags( self.cxx, sysroot_flags( self.cxx ) ), *self.user_flags() ]
 
     @property

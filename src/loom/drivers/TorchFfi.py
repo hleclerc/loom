@@ -17,6 +17,7 @@ import numpy
 import torch
 
 from . import PointerFfi
+from ..devices import hardware
 from .BackwardCall import call_backward
 from .PointerFfi import Operand, PointerAdapter
 
@@ -150,6 +151,9 @@ def _make_op( code, ca, device, prefix, item = None ):
     framework that maps it -- as Jax does with the `custom_vjp` of the call."""
     inputs = [ t for t in ca.tensors if t.io_category.is_input ]
     outputs = [ t for t in ca.tensors if t.io_category.is_output ]
+    # the backward and the batching rule run after the call has returned: as the architecture of the call that
+    # made the op ( `kernel_parameters_for` ), not the machine's
+    level = hardware.kernel_mask()
 
     class Op( torch.autograd.Function ):
         @staticmethod
@@ -178,11 +182,12 @@ def _make_op( code, ca, device, prefix, item = None ):
             # `ZeroTensor`, so the adjoint is not asked for its pairs ( `computed_grads` ) and no
             # buffer of zeros is moved
             cotangents = [ torch.empty_like( o, device = "meta" ) if c is None else c for c, o in zip( cotangents, out_values ) ]
-            if item is None:
-                grads = call_backward( code, ca, device, prefix, inputs, outputs,
-                                       full_in, out_values, ctx.perturbed, cotangents, _run_op )
-            else:
-                grads = _mapped_backward( item, device, prefix, full_in, out_values, ctx.perturbed, cotangents )
+            with hardware.masked( level ):
+                if item is None:
+                    grads = call_backward( code, ca, device, prefix, inputs, outputs,
+                                           full_in, out_values, ctx.perturbed, cotangents, _run_op )
+                else:
+                    grads = _mapped_backward( item, device, prefix, full_in, out_values, ctx.perturbed, cotangents )
             return tuple( grads )
 
         @staticmethod
@@ -197,8 +202,9 @@ def _make_op( code, ca, device, prefix, item = None ):
             axis_name, batched_code = code.with_batch_axis()
             batched_ca = ca.batched( axis_name, info.batch_size, { t.ffi_name for t, b in zip( inputs, in_batched ) if b } )
 
-            results = _make_op( batched_code, batched_ca, device, prefix,
-                                ( code, ca, in_batched, out_batched ) if item is None else item ).apply( *values )
+            with hardware.masked( level ):
+                results = _make_op( batched_code, batched_ca, device, prefix,
+                                    ( code, ca, in_batched, out_batched ) if item is None else item ).apply( *values )
 
             # ... one output per item, save what belongs to the CALL rather than to an item (the error buffer)
             return tuple( results ), tuple( 0 if b else None for b in out_batched )

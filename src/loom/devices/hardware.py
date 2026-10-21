@@ -54,6 +54,12 @@ def masked( target ):
         _local.target = previous
 
 
+def kernel_mask():
+    """The target of the enclosing kernel scope ( `masked` ), or None -- not `LOOM_TARGET`, which holds for the whole
+    process anyway. What a call captures to run its later passes ( a trace Jax replays, the backward ) as itself."""
+    return getattr( _local, "target", None )
+
+
 def known_targets() -> list:
     from ..compilation.Compiler import X86_LEVELS, CUDA_ARCHS
     return [ *( level for level, _ in X86_LEVELS ), "x86-64", "armv8-a", *CUDA_ARCHS ]

@@ -119,7 +119,15 @@ def _values_of( ca, device ):
     """The inputs of the call, as tensors of the card the kernel runs on."""
     inputs = [ t for t in ca.tensors if t.io_category.is_input ]
     values = [ b.jax_input_array() for b in inputs ]
-    return [ x if isinstance( x, torch.Tensor ) else torch.as_tensor( x, device = _adapter.torch_device( device ) ) for x in values ]
+    return [ x if isinstance( x, torch.Tensor ) else torch.as_tensor( _no_negative_strides( x ), device = _adapter.torch_device( device ) ) for x in values ]
+
+
+def _no_negative_strides( x ):
+    """`x`, or a dense copy when it is a numpy view with a negative stride ( `w[ ::-1 ]` ), which Torch does not take: the kernel
+    then reads the strides of the tensor it is given ( `PointerFfi` hands them over )"""
+    if isinstance( x, numpy.ndarray ) and any( s < 0 for s in x.strides ):
+        return numpy.array( x, order = "C" )
+    return x
 
 
 def _run_op( code, ca, device, prefix ):

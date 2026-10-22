@@ -469,6 +469,10 @@ class Tensor( Attribute ):
             # along is the element type: our declared dtype is a contract the FFI reads
             # (`CallArg_Tensor._cpp_scalar`), so a buffer that disagrees would be reinterpreted, not
             # converted, in C++ -- hence `retyped`, which enforces it on whatever backs the value.
+            # Unless we named no dtype and the source is of our kind: then, as a raw buffer would be
+            # ( `_adopts` ), it keeps its own -- float32 points handed from one aggregate to another stay float32.
+            if not self._dtype_pinned and value.dtype.kind == self.dtype.kind:
+                self.dtype = value.dtype
             self.storage = value.storage.retyped( self._as_declared )
             return
 

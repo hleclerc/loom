@@ -129,8 +129,11 @@ class CallArg_Tensor( CallArg ):
 
     @staticmethod
     def _memory_space_of( inst, call_args_analysis ):
+        # ( in a Jax call nothing is read in place: XLA is handed every input, converted, in the device's space -- a Torch
+        #   tensor on the card in a Jax call on the CPU, from a Torch process )
+        from . import framework_defaults
         storage = inst.storage
-        if storage.framework in ( "torch", "cupy" ):
+        if storage.framework in ( "torch", "cupy" ) and framework_defaults.framework_name() != "jax":
             where = storage.device()
             if where is not None:
                 return CallArg_Tensor._MEMORY_SPACES[ where[ 0 ] ]

@@ -273,7 +273,10 @@ def ffi_call( name, *kernels, **kwargs ):
                               output = loom.out( RealTensor[ n ]() ) )
     """
     from .drivers import framework_defaults
-    framework = _framework_of( kwargs.values(), framework_defaults.framework_name() )
+    # ( in a block of `using`, the framework was chosen above -- the boundary, a solve -- for everything it does: the call keeps it,
+    #   and what it is given of another framework is converted. Choosing again here, call by call, the same solve could run its
+    #   kernels on two drivers, Jax tracers beside the Torch buffers of a target built before )
+    framework = None if framework_defaults.in_using() else _framework_of( kwargs.values(), framework_defaults.framework_name() )
     if framework is None:
         return framework_defaults.call( name, *kernels, **kwargs )
     # the call runs where its buffers are, whatever `loom.default_framework` was set to for the values that

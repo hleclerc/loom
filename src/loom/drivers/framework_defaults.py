@@ -35,6 +35,13 @@ def using( framework ):
     return _driver.using( framework )
 
 
+def in_using():
+    """Whether a block of `using` is running: a framework was chosen for it above ( the boundary, a solve ), which the calls inside
+    keep ( `ffi_call` )."""
+    from .FrameworkDefaults import _call_driver
+    return _call_driver.get() is not None
+
+
 def call( name, *kernels, **kwargs ):
     """`ffi_call`, on the framework and device in force."""
     return _driver.call( name, *kernels, **kwargs )

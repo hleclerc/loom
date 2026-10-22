@@ -200,6 +200,17 @@ def call_body( body: str, device ):
     return jax.ffi.ffi_call( target, jax.ShapeDtypeStruct( ( 1, ), jnp.int32 ) )()
 
 
+def _for_xla( value ):
+    """an input of a Jax call as XLA reads it: Jax's arrays and numpy as they are, a buffer of another framework ( a Torch one
+    in a Jax call made from a Torch process ) converted -- through the host when Jax cannot take it where it is"""
+    from . import framework_defaults
+    if framework_defaults.framework_name_of( value ) in ( None, "jax", "numpy" ):
+        return value
+    from ..tensor.storage.buffers import buffer_class_for
+    from ..tensor.storage.buffers.conversion import convert
+    return convert( buffer_class_for( value )( value ), "jax" )
+
+
 def _make_op( code, ca, device, prefix ):
     """The call as a Jax operation -- with its own batching rule.
 
@@ -257,7 +268,7 @@ def _run( code, ca, device, prefix ):
 
     # the kernel dereferences its buffers where IT runs, so an input has to be there: an array
     # built on the host would otherwise be read through a device pointer.
-    arrays = [ jax.device_put( b.jax_input_array(), device.driver_version ) for b in inputs ]
+    arrays = [ jax.device_put( _for_xla( b.jax_input_array() ), device.driver_version ) for b in inputs ]
 
     results = _make_op( code, ca, device, prefix )( *arrays )
     return outputs, list( results ) if isinstance( results, ( list, tuple ) ) else [ results ]
@@ -304,7 +315,7 @@ def _call_with_vjp( code, ca, device, prefix ):
     inputs = [ t for t in ca.tensors if t.io_category.is_input ]
     outputs = [ t for t in ca.tensors if t.io_category.is_output ]
 
-    in_arrays = tuple( jax.device_put( t.jax_input_array(), device.driver_version ) for t in inputs )
+    in_arrays = tuple( jax.device_put( _for_xla( t.jax_input_array() ), device.driver_version ) for t in inputs )
 
     fwd_op = _make_op( code, ca, device, prefix )
     level = hardware.kernel_mask()      # the backward runs as the architecture of its forward ( `_make_op` )

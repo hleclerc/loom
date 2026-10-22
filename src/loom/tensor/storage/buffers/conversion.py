@@ -15,6 +15,17 @@ def convert( buffer, target ):
         return buffer.to_numpy()
     if buffer.framework == "torch":
         raw = raw.detach()           # what crosses is a value: a tape cannot follow it into another framework
+    if target not in ( "jax", "torch", "cupy" ):
+        raise ValueError( f"cannot convert a { buffer.framework } buffer to { target }" )
+    try:
+        return _by_dlpack( buffer, raw, target )
+    except ( BufferError, RuntimeError, TypeError, ValueError ):
+        # the receiving framework cannot take it where it is ( a buffer on the card for a Jax that has only the CPU, in a Torch
+        # environment ): a copy through the host
+        return _from_numpy( numpy.asarray( buffer.to_numpy(), order = "C" ), target )     # ( not `ascontiguousarray`: a scalar keeps its rank 0 )
+
+
+def _by_dlpack( buffer, raw, target ):
     if target == "jax":
         _hint_if_copied( buffer )
         import jax.numpy as jnp

@@ -8,6 +8,16 @@ import torch
 from ..tensor.Dtype import Dtype
 
 
+def _driver_torch_device():
+    """the Torch device of the driver in force ( `None`, Torch's default, for one it has no kernels on )"""
+    from . import framework_defaults
+    from .TorchFfi import _adapter
+    try:
+        return _adapter.torch_device( framework_defaults.device() )
+    except NotImplementedError:
+        return None
+
+
 class TorchOperations:
     """What the torch framework DOES with an array that already exists: its operations, its
     transforms, its readings, its way of building one from a concrete dtype and an explicit device, and of
@@ -45,7 +55,9 @@ class TorchOperations:
         function sees a graph that starts here (and the caller's tensors are never modified)."""
         import torch.utils._pytree as pytree
         leaves, spec = pytree.tree_flatten( tree )
-        leaves = [ torch.as_tensor( x ) if isinstance( x, np.ndarray ) else x for x in leaves ]     # numpy is a valid input, as for jax
+        # numpy is a valid input, as for jax -- and, as for jax, it goes to the driver's device: a primal left on the host would be
+        # handed by its address to the kernels of the card ( `bsp_build_card` read it there: an illegal memory access )
+        leaves = [ torch.as_tensor( x, device = _driver_torch_device() ) if isinstance( x, np.ndarray ) else x for x in leaves ]
         leaves = [ x.detach().requires_grad_( True ) if isinstance( x, torch.Tensor ) and x.is_floating_point() else x for x in leaves ]
         return pytree.tree_unflatten( leaves, spec ), leaves
 

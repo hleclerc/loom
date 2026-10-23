@@ -12,11 +12,19 @@ def tensor_view_type( arg ):
         strides = f", { arg.cpp_runtime_strides_type() }"
     else:
         strides = "" if arg.layout.is_identity else f", { arg.cpp_shape_type() }"
+    # ( an input copied to the call's device: the view is the copy's, see `tensor_view_init` )
+    space = getattr( arg, "transfer_space", None ) or arg.memory_space
     return ( f"TensorView<{ arg.cpp_scalar() }, { arg.cpp_shape_type() }, "
-             f"{ arg.memory_space }, { arg.cpp_axis_names_type() }{ strides }>" )
+             f"{ space }, { arg.cpp_axis_names_type() }{ strides }>" )
 
 
 def tensor_view_init( arg ):
+    # an input the call's queue cannot see: its view where it is, handed to the handler's transfers ( `CudaTransfers.h` )
+    view = _tensor_view_where_it_is( arg )
+    return f"loom_transfers.in( { view } )" if getattr( arg, "transfer_space", None ) else view
+
+
+def _tensor_view_where_it_is( arg ):
     ptr = arg.jax_data_ptr()
     if arg.runtime_strides:
         return ( f"tensor_view<{ arg.memory_space }>( { ptr }, { arg.cpp_shape_tuple() }, "

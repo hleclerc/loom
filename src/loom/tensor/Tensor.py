@@ -832,9 +832,15 @@ class Tensor( Attribute ):
         """Our value as `ops` reads it. A numpy buffer belongs to no framework (it votes for nothing,
         see `_ops`), so the framework carrying the op takes it in -- zero-copy on the host. Without
         it torch's operations would be handed a numpy array (`a.permute`), which jax's happen to
-        accept; jax's `array` keeps a host value in numpy anyway (see `JaxOperations.array`)."""
+        accept; jax's `array` keeps a host value in numpy anyway (see `JaxOperations.array`).
+        A Torch tensor left on the host goes to the driver's card when there is one, as a numpy buffer
+        does: an op between it and a value born on the card ( a default `target_mass` ) has both there."""
         raw = self.value
-        if raw is None or self.storage.framework != "numpy":
+        if raw is None:
+            return raw
+        if self.storage.framework == "torch":
+            return _torch_on_driver_card( raw )
+        if self.storage.framework != "numpy":
             return raw
         return ops.array( raw, framework_defaults.concrete( self.dtype ), self.device )
 
@@ -1311,6 +1317,15 @@ def _result_dtype( raw, fallback ):
 # the type, so a tensor stores only the axis, never a separate unroll flag (see `Tensor.__init__`).
 def _is_unrolled( axis ):
     return isinstance( axis, AxisList )
+
+
+def _torch_on_driver_card( raw ):
+    """`raw` ( a Torch tensor ), on the driver's card if it sits on the host and the driver runs on one"""
+    if getattr( getattr( raw, "device", None ), "type", None ) != "cpu":
+        return raw
+    from ..drivers.TorchOperations import _driver_torch_device
+    dev = _driver_torch_device()
+    return raw.to( dev ) if dev is not None and dev.type == "cuda" else raw
 
 
 def _aligned_to( ops, arr, dims, order ):

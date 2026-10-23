@@ -49,6 +49,9 @@ class CallArg_Tensor( CallArg ):
         # Weak is safe: we only use it during code generation, which the analysis drives.
         self._caa = weakref.ref( call_args_analysis )
         self.memory_space = self._memory_space_of( inst, call_args_analysis )
+        # an input the call's queue cannot see ( a host buffer in a call on the card ): the handler copies it there before
+        # anything runs ( `CudaTransfers.h` ), and the view the kernels get is the copy's, in this space
+        self.transfer_space = self._transfer_space_of( call_args_analysis )
 
         self.path = path
         # a buffer of a `loom.scratch` argument: the handler takes it from the call's allocator ( see `CallArgsAnalysis.scratch_paths` );
@@ -120,12 +123,18 @@ class CallArg_Tensor( CallArg ):
             and framework_defaults.framework_name() != "jax"
             and inst.buffer_layout.is_identity and inst.storage.is_strided() )
 
-    # Where an INPUT lives is in the type of its view (`memory_space`), so the queue knows what it must transfer
-    # (`transfer_cost_per_byte( queue, memory_space )`, `run_parallel` brings it over). It is the buffer's OWN,
+    # Where an INPUT lives is in the type of its view (`memory_space`): a host buffer in a call on the card is copied
+    # there by the handler ( `transfer_space`, `CudaTransfers.h` ), before anything runs. It is the buffer's OWN,
     # for a buffer read in place by its address -- torch, cupy -- and not the device's: the kernel then takes a
     # buffer wherever it sits. What is not read in place (numpy, which an adapter gives to the card; jax, which XLA
     # hands over in the device's space; an output, born on the device) keeps the device's.
     _MEMORY_SPACES = { "cpu": "CpuHostMemorySpace", "cuda": "CudaGlobalMemorySpace" }
+
+    def _transfer_space_of( self, call_args_analysis ):
+        if self.io_category.is_input and self.memory_space == "CpuHostMemorySpace" \
+                and call_args_analysis.cpp_memory_space == "CudaGlobalMemorySpace":
+            return "CudaGlobalMemorySpace"
+        return None
 
     @staticmethod
     def _memory_space_of( inst, call_args_analysis ):

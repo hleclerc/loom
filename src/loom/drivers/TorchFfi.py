@@ -56,7 +56,7 @@ class TorchAdapter( PointerAdapter ):
         if not isinstance( x, torch.Tensor ):
             x = torch.as_tensor( x, device = wanted )
         # a tensor on another device than the kernel's is taken where it is: the view's memory space says so, and
-        # the queue transfers (see `CallArg_Tensor._memory_space_of`)
+        # the handler copies a host input to the card (see `CallArg_Tensor._transfer_space_of`)
         if x.is_contiguous():
             return Operand( x.data_ptr(), x.shape, x, itemsize = x.element_size() )
         if strided:

@@ -437,6 +437,10 @@ def _render_source( code, ca, device, raw_frame = False ):
     # no, and `Scratch` turns that into a VALUE ( an empty view, a flag ) rather than an exception:
     # the body dereferences nothing, and it is here that the refusal becomes an error for XLA again.
     queue_decl = device.cpp_queue_decl()
+    # the inputs the queue cannot see ( host buffers in a call on the card ): copied by the handler, freed when it returns
+    if any( getattr( t, "transfer_space", None ) for t in ca.tensors ):
+        includes.insert( 0, "loom/support/kernels/CudaTransfers.h" )
+        queue_decl += "\n    CudaTransfers loom_transfers( queue );"
     body = code.code_for( ca )
     grads_struct, grads_decl, grads_check = _computed_grads( code )
     if grads_decl and not code.is_handler:

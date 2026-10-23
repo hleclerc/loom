@@ -38,8 +38,8 @@ UTP    auto DTP::kernel_form( auto &&queue, auto io_category ) const {
     static_assert( ! std::is_same_v<DECAYED_TYPE_OF( io_category ), UndefList>,
                    "argument passed to run_parallel without an Inp/Out/Mut category" );
 
-    // zero cost -> data already accessible from the target context -> we retype the Ptr. A device
-    // that would have to transfer does not exist yet (see `kernel_form` in make_avaiable.h)
+    // zero cost -> data already accessible from the target context -> we retype the Ptr. A host input
+    // of a call on the card has already been copied there by the handler (`CudaTransfers.h`)
     static_assert( DECAYED_TYPE_OF( transfer_cost_per_byte( queue, _data.memory_space ) )::value == 0,
                    "TensorView::kernel_form : this queue cannot see this memory area, and the transfer is not written" );
     using KTensor = TensorView<TF,Shape,KMS,AxisNames,Strides>;

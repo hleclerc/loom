@@ -57,5 +57,5 @@ wheels:
 	rm -f dist/*.whl
 	$(PYTHON) -m pip wheel --no-deps -w dist .
 
-publish:
+wheels-publish: wheels
 	$(PYTHON) -m twine upload --skip-existing --repository-url https://upload.pypi.org/legacy/ dist/*.whl

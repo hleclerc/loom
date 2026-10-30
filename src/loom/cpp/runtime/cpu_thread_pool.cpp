@@ -10,11 +10,21 @@
 namespace sdot {
 
 CpuThreadPool::CpuThreadPool() {
+    // The CPUs the process may run on: a Slurm allocation gives a few cores of a larger node, and
+    // `hardware_concurrency` counts them all ( oversubscription ), while pinning to CPU `w` lands
+    // outside the allocation ( `pthread_setaffinity_np` then fails, and the worker floats ).
+#ifdef __linux__
+    cpu_set_t allowed;
+    if ( sched_getaffinity( 0, sizeof( allowed ), &allowed ) == 0 )
+        for ( int c = 0; c < CPU_SETSIZE; ++c )
+            if ( CPU_ISSET( c, &allowed ) )
+                _cpus.push_back( c );
+#endif
     _nb_workers = 0;
     if ( const char *env = std::getenv( "SDOT_NB_THREADS" ) )
         _nb_workers = std::atoi( env );
     if ( _nb_workers <= 0 )
-        _nb_workers = int( std::thread::hardware_concurrency() );
+        _nb_workers = _cpus.empty() ? int( std::thread::hardware_concurrency() ) : int( _cpus.size() );
     if ( _nb_workers <= 0 )
         _nb_workers = 1;
     if ( const char *env = std::getenv( "SDOT_PIN_THREADS" ) )
@@ -63,7 +73,7 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
     }
     _cv_job.notify_all();
 
-    // The calling thread runs slice 0. With pinning on it must sit on core 0 like the workers sit on theirs:
+    // The calling thread runs slice 0. With pinning on it must sit on the first allowed CPU like the workers sit on theirs:
     // left floating it can share a core with a worker's hyperthread sibling, and since the slices are
     // equal the whole call waits for it ( measured: a bimodal +45 % on a 3D diagram ). Its mask is
     // restored afterwards: it is the user's thread, not ours.
@@ -73,7 +83,7 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
     if ( pinned ) {
         cpu_set_t set;
         CPU_ZERO( &set );
-        CPU_SET( 0, &set );
+        CPU_SET( _cpu( 0 ), &set );
         sched_setaffinity( 0, sizeof( set ), &set );
     }
 #endif
@@ -108,7 +118,7 @@ void CpuThreadPool::_worker_loop( int w ) {
 #ifdef __linux__
         cpu_set_t set;
         CPU_ZERO( &set );
-        CPU_SET( w, &set );
+        CPU_SET( _cpu( w ), &set );
         pthread_setaffinity_np( pthread_self(), sizeof( set ), &set );
 #endif
     }

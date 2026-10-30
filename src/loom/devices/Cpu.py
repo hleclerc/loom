@@ -98,13 +98,18 @@ class Cpu( Device ):
 
 
 def _nb_workers():
-    """What `CpuQueue` will use: `LOOM_NB_THREADS` if set, else every hardware thread. The
-    per-thread scratch is sized on this, so the two must agree."""
+    """What `CpuQueue` will use: `LOOM_NB_THREADS` if set, else every CPU the process may run on
+    ( the pool's default, `cpu_thread_pool.cpp` ). The per-thread scratch is sized on this, so the
+    two must agree."""
     try:
         n = int( env.var( "NB_THREADS", "0" ) )
     except ValueError:
         n = 0
-    return n if n > 0 else ( os.cpu_count() or 1 )
+    if n > 0:
+        return n
+    if hasattr( os, "sched_getaffinity" ):
+        return len( os.sched_getaffinity( 0 ) ) or 1
+    return os.cpu_count() or 1
 
 
 def _total_host_ram():

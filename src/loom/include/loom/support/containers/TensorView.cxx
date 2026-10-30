@@ -5,6 +5,7 @@
 #include "../common_macros.h" // IWYU pragma: export  (LOOM_CHECK_INDEX)
 #include "TensorView.h"
 #include "Range.h"
+#include <algorithm>
 
 // #include "CartesianProduct.h"
 // #include "Range.h"
@@ -250,6 +251,12 @@ namespace detail::TensorViewFill {
     struct Scalar     { template<class I,class Out,class V> HD void operator()( I, Out out, V v ) const { out.ref() = v; } };
     struct Contiguous { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out._data.template as<typename Out::TF>()[ id ] = v; } };
     struct Strided    { template<class I,class Out,class V> HD void operator()( I id, Out out, V v ) const { out( out.indices_col_ordering( id ) ) = v; } };
+
+    /// `p[ 0 .. n )` = `v` on a CPU queue, one slice per worker
+    template<class Q,class T,class V> void cpu_slices( Q &&queue, T *p, SI n, V v ) {
+        const SI nt = n < 65536 ? 1 : SI( queue.nb_workers() );
+        queue.run_threads( int( nt ), [&]( int t ) { std::fill( p + n * t / nt, p + n * ( t + 1 ) / nt, T( v ) ); } );
+    }
 }
 
 UTP    auto DTP::_fill_with( TF value, auto &&run ) {
@@ -265,8 +272,18 @@ UTP    auto DTP::fill_with( auto &&queue_list, TF value ) {
     // a card with the support unit linked fills a view it already holds without instantiating a kernel for its type ( `CudaQueue.h` )
     if constexpr ( requires { cuda_fill_view( queue_list, *this, value ); } )
         return cuda_fill_view( queue_list, *this, value );
-    else
-    return _fill_with( value, [&]( auto &&...a ) { return run_parallel( FORWARD( queue_list ), FORWARD( a )... ); } );
+    else {
+        // on the CPU, a contiguous view is filled by slices, one per worker: the generic launch makes a call per item ( 13 ns per
+        // int measured, most of the cost of a call with a large output ). The launch then runs on nothing, for its return type.
+        constexpr bool cpu = requires { queue_list.nb_workers(); };
+        return _fill_with( value, [&]( auto &&items, auto body, auto &&...a ) {
+            if constexpr ( cpu && std::is_same_v<decltype( body ), detail::TensorViewFill::Contiguous> ) {
+                detail::TensorViewFill::cpu_slices( queue_list, _data.template as<TF>(), SI( nb_items() ), value );
+                return run_parallel( FORWARD( queue_list ), range( SI( 0 ) ), body, FORWARD( a )... );
+            } else
+                return run_parallel( FORWARD( queue_list ), FORWARD( items ), body, FORWARD( a )... );
+        } );
+    }
 }
 
 UTP    auto DTP::fill_with( auto &&queue_list, auto &&deps, TF value ) {

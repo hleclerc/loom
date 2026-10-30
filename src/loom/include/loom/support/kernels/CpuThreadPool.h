@@ -14,8 +14,9 @@ namespace sdot {
 /// created at the first launch and sleep on a condition variable between two: zero cost at
 /// rest, ~10 µs per wake-up. The calling thread acts as worker 0 (no wake-up for it).
 ///
-/// `SDOT_NB_THREADS` sets their number (default: `hardware_concurrency`), `SDOT_PIN_THREADS=1`
-/// pins worker `w` to CPU `w`.
+/// `SDOT_NB_THREADS` sets their number (default: the CPUs the process may run on, which is less
+/// than `hardware_concurrency` in a Slurm allocation), `SDOT_PIN_THREADS=1` pins worker `w` to
+/// the `w`-th of these CPUs.
 ///
 /// Distribution: `run_threads( T, job )` calls `job( t )` for `t` in `[ 0, T )`, the virtual
 /// threads being distributed in CONTIGUOUS slices over the workers. This is the split that won
@@ -43,6 +44,7 @@ private:
     static void _run_slice( int w, int W, int nb_threads, const std::function<void( int )> &job );
     void        _ensure_workers();
     void        _worker_loop( int w );
+    int         _cpu( int w ) const { return _cpus.empty() ? w : _cpus[ w % _cpus.size() ]; }   // where worker `w` is pinned
 
     std::vector<std::thread>          _workers;
     std::mutex                        _mutex;
@@ -55,6 +57,7 @@ private:
     int                               _nb_workers         = 1;
     bool                              _pin                = false;
     bool                              _stop               = false;
+    std::vector<int>                  _cpus;                       // the allowed CPUs, in order ( empty: unknown )
 };
 
 /// The process-wide pool, created at the first call, never destroyed (it may still own

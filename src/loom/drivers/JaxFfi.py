@@ -289,8 +289,11 @@ def call( code, ca, device, prefix = "" ):
     # is not a mutation of anything the caller could already have observed. Under a `vmap` these
     # are the OUTER values (batch axis stripped by Jax), which is why the batched lowering had to
     # be a copy: this one still describes the tensors as the caller knows them.
+    # inside a `shard_map` ( `loom.spmd` ) a kernel computes a value of its rank: typed as varying along the program's axes,
+    # like the collectives' results -- else Jax takes it for a value shared by all the ranks
+    from .JaxOperations import varying
     for buffer, array in zip( outputs, results ):
-        buffer.jax_write_back( array )
+        buffer.jax_write_back( varying( array ) )
 
 
 def _call_with_vjp( code, ca, device, prefix ):

@@ -14,6 +14,26 @@ import jax.numpy as jnp
 import jax
 
 
+def manual_axes():
+    """the axes of the `shard_map` being traced ( `loom.spmd` ), `()` outside of one"""
+    try:
+        return tuple( jax.sharding.get_abstract_mesh().manual_axes )
+    except AttributeError:
+        return ()
+
+
+def varying( x ):
+    """`x` typed as VARYING along every axis of the `shard_map` being traced ( a value of the rank, not one shared by all ), as
+    are the values a rank computes; `x` itself outside of one, or when it already is"""
+    axes = manual_axes()
+    if not axes or not hasattr( x, "dtype" ):
+        return x
+    try:
+        return jax.lax.pcast( x, axes, to = "varying" )
+    except ( ValueError, TypeError ):
+        return x
+
+
 class JaxOperations:
     """What the jax framework DOES with an array that already exists: its operations, its
     transforms, its readings, its way of building one from a concrete dtype and an explicit device, and of
@@ -77,6 +97,40 @@ class JaxOperations:
         buffers TIMES the number of chunks). The loop is what serializes the execution; the
         checkpoint is what keeps the loop's per-iteration residuals down to its inputs."""
         return jax.checkpoint( func )
+
+    def while_loop( self, cond, body, init ):
+        """`body` applied to the carry while `cond( carry )` holds: one `lax.while_loop`. Inside a `shard_map` ( `loom.spmd` ),
+        the carry starts VARYING along the program's axes, as what the body makes of it does ( a kernel's output, a collective )
+        -- else Jax refuses a carry whose type changes."""
+        from ..programs import _reports
+        vary = lambda c: jax.tree_util.tree_map( varying, c )
+        if not _reports:
+            return jax.lax.while_loop( cond, lambda c: vary( body( c ) ), vary( init ) )
+
+        # inside a program ( `loom.spmd` ), a capacity may overflow in the body: its report cannot leave the loop's trace, so the
+        # overflows ride in the carry ( one slot per report, in the order the body makes them ) and are reported after the loop
+        nb_slots, caps = 16, []
+
+        def body_with_reports( c ):
+            inner, flags = c
+            _reports.append( [] )
+            try:
+                out = body( inner )
+                reported = _reports[ -1 ]
+            finally:
+                _reports.pop()
+            if len( reported ) > nb_slots:
+                raise NotImplementedError( f"more than { nb_slots } capacity reports in the body of a while_loop" )
+            caps[ : ] = [ cap for cap, _ in reported ]
+            for i, ( _, r ) in enumerate( reported ):
+                flags = flags.at[ i ].max( jnp.reshape( r, ( -1, ) )[ 0 ].astype( jnp.int32 ) )
+            return vary( out ), varying( flags )
+
+        out, flags = jax.lax.while_loop( lambda c: cond( c[ 0 ] ), body_with_reports,
+                                         ( vary( init ), varying( jnp.zeros( nb_slots, jnp.int32 ) ) ) )
+        for i, cap in enumerate( caps ):
+            cap.report( flags[ i:i + 1 ] )
+        return out
 
     def fold( self, body, init, xs ):
         """`body( carry, x )` applied SEQUENTIALLY over the leading axis of `xs` (an array, or a

@@ -57,6 +57,13 @@ class NumpyOperations:
         """The identity: without a tape there is nothing to recompute."""
         return func
 
+    def while_loop( self, cond, body, init ):
+        """`body` applied to the carry while `cond( carry )` holds, in Python"""
+        carry = init
+        while bool( cond( carry ) ):
+            carry = body( carry )
+        return carry
+
     def fold( self, body, init, xs ):
         """`body( carry, x )` applied sequentially over the leading axis of `xs` (an array, or a
         dict of arrays sharing that axis), returning the final carry."""

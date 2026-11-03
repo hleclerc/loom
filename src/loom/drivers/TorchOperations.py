@@ -218,6 +218,13 @@ class TorchOperations:
     # see `JaxOperations.fold`. Torch's autograd is eager: a Python loop over the leading axis IS the
     # sequential execution Jax needs a `lax.scan` to express, and it already keeps a single
     # iteration's buffers live (the rest being handed to `checkpoint`).
+    def while_loop( self, cond, body, init ):
+        """`body` applied to the carry while `cond( carry )` holds, in Python"""
+        carry = init
+        while bool( cond( carry ) ):
+            carry = body( carry )
+        return carry
+
     def fold( self, body, init, xs ):
         leaves = xs if isinstance( xs, dict ) else { None: xs }
         n = len( next( iter( leaves.values() ) ) )

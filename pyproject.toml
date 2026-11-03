@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loom-ffi"
-version = "2026.10.23.1"
+version = "2026.11.03.1"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
@@ -19,7 +19,7 @@ dependencies = [
 jax = ["jax"]
 torch = ["torch"]
 # the pip CUDA compiler, pinned: the 13.4 frontend collapses on our kernels, 13.3 works
-cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.4"]
+cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.4", "nvidia-cuda-cccl<13.4"]   # ( CCCL: the CUB of the 1D kernels, and the one Jax brings )
 
 [project.scripts]
 loom-toolchain = "loom.toolchain:main"

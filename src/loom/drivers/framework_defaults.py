@@ -167,6 +167,18 @@ def fold( *args, **kwargs ):
     return _driver.fold( *args, **kwargs )
 
 
+def while_loop( cond, body, init ):
+    """`body` applied to the carry while `cond( carry )` holds -- one loop in the compiled graph for Jax ( `lax.while_loop` ), a Python
+    loop elsewhere. The operations of the carry's framework ( its first array )."""
+    def first_array( x ):
+        if isinstance( x, ( tuple, list ) ):
+            return next( ( a for a in map( first_array, x ) if a is not None ), None )
+        if isinstance( x, dict ):
+            return first_array( list( x.values() ) )
+        return x if hasattr( x, "shape" ) else None
+    return ops( first_array( init ) ).while_loop( cond, body, init )
+
+
 def concrete_eval( *args, **kwargs ):
     return _driver.concrete_eval( *args, **kwargs )
 

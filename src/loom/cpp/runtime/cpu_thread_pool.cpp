@@ -1,6 +1,10 @@
 // The process-wide thread pool -- see `loom/support/kernels/CpuThreadPool.h`.
 #include <loom/support/kernels/CpuThreadPool.h>
+#include <chrono>
 #include <cstdlib>
+#if defined( __x86_64__ ) || defined( _M_X64 )
+#include <immintrin.h>
+#endif
 
 #ifdef __linux__
 #include <pthread.h>
@@ -8,6 +12,36 @@
 #endif
 
 namespace sdot {
+
+/// HOW LONG A THREAD SPINS before it sleeps: the workers waiting for the next launch, the caller waiting for the end of a
+/// launch. Long enough to bridge the gap between two loops of a solver ( a few µs ), short enough that a pool between two
+/// calls of the user's program goes back to sleep at once. `SDOT_SPIN_US` overrides it ( 0: always sleep ).
+static double spin_seconds() {
+    static const double s = [] { const char *e = std::getenv( "SDOT_SPIN_US" ); return ( e ? std::atof( e ) : 100.0 ) * 1e-6; }();
+    return s;
+}
+
+static inline void cpu_relax() {
+#if defined( __x86_64__ ) || defined( _M_X64 )
+    _mm_pause();
+#elif defined( __aarch64__ )
+    asm volatile( "yield" );
+#endif
+}
+
+/// spins until `ready()` or `spin_seconds()` have passed; true if `ready()`
+template<class F> static bool spin_until( F &&ready ) {
+    if ( ready() ) return true;
+    const double limit = spin_seconds();
+    if ( limit <= 0 ) return false;
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    for ( int k = 1; ; ++k ) {
+        cpu_relax();
+        if ( ready() ) return true;
+        if ( k % 64 == 0 && std::chrono::duration<double>( clock::now() - t0 ).count() > limit ) return false;
+    }
+}
 
 CpuThreadPool::CpuThreadPool() {
     // The CPUs the process may run on: a Slurm allocation gives a few cores of a larger node, and
@@ -35,14 +69,14 @@ CpuThreadPool::~CpuThreadPool() {
     {
         std::lock_guard<std::mutex> lock( _mutex );
         _stop = true;
-        ++_generation;
+        _launch.store( ( ( _launch.load( std::memory_order_relaxed ) >> 16 ) + 1 ) << 16 | _nb_workers, std::memory_order_release );
     }
     _cv_job.notify_all();
     for ( auto &th : _workers )
         th.join();
 }
 
-/// One launch at a time: the pool holds ONE job ( `_current_job`, `_nb_remaining`, `_generation` ), and several threads may launch
+/// One launch at a time: the pool holds ONE job ( `_current_job`, `_nb_remaining`, `_launch` ), and several threads may launch
 /// it at once -- XLA runs independent custom calls of one program on its own threads ( measured: two adjoints of a `jax.jit`
 /// waited forever, each worker having taken the other's generation ). The callers queue here; a job still never relaunches
 /// the pool ( not reentrant ).
@@ -63,13 +97,17 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
     std::lock_guard<std::mutex> launch( launch_mutex() );
     _ensure_workers();
 
+    // the job is written BEFORE the launch moves ( release ): a spinning worker that sees the new launch sees the job. The
+    // launch is moved under the mutex so that a worker going to sleep cannot miss it. Only the `W` workers with a slice
+    // acknowledge it: the others read the launch word alone ( it carries `W` ), never the job, so the next launch may
+    // rewrite the job as soon as the `W` are out -- a small loop on a node of 128 cores waits for its few workers, not for
+    // all of them.
+    _current_job        = &job;
+    _current_nb_threads = nb_threads;
+    _nb_remaining.store( W - 1, std::memory_order_relaxed );
     {
         std::lock_guard<std::mutex> lock( _mutex );
-        _current_job        = &job;
-        _current_nb_threads = nb_threads;
-        _current_nb_workers = W;
-        _nb_remaining       = W - 1;
-        ++_generation;
+        _launch.store( ( ( _launch.load( std::memory_order_relaxed ) >> 16 ) + 1 ) << 16 | W, std::memory_order_release );
     }
     _cv_job.notify_all();
 
@@ -93,8 +131,11 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
         sched_setaffinity( 0, sizeof( previous ), &previous );
 #endif
 
-    std::unique_lock<std::mutex> lock( _mutex );
-    _cv_done.wait( lock, [&] { return _nb_remaining == 0; } );
+    auto done = [&] { return _nb_remaining.load( std::memory_order_acquire ) == 0; };
+    if ( ! spin_until( done ) ) {
+        std::unique_lock<std::mutex> lock( _mutex );
+        _cv_done.wait( lock, done );
+    }
     _current_job = nullptr;
 }
 
@@ -124,22 +165,22 @@ void CpuThreadPool::_worker_loop( int w ) {
     }
     long seen = 0;
     for ( ;; ) {
-        const std::function<void( int )> *job;
-        int nb_threads, W;
-        {
+        auto launched = [&] { return _launch.load( std::memory_order_acquire ) != seen; };
+        if ( ! spin_until( launched ) ) {
             std::unique_lock<std::mutex> lock( _mutex );
-            _cv_job.wait( lock, [&] { return _generation != seen; } );
-            seen = _generation;
-            if ( _stop )
-                return;
-            job = _current_job; nb_threads = _current_nb_threads; W = _current_nb_workers;
+            _cv_job.wait( lock, launched );
         }
-        if ( w < W )
-            _run_slice( w, W, nb_threads, *job );
-        {
+        seen = _launch.load( std::memory_order_acquire );
+        if ( _stop.load( std::memory_order_acquire ) )
+            return;
+        const int W = int( seen & 0xffff );
+        if ( w >= W )
+            continue;           // not in this launch: the job may already be the next launch's
+        _run_slice( w, W, _current_nb_threads, *_current_job );
+        // the last one out wakes the caller if it sleeps ( under the mutex: it cannot miss the notification )
+        if ( _nb_remaining.fetch_sub( 1, std::memory_order_acq_rel ) == 1 ) {
             std::lock_guard<std::mutex> lock( _mutex );
-            if ( w < W && --_nb_remaining == 0 )
-                _cv_done.notify_one();
+            _cv_done.notify_one();
         }
     }
 }

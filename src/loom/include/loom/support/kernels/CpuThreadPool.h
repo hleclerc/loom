@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common_macros.h" // LOOM_EXPORT
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <thread>
@@ -11,8 +12,11 @@ namespace sdot {
 
 /// THE process-wide thread pool: a single one, for all the kernels (`cpu_thread_pool()`), in
 /// the runtime library `libloom_runtime` that every generated library links. The workers are
-/// created at the first launch and sleep on a condition variable between two: zero cost at
-/// rest, ~10 µs per wake-up. The calling thread acts as worker 0 (no wake-up for it).
+/// created at the first launch. Between two launches they SPIN for a while ( `SPIN_US` ), then
+/// sleep on a condition variable: a solver that launches thousands of short loops ( the
+/// multigrid ) pays a few hundred nanoseconds per launch instead of a futex wake-up of ~10 µs
+/// per worker, and a pool at rest costs nothing. The calling thread acts as worker 0, and spins
+/// the same way for the end of the others.
 ///
 /// `SDOT_NB_THREADS` sets their number (default: the CPUs the process may run on, which is less
 /// than `hardware_concurrency` in a Slurm allocation), `SDOT_PIN_THREADS=1` pins worker `w` to
@@ -51,12 +55,12 @@ private:
     std::condition_variable           _cv_job, _cv_done;
     const std::function<void( int )> *_current_job        = nullptr;
     int                               _current_nb_threads = 0;
-    int                               _current_nb_workers = 0;
-    int                               _nb_remaining       = 0;
-    long                              _generation         = 0;
-    int                               _nb_workers         = 1;
+    // on lines of their own: the idle workers spin on `_launch` while the busy ones count down `_nb_remaining`
+    alignas( 64 ) std::atomic<int>    _nb_remaining       = 0;     // the workers of the current job still in it
+    alignas( 64 ) std::atomic<long>   _launch             = 0;     // ( generation << 16 ) | its number of workers: what the workers wait for
+    alignas( 64 ) int                 _nb_workers         = 1;
     bool                              _pin                = false;
-    bool                              _stop               = false;
+    std::atomic<bool>                 _stop               = false;
     std::vector<int>                  _cpus;                       // the allowed CPUs, in order ( empty: unknown )
 };
 

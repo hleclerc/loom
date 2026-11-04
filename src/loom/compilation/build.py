@@ -458,10 +458,11 @@ class _Graph:
             out = r.stdout or ""
             # ninja's own line for a no-op build is noise; a real compilation is worth seeing
             worked = "no work to do" not in out
+            if r.returncode:
+                # in the exception, not printed: whoever calls us may have silenced stdout
+                raise RuntimeError( f"ninja failed ({ r.returncode }) on { targets }\n{ out }" )
             if worked:
                 print( out, end = "", flush = True )
-            if r.returncode:
-                raise RuntimeError( f"ninja failed ({ r.returncode }) on { targets }" )
             return worked
 
 

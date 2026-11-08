@@ -1,18 +1,16 @@
 # loom
 
-**Your C++ kernel, as a Jax or Torch function.**
+**Your C++ kernel, as a Jax/Torch/Numpy/Cupy/... function.**
 
-Write the inner loop once, in plain C++ or CUDA. loom compiles it, hands it the framework's
+Write the inner loops once, in plain C++ or CUDA. loom compiles it, packages it, hands it the framework's
 tensors, runs it inside `jit`, `vmap` and `grad`, and gives you the gradient you wrote for it.
 
 📖 **Documentation: <https://hleclerc.github.io/loom/>**
 
 ## In short
 
-- **One call, two worlds.** Jax arrays, Torch tensors or numpy arrays go in as they are; the kernel
+- **One call, several worlds.** Jax arrays, Torch tensors, cupy or numpy arrays go in as they are; the kernel
   sees pointers, strides and templates.
-- **Kernels that never count dimensions.** Coordinates are read by axis name, so the same body runs
-  in 2-D or 3-D, batched or not, and a `vmap` adds an axis without the kernel knowing.
 - **Roles on the value.** `loom.out( x )`, `loom.mutable( x )`, `loom.scratch( x )` say what the
   kernel writes or borrows, right where the argument is passed.
 - **The adjoint is a kernel like any other.** Written in the same C++, wired into
@@ -59,8 +57,7 @@ cd loom
 pip install -e '.[jax]'       # or '.[torch]', '.[cuda]' for GPU kernels
 ```
 
-loom compiles kernels on first use, so a recent C++ compiler is needed (the adjoints rely on C++23
-rules Apple's clang lacks). See [Installing](https://hleclerc.github.io/loom/guide/installing) for
+loom compiles kernels on first use, so a recent C++ compiler is needed. See [Installing](https://hleclerc.github.io/loom/guide/installing) for
 the details, then try `python examples/diffusion/diffusion.py`.
 
 ## Repository layout

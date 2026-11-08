@@ -21,6 +21,9 @@
 #include <utility>
 #include <exception>
 #include <type_traits>
+#if defined( __CUDACC__ )
+#include <cuda_runtime.h>   // the read-back of the error count, on the call's stream ( `detail::nb_records` )
+#endif
 
 // ---------------------------------------------------------------------------- the C ABI
 // What Python hands over: for each buffer its address, rank, extents and BYTE strides (a buffer is
@@ -36,14 +39,24 @@ struct XLA_FFI_Buffer {
 
 struct XLA_FFI_CallFrame {
     const XLA_FFI_Buffer *args;     // the inputs, in `Bind()` order
-    const XLA_FFI_Buffer *rets;     // the outputs, ditto
-    const int64_t        *attrs;    // the attributes, ditto
+    const XLA_FFI_Buffer *rets;     // the outputs, ditto ( replaced by `regrow` )
+    const int64_t        *attrs;    // the attributes, ditto ( replaced by `regrow` )
 
     void *stream;                   // the platform stream the call is ordered on (a `cudaStream_t`), or null
     // the call's scratch pool: `allocate( context, nb_bytes, alignment )`, null when it refuses.
     // What it hands out lives until the call returns.
     void *( *allocate )( void *context, std::size_t nb_bytes, std::size_t alignment );
     void *allocate_context;
+
+    // THE OUTPUTS ARE THE CALLER'S TO GROW. After a run, the handler reads the count of records of the call's error buffer
+    // ( `rets[ errors_ret ]`, its first int32 ): none, the call is done. Otherwise it asks `regrow( context )`, which may fill the
+    // frame anew -- outputs allocated at larger capacities, the attributes that carry them -- and say so ( returns 1 ): the
+    // body runs again, without going back to the caller. 0: the caller takes it from there ( a failure record, a call it
+    // cannot grow ). `regrow` null, or `errors_ret` negative: one run, as before. Appended at the end: a handler compiled
+    // against the frame without these fields still reads the ones above.
+    int ( *regrow )( void *context );
+    void *regrow_context;
+    int64_t errors_ret;
 };
 
 // what a failed call returns: a message, in storage of its own (one per thread, never freed)
@@ -176,10 +189,45 @@ namespace detail {
         return n;
     }
 
+
+    // the count of records of an error buffer, wherever it lives: on the card, read on the call's stream once what was
+    // launched on it is done
+    inline int32_t nb_records( const XLA_FFI_CallFrame &f ) {
+        const void *data = f.rets[ f.errors_ret ].data;
+        int32_t n = 0;
+#if defined( __CUDACC__ )
+        cudaStream_t stream = reinterpret_cast<cudaStream_t>( f.stream );
+        if ( cudaMemcpyAsync( &n, data, sizeof( n ), cudaMemcpyDefault, stream ) != cudaSuccess || cudaStreamSynchronize( stream ) != cudaSuccess )
+            return -1;
+#else
+        n = *static_cast<const int32_t *>( data );
+#endif
+        return n;
+    }
+
+    // after a run: does the body run again? Only when the error buffer holds records and the caller grew the outputs
+    inline int &regrow_failed() { thread_local int failed = 0; return failed; }
+
+    inline bool run_again( XLA_FFI_CallFrame &f, int run ) {
+        regrow_failed() = 0;
+        if ( f.regrow == nullptr || f.errors_ret < 0 || run >= 24 )
+            return false;
+        int32_t n = nb_records( f );
+        if ( n < 0 ) {
+            regrow_failed() = 1;
+            return false;
+        }
+        return n != 0 && f.regrow( f.regrow_context ) == 1;
+    }
+
     inline XLA_FFI_Error *fail( const std::string &message ) {
         thread_local XLA_FFI_Error error;
         std::snprintf( error.message, sizeof( error.message ), "%s", message.c_str() );
         return &error;
+    }
+
+    inline XLA_FFI_Error *regrow_error( const XLA_FFI_CallFrame & ) {
+        return regrow_failed() ? fail( "loom: cannot read the error buffer back" ) : nullptr;
     }
 
     template<class... Tags>
@@ -194,7 +242,13 @@ namespace detail {
         template<class Fn>
         XLA_FFI_Error *Call( Fn fn, XLA_FFI_CallFrame *frame ) const {
             try {
-                return call( fn, *frame, std::index_sequence_for<Tags...>{} );
+                // the body runs again while a capacity overflows and the caller grows the outputs ( see `regrow` )
+                for ( int run = 0; ; ++run ) {
+                    if ( XLA_FFI_Error *error = call( fn, *frame, std::index_sequence_for<Tags...>{} ) )
+                        return error;
+                    if ( ! run_again( *frame, run ) )
+                        return regrow_error( *frame );
+                }
             } catch ( const std::exception &e ) {
                 return fail( std::string( "loom: the kernel threw: " ) + e.what() );
             } catch ( ... ) {

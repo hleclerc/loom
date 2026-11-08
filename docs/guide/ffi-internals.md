@@ -122,5 +122,18 @@ result, which declares nothing — reads its dtype off the buffer instead of inh
 A capacity is a guess: only the kernel knows how many items it will produce. So a kernel may ask for
 more than it was given. `ShapeVarView::set` compares the count against the `max` it was handed,
 records the overflow in the call's error buffer, and **clamps** the count — so whatever the body
-writes next stays inside the buffers this call allocated. Python then reserves more and runs again.
+writes next stays inside the buffers this call allocated. The call then runs again with more room.
 Nothing of a failed run survives: an output is a fresh buffer every time.
+
+Where it runs again depends on who allocates the outputs ( see [Sizes known at run time](./dynamic-sizes#capacities-and-overflow) ):
+
+* **pointer drivers** ( NumPy, Torch, CuPy ): in the call. The generated entry ( `FfiSource._STUB_POINTER` ) loops: after a
+  run it reads the count of records of the error buffer ( `detail::nb_records` in the shim's `ffi.h`, on the call's stream on
+  a card ) and, when there are some, calls the frame's `regrow`. That callback ( `PointerFfi.run` ) analyses the call again
+  with the grown capacities ( `CallArgsAnalysis.grown`, which replays the `vmap`s ), allocates the new outputs and fills the
+  frame with them; the body runs again. It returns 0 -- and the driver's own loop takes over -- on a failure record or when
+  the generated source would change. The frame's `regrow`, `regrow_context` and `errors_ret` come after its older fields, so a
+  kernel compiled before them still reads the frame, and runs once.
+* **Jax**: XLA allocates the outputs before the call, so the driver runs it again from Python ( eager ), or `loom.jit`
+  carries the check out of the compiled program with `checkify` and runs the whole function again ( `JaxWatch` ). Under a
+  plain `jax.jit`, a `jax.debug.callback` raises at run time.

@@ -55,14 +55,16 @@ shared by every item, and receives the sum of what they contribute.
 
 Under Jax, `jit( f )` runs `f` once on *tracers* -- values with a shape and a type but no content -- and what
 it records, kernel calls included, is compiled into one program. The call is a node of that program, and while
-`f` runs nothing can be read: a count a kernel wrote has no value yet.
+`f` runs nothing can be read: a count a kernel wrote has no value yet. `loom.jit` is `jax.jit` plus a watch on the capacities of
+the calls: an overflow leaves the program as an output, and the function runs again with more room -- see
+[Sizes known at run time](./dynamic-sizes#capacities-and-overflow).
 
 Under Torch, `jit( f )` is `torch.compile( f )`, and a kernel call is **not** put in the compiled graph: it is a
 break in it. The tensor code before and after is compiled; the call itself runs eagerly, on real values, between
 the two. Two consequences:
 
-* a call can read what a kernel just wrote (a count, a capacity) and size what follows from it, which a traced
-  call cannot -- see [Sizes known at run time](./dynamic-sizes);
+* a call can read what a kernel just wrote (a count, a capacity) and size what follows from it, and grows its outputs in
+  the call -- see [Sizes known at run time](./dynamic-sizes);
 * a kernel is not fused with the code around it, and the whole of `f` is not one launch.
 
 Inductor needs a C++ compiler. On macOS, inside a conda environment that has `clangxx`, loom points it to

@@ -67,14 +67,16 @@ class JaxOperations:
         through the VJP rule the call registers (see `JaxFfi._call_with_vjp`)."""
         return jax.grad( func, argnums = argnums )
 
-    def jit( self, func ):
+    def jit( self, func, **kwargs ):
         """Trace + compile `func` ONCE and reuse the executable across calls. A `loom.ffi_call` inside
         it is a proper FFI primitive, so it survives the trace unchanged; only the surrounding
         tensor algebra is fused by XLA. Reusing the jitted function across optimizer steps is what
         removes the per-step retrace/lower cost (bounded, flat memory) instead of re-lowering the
         whole graph each iteration. Under this trace, a `loom.ffi_call` cannot grow a capacity from
-        Python, so an overflow is reported at run time via `jax.debug.callback` (see `call`)."""
-        return jax.jit( func )
+        Python: the calls are WATCHED instead ( `JaxWatch` ) -- each one's overflow leaves the program as an output
+        ( `checkify` ), and on one, the capacity grows and the function runs again, whole."""
+        from .JaxWatch import jit
+        return jit( func, **kwargs )
 
     def vjp( self, func, *primals ):
         """`( func( *primals ), pullback )` -- the framework's reverse-mode primitive. Lets a test
@@ -363,6 +365,12 @@ class JaxOperations:
         prefix = name + "_"
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
+        # inside a `loom.jit` being traced: this call site's capacities, grown by what earlier runs learned
+        from . import JaxWatch
+        watch = JaxWatch.active()
+        if watch is not None:
+            rank = watch.site( name )
+            JaxWatch.apply_learned( watch, name, rank, output_capacities )
         while True:
             ca = CallArgsAnalysis( kwargs, device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
             ca.errors.call_name, ca.errors.failure_messages = name, dict( failures or {} )
@@ -381,7 +389,10 @@ class JaxOperations:
                 # device->host SYNC per call (a few % on CPU, a pipeline stall on GPU). It stays True
                 # by default because it cannot be decided a priori from the call args alone; only the
                 # caller knows whether a count is prescribed or produced.
-                if has_dynamic_capacity:
+                if watch is not None:
+                    # under `loom.jit`, the check leaves the program as an output, read once after the run
+                    JaxWatch.add_checks( ca, name, rank, failures )
+                elif has_dynamic_capacity:
                     jax.debug.callback( functools.partial( _raise_on_error, call_name = name, messages = dict( failures or {} ) ),
                                         ca.errors.raw )
                 return returned( returns )

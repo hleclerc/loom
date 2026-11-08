@@ -55,9 +55,14 @@ class _Buffer( ctypes.Structure ):
 _ALLOCATE = ctypes.CFUNCTYPE( ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t )
 
 
+# `int regrow( void *context )`: the outputs grown and the frame filled anew ( 1 ), or not ( 0 ) -- see the shim's `XLA_FFI_CallFrame`
+_REGROW = ctypes.CFUNCTYPE( ctypes.c_int, ctypes.c_void_p )
+
+
 class _CallFrame( ctypes.Structure ):
     _fields_ = [ ( "args", ctypes.POINTER( _Buffer ) ), ( "rets", ctypes.POINTER( _Buffer ) ), ( "attrs", ctypes.POINTER( ctypes.c_int64 ) ),
-                 ( "stream", ctypes.c_void_p ), ( "allocate", _ALLOCATE ), ( "allocate_context", ctypes.c_void_p ) ]
+                 ( "stream", ctypes.c_void_p ), ( "allocate", _ALLOCATE ), ( "allocate_context", ctypes.c_void_p ),
+                 ( "regrow", _REGROW ), ( "regrow_context", ctypes.c_void_p ), ( "errors_ret", ctypes.c_int64 ) ]
 
 
 def shim_include_dir() -> str:
@@ -79,7 +84,7 @@ def _load( source: str, device, prefix: str, sources, code_name, signature, head
     # the key is what changes the binary: the source, how it is compiled -- and WHICH FFI it is
     # compiled against, so a pointer-FFI kernel never collides with a Jax one of the same text.
     # and the generated headers it was rendered with (`JaxFfi.compile_and_register`)
-    name = "np_" + prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|{ include_roots() }|numpy_ffi_stream"
+    name = "np_" + prefix + encode_base_62( f"{ source }|{ sources }|{ device.compiler.build_signature }|{ include_roots() }|numpy_ffi_regrow"
                                             + headers_key( headers ) )
     if name in _loaded:
         journal.record_reuse()
@@ -229,7 +234,6 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
     ins  = [ foreign_operand( x, device, getattr( b, "runtime_strides", False ), adapter.framework )
              or adapter.operand( x, device, getattr( b, "runtime_strides", False ) ) for b, x in zip( inputs, values ) ]
     outs = [ adapter.zeros( *b.out_shape_dtype(), device ) for b in outputs ]
-    out_operands = [ adapter.operand_of_output( o ) for o in outs ]
 
     # the call's scratch pool, if the kernel asks for one (`FfiCode( allocator = True )`, CUDA): memory of the
     # framework's own, kept here until the kernel is done
@@ -245,10 +249,55 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
         except Exception:
             return None
 
+    def rets_of( outs ):
+        return ( _Buffer * max( 1, len( outs ) ) )( *[ adapter.operand_of_output( o ).as_buffer() for o in outs ] )
+
+    def attrs_of( attrs ):
+        return ( ctypes.c_int64 * max( 1, len( attrs ) ) )( *[ int( v ) for _, _, v in attrs ] )
+
+    from .CallArg_Errors import CallArg_Errors
+    errors_ret = next( ( i for i, b in enumerate( outputs ) if isinstance( b, CallArg_Errors ) ), -1 )
+
+    # THE CALL GROWS ITS OUTPUTS ITSELF: when a capacity overflows, the handler asks for larger outputs and runs the body again,
+    # in the same call ( see the shim's `regrow` ). Python is only asked on an overflow: the analysis is made again with the
+    # capacities grown ( `CallArgsAnalysis.grown` ), new outputs are allocated, the frame is filled with them. A call whose source
+    # would change, or a failure record, is left to the caller ( 0 ): it reads the error buffer as before.
+    state = dict( ca = ca, outputs = outputs, outs = outs, keep = [] )
+
+    def regrow( _ ):
+        try:
+            current = state[ "ca" ]
+            current.errors.raw = state[ "outs" ][ errors_ret ]
+            grown = current.grown()
+            if grown is None:
+                return 0
+            g_source, g_inputs, g_outputs, g_attrs, _, _ = _render_call( code, grown, device )
+            if g_source != source or len( g_inputs ) != len( inputs ) or len( g_outputs ) != len( outputs ):
+                return 0
+            g_outs = [ adapter.zeros( *b.out_shape_dtype(), device ) for b in g_outputs ]
+            rets, values = rets_of( g_outs ), attrs_of( g_attrs )
+            from .. import env
+            if env.flag( "DEBUG_CAPACITY" ):
+                print( f"[capacity] { code.name }: grown in the call", flush = True )
+            state.update( ca = grown, outputs = g_outputs, outs = g_outs )
+            state[ "keep" ] += [ rets, values ]
+            frame.rets = ctypes.cast( rets, ctypes.POINTER( _Buffer ) )
+            frame.attrs = ctypes.cast( values, ctypes.POINTER( ctypes.c_int64 ) )
+            adapter.order_before( device )          # the new outputs exist before the kernels that write them
+            return 1
+        except Exception:
+            from .. import env
+            if env.flag( "DEBUG_CAPACITY" ):
+                import traceback
+                traceback.print_exc()
+            return 0                                # the caller reads the error buffer, and raises what there is to raise
+
     args = ( _Buffer * max( 1, len( ins ) ) )( *[ o.as_buffer() for o in ins ] )
-    rets = ( _Buffer * max( 1, len( outs ) ) )( *[ o.as_buffer() for o in out_operands ] )
-    values = ( ctypes.c_int64 * max( 1, len( attrs ) ) )( *[ int( v ) for _, _, v in attrs ] )
-    frame = _CallFrame( args, rets, values, adapter.stream( device ), _ALLOCATE( allocate ), None )
+    rets = rets_of( outs )
+    values = attrs_of( attrs )
+    regrow_fn = _REGROW( regrow )
+    frame = _CallFrame( args, rets, values, adapter.stream( device ), _ALLOCATE( allocate ), None,
+                        regrow_fn if errors_ret >= 0 else _REGROW(), None, errors_ret )
 
     adapter.order_before( device )
     try:
@@ -257,7 +306,11 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
         adapter.order_after( device )
     if error:
         raise RuntimeError( ctypes.string_at( error ).decode( errors = "replace" ) )
-    return outputs, outs
+    if state[ "ca" ] is not ca:
+        # grown in the call: the caller's analysis reads the error buffer of the LAST run ( the one whose outputs it gets ), not
+        # the one that overflowed -- whichever outputs it writes back
+        ca.errors.raw = state[ "outs" ][ errors_ret ]
+    return state[ "outputs" ], state[ "outs" ]
 
 
 def call( code, ca, device, prefix, adapter: PointerAdapter ):

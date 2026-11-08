@@ -164,18 +164,22 @@ _STUB_POINTER = """\
 extern "C" LOOM_EXPORT const char *{symbol}( const loom_raw::Raw *, const std::int64_t *, const loom_raw::Context * );
 """ + _ENTRY_NAME + """\
 XLA_FFI_Error *SDOT_FFI_ENTRY( XLA_FFI_CallFrame *frame ) {{
-    loom_raw::Raw bufs[ {nb} + 1 ];
-    for ( int i = 0; i < {na}; ++i )
-        bufs[ i ] = {{ frame->args[ i ].data, frame->args[ i ].dims, frame->args[ i ].strides_bytes }};
-    for ( int i = 0; i < {nr}; ++i )
-        bufs[ {na} + i ] = {{ frame->rets[ i ].data, frame->rets[ i ].dims, frame->rets[ i ].strides_bytes }};
-    const loom_raw::Context context{{ frame->stream, frame->allocate, frame->allocate_context }};
-    const char *message = {symbol}( bufs, frame->attrs, &context );
-    if ( ! message )
-        return nullptr;
-    static thread_local XLA_FFI_Error error;
-    std::snprintf( error.message, sizeof error.message, "%s", message );
-    return &error;
+    // the body runs again, in the call, while a capacity overflows and the caller grows the outputs ( the frame's `regrow` )
+    for ( int run = 0; ; ++run ) {{
+        loom_raw::Raw bufs[ {nb} + 1 ];
+        for ( int i = 0; i < {na}; ++i )
+            bufs[ i ] = {{ frame->args[ i ].data, frame->args[ i ].dims, frame->args[ i ].strides_bytes }};
+        for ( int i = 0; i < {nr}; ++i )
+            bufs[ {na} + i ] = {{ frame->rets[ i ].data, frame->rets[ i ].dims, frame->rets[ i ].strides_bytes }};
+        const loom_raw::Context context{{ frame->stream, frame->allocate, frame->allocate_context }};
+        if ( const char *message = {symbol}( bufs, frame->attrs, &context ) ) {{
+            static thread_local XLA_FFI_Error error;
+            std::snprintf( error.message, sizeof error.message, "%s", message );
+            return &error;
+        }}
+        if ( ! xla::ffi::detail::run_again( *frame, run ) )
+            return xla::ffi::detail::regrow_error( *frame );
+    }}
 }}"""
 
 

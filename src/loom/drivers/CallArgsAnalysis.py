@@ -55,6 +55,12 @@ class CallArgsAnalysis:
 
     def __init__( self, args : dict, device, output_attributes = (), capacities = {}, output_attribute_exceptions = (), input_exceptions = (), batch_alignment = None, scratch_attributes = (), groups = None, call_name = "", nb_items = None ) -> None:
         self.device = device
+        # what it takes to analyse the same call again with other capacities ( `grown` ): the arguments, and the `vmap`s that
+        # derived this analysis from the first one ( `batched` )
+        self._rebuild_args = ( args, device, output_attributes, output_attribute_exceptions, input_exceptions, batch_alignment,
+                               scratch_attributes, groups, call_name, nb_items )
+        self.given_capacities = dict( capacities )
+        self._batched_by = ()
         # SCRATCH: the call's own working buffers. Written like outputs, but they are NOT FFI buffers: the generated handler takes
         # them from the call's allocator ( `kernels/ScratchBuffer.h` ), grows them and runs the body again when one of their counts
         # overflows -- in the call, under a `jit` too --, and nothing of them comes back ( no write-back, no residual for the
@@ -260,6 +266,24 @@ class CallArgsAnalysis:
                 node.error_id = error_id
                 error_id += 1
 
+    def grown( self ):
+        """The same call analysed again, with the capacities that overflowed grown -- `max( wanted, 2 * capacity )`, as the
+        drivers' loops do --, or `None` if none did. What a handler asks for when it runs the body again IN the call (
+        `PointerFfi`: the outputs are loom's to allocate there). Raises `KernelFailure` on a failure record, as
+        `capacity_overflows` does."""
+        overflows = self.capacity_overflows()
+        if not overflows:
+            return None
+        capacities = dict( self.given_capacities )
+        for path, wanted, capacity in overflows:
+            capacities[ path ] = max( wanted, 2 * capacity )
+        args, device, outs, out_exceptions, in_exceptions, alignment, scratch, groups, call_name, nb_items = self._rebuild_args
+        res = CallArgsAnalysis( args, device, outs, capacities, out_exceptions, in_exceptions, alignment, scratch, groups, call_name, nb_items )
+        for axis_name, axis_size, batched_inputs in self._batched_by:
+            res = res.batched( axis_name, axis_size, batched_inputs )
+        res.errors.call_name, res.errors.failure_messages = self.errors.call_name, self.errors.failure_messages
+        return res
+
     def capacity_overflows( self ):
         """The capacities this call turned out to be too small for: `[ ( path, wanted, capacity ) ]`,
         empty if the call went through, `None` if we cannot know here (a traced buffer -- see
@@ -318,6 +342,7 @@ class CallArgsAnalysis:
         res.args = { n: c._clone( mapping ) for n, c in self.args.items() }
         res.errors = self.errors._clone( mapping )
         res.batch_axes = list( self.batch_axes ) + [ axis_name ]
+        res._batched_by = self._batched_by + ( ( axis_name, axis_size, frozenset( batched_inputs ) ), )
         # `tensors`, `error_vars` and `axis_names` are not carried: all three are derived from the
         # nodes, so they follow the CLONES on their own (each keeps its `ffi_name`/`error_id`), and
         # the batch axis reaches them through the buffers we are about to give it below.

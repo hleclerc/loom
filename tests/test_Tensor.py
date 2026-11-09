@@ -537,6 +537,29 @@ if test( "tensor_reduce_ragged" ):
     assert int( t.min() ) == 1                                          # global min over real cells
 
 
+if test( "tensor_reduce_ragged_dense_tail" ):
+    # a ragged axis followed by a dense one, assigned from plain nested lists
+    class Cells( Aggregate ):
+        pos         : RealTensor[ "cell", "vtx", "dim" ]
+        cell        : Axis[ "nb_cells" ]
+        vtx         : Axis[ "nb_vtx" ]
+        dim         : Axis[ "nb_dims" ]
+        nb_cells    : ShapeVar
+        nb_vtx      : ShapeVar[ "cell" ]
+        nb_dims     : ShapeVar
+
+    c = Cells()
+    c.pos = [ [ [ 0.0, 0.0, 1.0 ], [ 1.0, 0.0, 2.0 ], [ 0.0, 1.0, 3.0 ] ], [ [ 5.0, 5.0, 5.0 ] ], [ [ 0.0, 0.0, -1.0 ], [ 0.0, 0.0, 3.0 ] ] ]
+    assert c.nb_vtx.value.tolist() == [ 3, 1, 2 ]
+    assert int( c.nb_dims.value ) == 3
+
+    g = c.pos.mean( "vtx" )
+    assert host( g ).tolist() == [ [ 1 / 3, 1 / 3, 2.0 ], [ 5.0, 5.0, 5.0 ], [ 0.0, 0.0, 1.0 ] ]
+    z = RealTensor[ c.dim ]( [ 0.0, 0.0, 1.0 ] )
+    h = ( c.pos - g ).dot( z, "dim" )
+    assert host( h.max( "vtx" ) ).tolist() == [ 1.0, 0.0, 2.0 ]   # cell 1: 0, not a padding value
+
+
 if test( "dtype_is_a_contract_not_a_label" ):
     # A `Tensor`'s dtype is not decoration: `CallArg_Tensor` spells it as the C++ element type of
     # the buffer it binds, so a buffer of another type is REINTERPRETED by the kernel rather than

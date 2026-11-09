@@ -92,3 +92,24 @@ if test( "from_dense_shape" ):
         assert shape.sizes( d ).tolist() == expected
 
     assert shape.capacities() == [ 4, 5, 6 ]
+
+
+if test( "dense dimension behind a ragged one" ):
+    # 3 coordinates for every vertex, a varying number of vertices per cell: the last extent does
+    # not vary at all, even if its sizes come nested in lists of different lengths
+    shape = ReferenceShape.from_value( [ [ [ 0, 0, 1 ], [ 1, 0, 2 ], [ 0, 1, 3 ] ], [ [ 5, 5, 5 ] ], [ [ 0, 0, 1 ], [ 0, 0, 3 ] ] ] )
+
+    assert len( shape ) == 3
+    assert shape.sizes( 1 ).tolist() == [ 3, 1, 2 ]
+    assert shape.dep_dims( 1 ) == ( 0, )
+    assert shape.sizes( 2 ).tolist() == 3
+    assert shape.dep_dims( 2 ) == ()
+    assert shape.capacities() == [ 3, 3, 3 ]
+
+
+if test( "extent varying along an outer dimension only" ):
+    # the last extent changes from one cell to the next, but not from one vertex to the next
+    shape = ReferenceShape.from_value( [ [ [ 1, 2 ], [ 3, 4 ] ], [ [ 5, 6, 7 ] ] ] )
+
+    assert shape.sizes( 2 ).tolist() == [ 2, 3 ]
+    assert shape.dep_dims( 2 ) == ( 0, )

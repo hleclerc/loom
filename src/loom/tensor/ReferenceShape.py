@@ -49,7 +49,7 @@ class ReferenceShape:
         dims = []
         for d in range( _tree_ndim( tree ) ):
             sizes, dropped = _collapse_uniform( _query( tree, d ) )
-            dims.append( ( numpy.array( sizes, dtype = int ), tuple( range( dropped, d ) ) ) )
+            dims.append( ( numpy.array( sizes, dtype = int ), tuple( range( dropped, dropped + _depth( sizes ) ) ) ) )
         return cls( dims )
 
     @classmethod
@@ -105,8 +105,29 @@ def _collapse_uniform( sizes ):
     along them), returning `( collapsed, dropped )`. `dropped` counts how many outer dimensions were
     removed, so the caller knows which dimensions the survivors are indexed by. A scalar (dense) is
     returned untouched."""
+    sizes = _collapse_inner( sizes )
     dropped = 0
     while isinstance( sizes, list ) and all( s == sizes[ 0 ] for s in sizes ):
         sizes = sizes[ 0 ]
         dropped += 1
     return sizes, dropped
+
+
+def _collapse_inner( sizes ):
+    """Replace, bottom-up, each subtree whose extents are all equal by that one extent: the INNER
+    dimensions the extent does not vary along. Without it a dense dimension behind a ragged one
+    (`[ [ [ 0, 0, 1 ], [ 1, 0, 2 ] ], [ [ 5, 5, 5 ] ] ]`: 3 coordinates for every vertex) keeps a
+    jagged `[ [ 3, 3 ], [ 3 ] ]` that no outer collapse can flatten. When the subtrees end at
+    different depths ( the extent does vary along the inner dims for some of them ), the tree is
+    kept as it is: a dependency must hold for the whole dimension."""
+    if not isinstance( sizes, list ):
+        return sizes
+    children = [ _collapse_inner( s ) for s in sizes ]
+    if children and all( not isinstance( c, list ) for c in children ) and all( c == children[ 0 ] for c in children ):
+        return children[ 0 ]
+    depths = { _depth( c ) for c in children }
+    return children if len( depths ) <= 1 else sizes
+
+
+def _depth( tree ):
+    return 1 + _depth( tree[ 0 ] ) if isinstance( tree, list ) and tree else 0

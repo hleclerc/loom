@@ -18,8 +18,9 @@ not wrapped, and never see anything but loom values.
     p = sdot.plan( f, g )                 # a VIEW of the plan: `p.barycenters` is a jax array
 
 * A public function reads the UNIVERSE of its arguments, UNWRAPS them ( a view becomes the object it
-  shows, a callback is wrapped so that what the internals give it is exported ), calls the internal
-  function, and EXPORTS the result.
+  shows, an array of a framework becomes a loom `Tensor`, a callback is wrapped so that what the
+  internals give it is exported ), calls the internal function, and EXPORTS the result. The data is
+  thus HOMOGENIZED: the internals see loom tensors whatever the framework, and are written once.
 * An object of an exported class leaves as a VIEW ( `View` ): it keeps the universe, converts its
   attributes when they are read, and its methods are public functions in which it takes part as an
   argument of its universe. A name in `_` is read raw: the service door. What is written to a view is
@@ -37,12 +38,17 @@ and an object it returns has no universe -- it weighs nothing in the calls it en
 given to a function with numpy arrays leaves the result in numpy ), and what is read on it comes out in the
 default framework of the moment."""
 import contextlib
+import contextvars
 import functools
 import inspect
 
 
 # the view class of each exported class, by internal class -- for every package that exported its namespace
 _VIEWS = {}
+
+# True while the internals of a public call run: the loom tensors they see were made by the boundary, and
+# say nothing of the caller ( see `universe_of` )
+_INSIDE = contextvars.ContextVar( "loom_boundary_inside", default = False )
 
 
 def export_namespace( namespace ):
@@ -73,7 +79,7 @@ def public_function( fn ):
 
     @functools.wraps( fn )
     def call( *args, **kwargs ):
-        return _call( fn, universe_of( args, kwargs, neutral = True ), args, kwargs )
+        return _call( fn, _universe_of_call( args, kwargs ), args, kwargs )
 
     call._loom_public = True
     return call
@@ -127,7 +133,7 @@ class View( metaclass = _ViewMeta ):
     __slots__ = ( "_loom_obj", "_universe" )
 
     def __new__( vcls, *args, **kwargs ):
-        return _call( vcls._loom_cls, universe_of( args, kwargs, neutral = True ), args, kwargs )
+        return _call( vcls._loom_cls, _universe_of_call( args, kwargs ), args, kwargs )
 
     def __init__( self, *args, **kwargs ):
         pass                                  # all done by `__new__`
@@ -212,6 +218,15 @@ def _bound( method, view ):
     return call
 
 
+def _universe_of_call( args, kwargs ):
+    """The universe of a call to a public function or class. Made FROM INSIDE ( a function of the package calling
+    another one by its public name, which `export_namespace` put in the globals ), it is `"loom"`: the internals
+    stay among loom values, and nothing is exported to come back in."""
+    if _INSIDE.get():
+        return "loom"
+    return universe_of( args, kwargs, neutral = True )
+
+
 def _call( fn, universe, args, kwargs ):
     """`fn( *args, **kwargs )` across the boundary, in `universe` -- on its driver when that is another framework than the
     default ( Jax tracers in a Torch process ): what the internals decide from `loom.resolved_device()` ( the card or the
@@ -220,6 +235,7 @@ def _call( fn, universe, args, kwargs ):
     args = tuple( _unwrap( a, universe ) for a in args )
     kwargs = { k: _unwrap( v, universe ) for k, v in kwargs.items() }
     other = universe not in ( None, "loom", "numpy" ) and universe != framework_defaults.framework_name()
+    token = _INSIDE.set( True )
     try:
         with framework_defaults.using( universe ) if other else contextlib.nullcontext():
             res = fn( *args, **kwargs )
@@ -229,6 +245,8 @@ def _call( fn, universe, args, kwargs ):
                 if not k.startswith( "_" ):
                     setattr( e, k, export( v, universe ) )
         raise
+    finally:
+        _INSIDE.reset( token )
     return export( res, universe )
 
 
@@ -242,7 +260,7 @@ def _unwrap( value, universe ):
         return object.__getattribute__( value, "_loom_obj" )
     if isinstance( value, ( list, tuple, dict ) ):
         items = value.values() if isinstance( value, dict ) else value
-        if not any( isinstance( v, ( View, list, tuple, dict ) ) or _is_callback( v ) for v in items ):
+        if not any( isinstance( v, ( View, list, tuple, dict ) ) or _is_callback( v ) or _is_array( v ) for v in items ):
             return value          # nothing to unwrap: not even a copy
         if isinstance( value, dict ):
             return { k: _unwrap( v, universe ) for k, v in value.items() }
@@ -252,7 +270,22 @@ def _unwrap( value, universe ):
         return type( value )( *res ) if hasattr( value, "_fields" ) else type( value )( res )
     if universe != "loom" and _is_callback( value ):
         return _callback( value, universe )
+    if _is_array( value ):
+        # THE DATA IS HOMOGENIZED: an array of any framework comes in as a loom tensor, so that the
+        # internals are written once, with loom's operations, whoever owns the buffer
+        from .tensor.Tensor import Tensor
+        return Tensor.as_tensor( value )
     return value
+
+
+def _is_array( value ):
+    """a bare array of a framework ( not a loom tensor, not a python scalar or list )"""
+    if value is None or isinstance( value, ( str, int, float, bool, complex, list, tuple, dict ) ):
+        return False
+    from .tensor.storage.buffers import buffer_class_for
+    if buffer_class_for( value ) is None:
+        return False          # decided by the module of its type: an object of the package is not touched
+    return hasattr( value, "shape" )   # not a `torch.device`, a `jax.numpy.dtype`: of the framework, but not data
 
 
 def _is_callback( value ):
@@ -264,7 +297,12 @@ def _is_callback( value ):
 def _callback( fn, universe ):
     @functools.wraps( fn )
     def call( *args, **kwargs ):
-        return _unwrap( fn( *export( args, universe ), **export( kwargs, universe ) ), universe )
+        token = _INSIDE.set( False )         # back in the user's world while their function runs
+        try:
+            res = fn( *export( args, universe ), **export( kwargs, universe ) )
+        finally:
+            _INSIDE.reset( token )
+        return _unwrap( res, universe )
     call._loom_public = True     # already at the boundary: not wrapped again
     return call
 
@@ -306,7 +344,8 @@ def export( value, universe ):
 
 def universe_of( args = (), kwargs = None, neutral = False ):
     """The universe of a call made with `args` / `kwargs`: `"loom"` when one of them IS a loom
-    `Tensor`, else the framework their buffers promote to (see `drivers/promotion.py`), else the
+    `Tensor` given by a caller ( inside a public call, where every array became one, a loom tensor
+    counts by the framework of its buffer ), else the framework their buffers promote to (see `drivers/promotion.py`), else the
     default framework -- or `None` when `neutral` ( a constructor: see the module ).
 
     An object can DECLARE its universe in a `_universe` attribute, which is then taken instead of
@@ -318,9 +357,10 @@ def universe_of( args = (), kwargs = None, neutral = False ):
     from .drivers.promotion import promote
     from .drivers import framework_defaults
 
+    inside = _INSIDE.get()
     tracing, plain, seen = set(), set(), set()
     for value in ( *args, *( kwargs or {} ).values() ):
-        if isinstance( value, Tensor ):
+        if isinstance( value, Tensor ) and not inside:
             return "loom"
         if isinstance( value, View ):
             declared = object.__getattribute__( value, "_universe" )

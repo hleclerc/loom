@@ -29,6 +29,10 @@ from . import env as _env
 default_framework = None
 default_device    = None
 
+# ---- WHERE a distributed program runs ( `box_programs.py` ) when its operands do not say it: a `Ranks`, or `None` for what the
+# process was started in ( `loom.detect_ranks()`: `torch.distributed`, an MPI launcher ), one rank otherwise
+default_ranks = None
+
 # ---- WHERE the kernels come from ----------------------------------------------------------------------------
 #     loom.prefer_catalogue = True          ( the default; `LOOM_PREFER_CATALOGUE=0` for False )
 #
@@ -150,6 +154,13 @@ def __getattr__(name: str):
         "Capacity":        (".programs",                  "Capacity"),
         "route":           (".programs",                  "route"),
         "scatter_add":     (".programs",                  "scatter_add"),
+        "detect_ranks":    (".programs",                  "detect_ranks"),
+        # programs per box ( `box_programs.py` )
+        "BoxProgram":      (".box_programs",              "BoxProgram"),
+        "Box":             (".box_programs",              "Box"),
+        "Inbox":           (".box_programs",              "Inbox"),
+        "Outbox":          (".box_programs",              "Outbox"),
+        "BoxStore":        (".box_programs",              "BoxStore"),
         # the vocabulary of a call's arguments: the role is stated ON the value
         "out":             (".calls",                 "out"),
         "mutable":         (".calls",                 "mutable"),

@@ -96,8 +96,14 @@ class CallArgsAnalysis:
         # empty for a plain one). Their NAMES drive `global_batch_indices` (see `_batch_indices_decl`)
         # and `batch_dim_expr`; the leading dimension they add to each tensor is handled like any
         # other declared axis. Collected here, deduped in first-seen order.
+        # A bare tensor counts too: the batch axes among its own ( `new_batch_axis` ), which is how a
+        # batch is made by hand without an aggregate.
+        from ..tensor.Tensor import Tensor
         for inst in args.values():
-            for axis in getattr( inst, "batch_axes", () ):
+            axes = list( getattr( inst, "batch_axes", () ) )
+            if isinstance( inst, Tensor ):
+                axes += [ a for a in inst.axes if getattr( a, "is_batch", False ) ]
+            for axis in axes:
                 if axis.name not in self.batch_axes:
                     self.batch_axes.append( axis.name )
 

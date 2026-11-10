@@ -991,6 +991,38 @@ if test( "a_live_batch_axis_does_not_rename_the_kernel" ):
     assert [ float( v ) for v in alive[ 1 ][ 1 ].val.value ] == [ 1.0, 1.0, 1.0 ]
 
 
+if test( "a_bare_tensor_carries_its_batch_axis" ):
+    # A BATCH BY HAND, without an aggregate: a tensor declared over a `new_batch_axis` makes the call
+    # batched over it -- the kernel gets it in `batch_axes`, as it would from a `vmap`
+    from loom.tensor import new_batch_axis
+
+    kernel = FfiCode( code = """
+        namespace {
+            struct RowSum {
+                HD void operator()( auto coords, auto &&args, auto batch_axes ) const {
+                    auto line = args.inputs.m( coords );
+                    TF s = 0;
+                    for ( SI k = 0; k < line.size( col ); ++k )
+                        s += line( col = k );
+                    args.outputs.s( coords ) = s;
+                }
+            };
+            void kernel( auto &&queue, auto &&batch_axes, auto &&args ) {
+                queue.run_parallel( RowSum(), batch_axes + args.inputs.m.domain( row ), args, batch_axes );
+            }
+        }
+    """ )
+    row = Axis( ShapeVar(), name = "row" )
+    col = Axis( ShapeVar(), name = "col" )
+    b = new_batch_axis( 2 )
+    m = [ [ [ 0, 1, 2 ], [ 3, 4, 5 ] ], [ [ 0, 2, 4 ], [ 6, 8, 10 ] ] ]
+    s = loom.ffi_call( "test_call_bare_batch", kernel,
+        m = RealTensor[ b, row, col ]( m ),
+        s = loom.out( RealTensor[ b, row ]() ),
+    )
+    assert host( s.value ).tolist() == [ [ 3, 12 ], [ 6, 24 ] ]
+
+
 if test( "a_raw_value_goes_in_as_it_is" ):
     # WHAT WE NO LONGER WRITE. A numpy array, a framework array, a python float
     # go through WITHOUT wrapping: `Tensor.as_tensor` reads their kind ( a fact ) and leaves the

@@ -121,11 +121,15 @@ class JaxOperations:
                 reported = _reports[ -1 ]
             finally:
                 _reports.pop()
-            if len( reported ) > nb_slots:
-                raise NotImplementedError( f"more than { nb_slots } capacity reports in the body of a while_loop" )
-            caps[ : ] = [ cap for cap, _ in reported ]
-            for i, ( _, r ) in enumerate( reported ):
-                flags = flags.at[ i ].max( jnp.reshape( r, ( -1, ) )[ 0 ].astype( jnp.int32 ) )
+            # one slot per CAPACITY, not per report: a capacity reported by many calls ( many boxes ) ORs its overflows
+            slot = {}
+            for cap, _ in reported:
+                slot.setdefault( id( cap ), ( len( slot ), cap ) )
+            if len( slot ) > nb_slots:
+                raise NotImplementedError( f"more than { nb_slots } capacities reported in the body of a while_loop" )
+            caps[ : ] = [ cap for _, cap in sorted( slot.values(), key = lambda x: x[ 0 ] ) ]
+            for cap, r in reported:
+                flags = flags.at[ slot[ id( cap ) ][ 0 ] ].max( jnp.reshape( r, ( -1, ) )[ 0 ].astype( jnp.int32 ) )
             return vary( out ), varying( flags )
 
         out, flags = jax.lax.while_loop( lambda c: cond( c[ 0 ] ), body_with_reports,
@@ -167,6 +171,14 @@ class JaxOperations:
     # trace. A traced input still gives a tracer -- the caller checks its inputs first.
     def concrete_eval( self ):
         return jax.ensure_compile_time_eval()
+
+    def take_row( self, a, i ):
+        """`a[ i ]` along the first axis, `i` an int array `[ 1 ]`, traced or not"""
+        return jax.lax.dynamic_index_in_dim( a, jnp.reshape( i, ( -1, ) )[ 0 ], 0, keepdims = False )
+
+    def put_row( self, a, i, v ):
+        """`a` with `a[ i ] = v` along the first axis ( `i` as for `take_row` ): a new array ( in place in a loop's carry )"""
+        return jax.lax.dynamic_update_index_in_dim( a, v, jnp.reshape( i, ( -1, ) )[ 0 ], 0 )
 
     # detaches `x` from the gradient tape: a value computed FROM a perturbed input but that itself
     # carries no meaningful gradient (e.g. `Image.cell_cum_mass`, a routing helper -- see

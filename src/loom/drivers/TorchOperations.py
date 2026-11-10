@@ -162,6 +162,15 @@ class TorchOperations:
         if found and os.path.realpath( found ).startswith( os.path.realpath( sys.prefix ) ):
             config.cpp.cxx = ( None, apple )
 
+    def take_row( self, a, i ):
+        """`a[ i ]` along the first axis, `i` an int array `[ 1 ]` ( a traced one under Jax )"""
+        return a[ int( i[ 0 ] ) ]
+
+    def put_row( self, a, i, v ):
+        """`a` with `a[ i ] = v` along the first axis ( `i` as for `take_row` ): `a` itself, modified in place, outside Jax"""
+        a[ int( i[ 0 ] ) ] = v
+        return a
+
     def stop_gradient( self, x ):
         return x.detach() if isinstance( x, torch.Tensor ) else x
 
@@ -284,8 +293,13 @@ class TorchOperations:
         return self._reduced( torch.any, a, axis )
 
     def where( self, cond, a, b ):
-        cond = torch.as_tensor( cond, device = getattr( b, "device", None ) )
-        return torch.where( cond, torch.as_tensor( a, dtype = getattr( b, "dtype", None ), device = getattr( b, "device", None ) ), b )
+        # the dtype and the device of the Torch operand ( `b` first ): the other one may be a number or a host array
+        like = b if isinstance( b, torch.Tensor ) else a if isinstance( a, torch.Tensor ) else None
+        dtype, device = getattr( like, "dtype", None ), getattr( like, "device", None )
+        cond = torch.as_tensor( cond, device = device )
+        a = torch.as_tensor( a, dtype = dtype, device = device ) if a is not like else a
+        b = torch.as_tensor( b, dtype = dtype, device = device ) if b is not like else b
+        return torch.where( cond, a, b )
 
     # elementwise math -- the backend-agnostic verbs `Tensor` maps through (shape preserved).
     def sqrt( self, a ):

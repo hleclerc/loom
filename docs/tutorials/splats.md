@@ -205,12 +205,18 @@ def render( splats, touching, screen ):
         splats = splats,
         touching = touching,
         image = loom.out( loom.RealTensor[ screen.num_pixel, splats.num_channel ]() ),
-    ).value
+    )
 ```
 
 Two kernels, and the second is the adjoint: a kernel in its own right, running on other buffers with
-its own launch domain. The call takes both and names the pair. `.value` gives the backend array, which
-is what `jax.vjp` differentiates through and what `numpy.asarray` reads.
+its own launch domain. The call takes both and names the pair.
+
+Inside the module the image is a loom tensor. The caller gets an array of its own framework, the one
+`jax.vjp` differentiates through, because the module ends with its boundary:
+
+```python
+loom.export_namespace( globals() )
+```
 
 The forward kernel is one item per pixel, and a loop over its tile's list:
 

@@ -340,6 +340,8 @@ class Tensor( Attribute ):
             n_<axis>   its extent                         ( `n_y`, `n_axis_0` )
             <name>     each parameter passed as a kwarg   ( scalar if rank 0, otherwise the view )
             TF, SI     the call's real and integer types
+            sin, exp…  `<cmath>`
+            M_PI       pi -- POSIX, not standard C++, so a strict `-std=c++23` hides it: defined here
 
         An anonymous axis is called `axis_0`, `axis_1`, ... ( see `cpp_dim_names` ): so one fills
         a grid without having to declare, or even name, a single axis.
@@ -370,7 +372,13 @@ class Tensor( Attribute ):
             else:
                 local_decls.append( f"const auto &{ name } = args.inputs.{ name };" )
 
-        code = ( "namespace {\n"
+        # an expression is mathematics: `<cmath>` explicitly, rather than whatever another header
+        # happened to pull in ( the XLA ones do, the pointer entries do not )
+        code = ( "#include <cmath>\n"
+                 "#ifndef M_PI\n"
+                 "#define M_PI 3.14159265358979323846\n"
+                 "#endif\n\n"
+                 "namespace {\n"
                  "    struct LoomExpr {\n"
                  "        HD void operator()( auto coords, auto &&args, auto batch_axes ) const {\n"
                  + "".join( f"            { l }\n" for l in local_decls ) +

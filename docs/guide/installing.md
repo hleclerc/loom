@@ -3,18 +3,22 @@
 loom is a Python package with a C++ header library. It compiles your kernels on first use, so the
 machine needs a C++ compiler.
 
-## From a checkout
+## Install
 
 ```bash
-git clone git@github.com:hleclerc/loom.git
-cd loom
-pip install -e .              # numpy only
-pip install -e '.[jax]'       # with Jax
-pip install -e '.[torch]'     # with Torch
-pip install -e '.[cuda]'      # the pip CUDA compiler, for GPU kernels
+pip install loom
 ```
 
-Use a dedicated environment per project (a micromamba environment, a venv); loom does not care which.
+loom does not install a framework: it uses the ones you have, whichever they are. A call runs on
+the framework of the arrays it is given.
+
+For CUDA kernels, the `cuda` extra brings a pinned nvcc (see below):
+
+```bash
+pip install 'loom[cuda]'
+```
+
+From a checkout, `pip install -e .` in the clone.
 
 ## The compiler
 
@@ -30,8 +34,14 @@ know:
 ```bash
 export LOOM_CXX=$CONDA_PREFIX/bin/clang++
 export LOOM_CXXFLAGS=-std=c++23
-export LOOM_FRAMEWORK=jax          # which framework loom talks to
 ```
+
+`loom-toolchain` says what this machine can compile for: the compiler and flags of each device,
+and what is missing.
+
+When several frameworks are installed, the one used for values built *from nothing*
+(`RealTensor[ n ].zeros()`) is the first found among Jax, Torch, CuPy and NumPy;
+`LOOM_FRAMEWORK=torch` chooses another. A call given arrays always runs on theirs.
 
 → [Environment variables](/reference/environment)
 
@@ -61,13 +71,12 @@ C++ changes the key and recompiles; nothing else does.
 
 ## Which backend
 
-| framework | CPU | GPU |
-|---|---|---|
-| Jax | yes | CUDA, through the `cuda` extra |
-| Torch | yes | not yet |
-| numpy | yes | — |
+| framework | CPU | CUDA | gradient, `vmap` |
+|---|---|---|---|
+| Jax | yes | yes | yes |
+| Torch | yes | yes | yes |
+| CuPy | — | yes | no, forward only |
+| NumPy | yes | — | no, forward only |
 
-::: warning To confirm
-This table is written from the sources, not from a run on every combination. It is checked against
-the test suite before release.
-:::
+CUDA kernels are compiled by the nvcc of the `cuda` extra. The test suite runs on every line of
+this table.

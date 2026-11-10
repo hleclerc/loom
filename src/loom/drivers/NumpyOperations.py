@@ -85,6 +85,15 @@ class NumpyOperations:
         import contextlib
         return contextlib.nullcontext()
 
+    def take_row( self, a, i ):
+        """`a[ i ]` along the first axis, `i` an int array `[ 1 ]` ( a traced one under Jax )"""
+        return a[ int( i[ 0 ] ) ]
+
+    def put_row( self, a, i, v ):
+        """`a` with `a[ i ] = v` along the first axis ( `i` as for `take_row` ): `a` itself, modified in place, outside Jax"""
+        a[ int( i[ 0 ] ) ] = v
+        return a
+
     def stop_gradient( self, x ):
         return x
 

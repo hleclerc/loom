@@ -161,7 +161,7 @@ def lookup( source: str, sources, device, flavor: str = "" ):
     tag = device.current_catalogue_tag()
     if tag is None:
         return None
-    from ..drivers.JaxFfi import _HANDLER_SYMBOL
+    from ..drivers.PointerFfi import _HANDLER_SYMBOL      # ( the same symbol as `JaxFfi`'s, without importing jax )
     name = key( source, sources, flavor ) + library_suffix()
     for root in _roots:
         path = root / tag / name

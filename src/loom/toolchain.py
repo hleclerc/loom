@@ -1,7 +1,7 @@
-"""`sdot-toolchain` — say what this machine can compile for.
+"""`loom-toolchain` — say what this machine can compile for.
 
-    sdot-toolchain            # or: python -m loom.toolchain    -- survey
-    sdot-toolchain --device cpu
+    loom-toolchain            # or: python -m loom.toolchain    -- survey
+    loom-toolchain --device cpu
 
 Each device compiles with its own compiler (`Device.compiler`, see `compilation/Compiler.py`):
 the host C++ compiler for the CPU, nvcc around it for CUDA. This command only reports what each
@@ -17,7 +17,7 @@ from .compilation.build import ninja_path
 from .devices.Device import Device
 
 # The devices we know how to ask about. Metal is intentionally absent: it has its own
-# (non-C++) path, so `sdot-toolchain` has nothing to say about it.
+# (non-C++) path, so `loom-toolchain` has nothing to say about it.
 DEVICE_NAMES = ( "cpu", "cuda" )
 
 
@@ -62,7 +62,7 @@ def survey( only = None ) -> int:
 
 
 def main( argv = None ) -> int:
-    parser = argparse.ArgumentParser( prog = "sdot-toolchain", description = __doc__.splitlines()[ 0 ] )
+    parser = argparse.ArgumentParser( prog = "loom-toolchain", description = __doc__.splitlines()[ 0 ] )
     parser.add_argument( "--device", choices = DEVICE_NAMES, help = "restrict to one device" )
     args = parser.parse_args( argv )
     return survey( args.device )

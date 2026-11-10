@@ -69,7 +69,7 @@ def _nb_tiles( screen ):
     and the first test below checks that loom's grid is this one. Both of its ingredients are counts
     the screen carries, so there is no constant to agree with."""
     side = int( screen.tile_side )
-    return tuple( ( int( n ) + side - 1 ) // side for n in screen.nb_pixels.value )
+    return tuple( ( int( n ) + side - 1 ) // side for n in numpy.asarray( screen.nb_pixels ) )
 
 
 def _per_tile( touching, screen ):
@@ -77,7 +77,7 @@ def _per_tile( touching, screen ):
 
     `offsets` carries `nb_rows + 1` BOUNDS and not counts, so a row's length is a subtraction of
     neighbours -- and that is also why the last bound IS the total."""
-    offsets = numpy.asarray( touching.offsets.value )
+    offsets = numpy.asarray( touching.offsets )
     return numpy.diff( offsets ).reshape( _nb_tiles( screen ) )
 
 
@@ -109,7 +109,7 @@ if test( "the_lists_are_sized_exactly" ):
     assert counts.min() > 0 and counts.max() >= 2 * counts.min()
 
     # and every row holds nothing but splats
-    offsets = numpy.asarray( touching.offsets.value )
+    offsets = numpy.asarray( touching.offsets )
     flat = counts.reshape( -1 )
     for t in range( 0, flat.size, 7 ):
         row = ids[ offsets[ t ] : offsets[ t + 1 ] ]
@@ -172,7 +172,7 @@ if test( "the_atomic_adjoint_is_the_one_of_the_rendering" ):
             setattr( s, name, value )
             return render_scene( s, shape )
 
-        start = getattr( splats, name ).raw
+        start = getattr( splats, name )
         adjoint, finite = check_grad( render_fn, start, seed = 11 )
         print( f"d/d{name:<10} : adjoint {float( adjoint ):+.9f}   finite diff. {float( finite ):+.9f}" )
 

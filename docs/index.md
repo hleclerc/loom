@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "loom"
-  text: "Your C++ kernel, as a Jax or Torch function"
-  tagline: "Write the inner loop once, in plain C++ or CUDA. loom compiles it, hands it the framework's tensors, runs it inside jit, vmap and grad, and gives you the gradient you wrote for it."
+  text: "Your C++ kernel, as a function of your framework"
+  tagline: "Write the inner loop once, in plain C++ or CUDA. loom compiles it, hands it the arrays of Jax, Torch, NumPy or CuPy, runs it inside jit, vmap and grad, and gives you the gradient you wrote for it."
   actions:
     - theme: brand
       text: "What loom is"
@@ -21,10 +21,20 @@ hero:
 
 features:
   - icon: 🧵
-    title: Two worlds, one call
-    details: "Deep-learning tensors are immutable, traced and owned by XLA or Torch. C++ wants pointers, strides and templates. loom is the part in between: one call, and both sides see what they expect."
-    link: /guide/why-not-trivial
-    linkText: Why that is hard
+    title: Two worlds, one boundary
+    details: "Outside, your users keep their framework: Jax, Torch, NumPy or CuPy arrays in, the same kind out. Inside, every value is a loom tensor, whoever owns its buffer, so your code is written once, clearly, for all of them."
+    link: /guide/tensors
+    linkText: Tensors
+  - icon: ↩️
+    title: The adjoint is a kernel like any other
+    details: "You write the backward in the same C++, loom wires it into jax.custom_vjp or torch.autograd.Function, and loom.testing.check_grad checks it against finite differences."
+    link: /guide/adjoint
+    linkText: The adjoint
+  - icon: 📦
+    title: Compiled on demand, or shipped precompiled
+    details: "The first call compiles and caches. For a wheel, a script of your package fills a catalogue ahead of time, one directory per architecture, so a user with no compiler still gets the kernels."
+    link: /guide/compilation
+    linkText: Compilation
   - icon: 🧭
     title: A kernel that never counts dimensions
     details: "Coordinates are read by name: coords[axis], coords + axis, coords.axes - batch_axes. The same body runs in 2-D and in 3-D, batched or not, and a vmap adds an axis without the kernel knowing."
@@ -35,21 +45,11 @@ features:
     details: "loom.out( x ), loom.mutable( x ), loom.scratch( x ): what the kernel reads, writes or only borrows is written where the argument is passed, not in a list on the side that rots."
     link: /guide/arguments
     linkText: Roles
-  - icon: ↩️
-    title: The adjoint is a kernel like any other
-    details: "You write the backward in the same C++, loom wires it into jax.custom_vjp or torch.autograd.Function, and loom.testing.check_grad checks it against finite differences."
-    link: /guide/adjoint
-    linkText: The adjoint
   - icon: 📏
     title: Sizes the host learns at run time
     details: "A kernel counts, the host reads the count, the next buffer is allocated exactly. Under jit, where XLA alone would need a bound chosen before tracing. This is what CsrTensor is made of."
     link: /guide/dynamic-sizes
     linkText: Dynamic sizes
-  - icon: 📦
-    title: Compiled on demand, or shipped precompiled
-    details: "The first call compiles and caches. For a wheel, loom-kernels builds a catalogue ahead of time, so a user with no compiler still gets the kernels."
-    link: /guide/compilation
-    linkText: Compilation
 ---
 
 ## A kernel, and its gradient, in one screen
@@ -97,8 +97,8 @@ def evolve( temperature, coef, nb_steps ):
 
 :::
 
-`temperature` is a Jax array, a Torch tensor or a numpy array, as it is. There is nothing to wrap,
-and nothing about 2-D in the kernel. [The full walkthrough](/tutorials/diffusion) writes it line by
+`temperature` is a Jax, Torch, NumPy or CuPy array, as it is, and `step` returns one of the same
+kind. There is nothing to wrap, nothing to unwrap, and nothing about 2-D in the kernel. [The full walkthrough](/tutorials/diffusion) writes it line by
 line, adjoint included.
 
 ## What it is for
@@ -114,9 +114,11 @@ the C++ already exists.
 - **New here** → [What loom is](/guide/what-is-loom), then [Why it is not trivial](/guide/why-not-trivial).
 - **Want to see one** → [Diffusion](/tutorials/diffusion), the shortest complete example.
 - **Data-dependent shapes** → [Gaussian splatting](/tutorials/splats).
+- **More than one device or process** → [Distributed programs](/guide/distributed).
 - **Looking for a name** → [the Python API](/reference/python-api).
 
 ::: warning Status
 loom is early and its API may still move. The two tutorials are programs that ship in `examples/`
-and are run by their own tests. Jax is the most complete backend; Torch runs on CPU for now.
+and are run by their own tests, under every framework. All four run on CPU; Jax, Torch and CuPy
+also on CUDA cards.
 :::

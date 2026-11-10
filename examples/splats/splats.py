@@ -178,8 +178,8 @@ def render( splats, touching, screen ):
     Two kernels, and the second is the ADJOINT -- a kernel in its own right, running on other
     buffers with its own launch domain. The call takes both and names the pair.
 
-    `.value` because what a caller wants here is the BACKEND array, not loom's tensor: it is what
-    `jax.vjp` differentiates through, and what `numpy.asarray` reads."""
+    The image is a loom tensor HERE; the caller gets the array of its own framework, because the
+    module exports its namespace ( see the last line )."""
     side = int( screen.tile_side )
     return loom.ffi_call(
         "splats_render",
@@ -190,7 +190,7 @@ def render( splats, touching, screen ):
         splats = splats,
         touching = touching,
         image = loom.out( loom.RealTensor[ screen.num_pixel, splats.num_channel ]() ),
-    ).value
+    )
 
 
 def render_scene( splats, shape ):
@@ -203,3 +203,8 @@ def render_scene( splats, shape ):
     field by field would say the same thing, until the day a fifth field is added."""
     screen = Screen( splats, shape )
     return render( splats, touching_gaussians( loom.stop_gradient( splats ), screen ), screen )
+
+
+# THE BOUNDARY. Above, every value is a loom tensor, whichever framework holds its buffer; below this
+# line, a caller only ever sees its own framework -- Jax arrays in, Jax arrays out -- and never a `.value`.
+loom.export_namespace( globals() )

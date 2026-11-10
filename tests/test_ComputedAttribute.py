@@ -24,8 +24,11 @@ def test_computed_attribute_invalidation():
     box.width = np.array( 5.0 )
     box.height = np.array( 3.0 )
 
-    # Check that area is valid initially
-    assert box._computed_attrs["area"]._cache_valid, "Cache should be valid initially"
+    # Setting the dependencies, the first time too, invalidates: nothing was computed from them yet
+    assert not box._computed_attrs["area"]._cache_valid, "Cache should be invalid after the dependencies are set"
+
+    # As after computing it
+    box._computed_attrs["area"]._cache_valid = True
 
     # Modify width (should invalidate)
     box.width = np.array( 4.0 )
@@ -52,6 +55,6 @@ def test_computed_attribute_multiple_dependencies():
 
 
 if __name__ == "__main__":
-    test_computed_attribute_caching()
+    test_computed_attribute_invalidation()
     test_computed_attribute_multiple_dependencies()
     print("All tests passed!")

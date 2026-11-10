@@ -140,6 +140,8 @@ if test( "the_defaults_are_plain_globals" ):
     # `loom.default_xxx` decide what is built from nothing, and are read at each use: assigning is all it takes
     old = ( loom.default_framework, loom.default_device, loom.default_dtype.size, loom.default_itype.size )
     try:
+        # ( on the host: `numpy.asarray` reads the values back, and torch's own default may be `mps`, without float64 )
+        loom.default_device = "cpu"
         loom.default_dtype.size = 32
         assert numpy.asarray( RealTensor( [ 1.0, 2.0 ] ).value ).dtype == numpy.float32
         loom.default_dtype.size = 64

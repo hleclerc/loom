@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig( {
   title: "loom",
-  description: "Write a kernel once in C++ or CUDA, call it from Jax, Torch or numpy -- with its gradient.",
+  description: "Write a kernel once in C++ or CUDA, call it from Jax, Torch, NumPy or CuPy -- with its gradient.",
   lang: 'en-US',
 
   // GitHub Pages under github.com/hleclerc/loom
@@ -47,6 +47,7 @@ export default defineConfig( {
           items: [
             { text: 'Frameworks and devices',   link: '/guide/frameworks' },
             { text: 'Compilation and catalogue', link: '/guide/compilation' },
+            { text: 'Distributed programs',     link: '/guide/distributed' },
           ]
         },
         {

@@ -279,6 +279,30 @@ class MpiRanks( Ranks ):
         return out.reshape( ( self.size * v.shape[ 0 ], ) + v.shape[ 1: ] )
 
 
+def _rank_of( ranks ):
+    """the rank of this process in `ranks` ( one process per rank ), a host int"""
+    return int( ranks._rank )
+
+
+def detect_ranks():
+    """the ranks the process was started among, when nothing says it: the world of `torch.distributed` once initialised, or the
+    processes of an MPI launcher ( `mpiexec`, `srun`: its environment gives a size above 1, and `mpi4py` is there ). `None` otherwise
+    -- one process. Jax is never guessed: a process with several devices runs on one of them unless its arrays are sharded."""
+    import os
+    import sys
+    if "torch" in sys.modules:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            return TorchRanks()
+    for var in ( "OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMIX_SIZE", "MPI_LOCALNRANKS" ):
+        if int( os.environ.get( var, "1" ) or 1 ) > 1:
+            import importlib.util
+            if importlib.util.find_spec( "mpi4py" ) is not None:
+                return MpiRanks()
+            break
+    return None
+
+
 # ---- spread tensors --------------------------------------------------------------------------------------------------------------
 
 class Spread:
@@ -370,10 +394,13 @@ def spread_host( array, ranks ):
 
 def spread_of( x ):
     """the `Spread` of `x`, or `None`: a loom tensor made by `spread`, or a Jax array split along its first axis by a
-    `NamedSharding` over several devices"""
+    `NamedSharding` over several devices ( bare, or in a loom tensor: what the boundary makes of it )"""
     s = getattr( x, "spread", None )
     if isinstance( s, Spread ):
         return s
+    from .tensor.Tensor import Tensor
+    if isinstance( x, Tensor ):
+        x = x.value
     import sys
     if "jax" in sys.modules:
         import jax
@@ -464,9 +491,9 @@ def spmd( program, ranks = None ):
             over = np.asarray( th( f ) ).reshape( -1 )[ :len( caps ) ]
             if not over.any():
                 break
-            for c, v in zip( caps, over ):
-                if v:
-                    c.value *= 2
+            # ( a capacity reported several times -- by several boxes, in every round of a Python loop -- doubles once )
+            for c in { id( c ): c for c, v in zip( caps, over ) if v }.values():
+                c.value *= 2
         res = tuple( _wrap( o, rk ) for o in outs )
         return res[ 0 ] if single[ 0 ] else res
 

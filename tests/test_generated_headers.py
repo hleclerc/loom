@@ -82,14 +82,15 @@ if test( "depfiles" ):
     # the compiled kernel must depend on ITS overlay, never on the shared tree: otherwise any write
     # there (another variant, another process) rebuilds it -- churn, at best.
     _call( "test_generated_headers_deps", True, 11 )
-    shared = str( include_root() )
-    # (a directory left by a failed compilation has no object, hence no deps: not ours to judge)
-    dirs = [ d for d in kernels_root().iterdir()
-             if "test_generated_headers_deps_" in d.name and any( d.glob( "*.o" ) ) ]
-    assert dirs, "no kernel directory found"
-    for d in dirs:
-        deps = subprocess.run( [ ninja_path(), "-C", str( d ), "-t", "deps" ],
-                               stdout = subprocess.PIPE, text = True, check = True ).stdout
-        assert "RaceAgg" in deps, deps
-        bad = [ l.strip() for l in deps.splitlines() if l.strip().startswith( shared ) ]
-        assert not bad, f"{ d.name } depends on the shared tree: { bad }"
+    # the body is compiled in a domain unit of the common graph ( `build.py`, `unit_library` ): its object is
+    # `<build>/obj/<module>_<hash>.o`, the kernel directory holding only the shim. The newest is that of this call.
+    common = kernels_root().parent
+    objs = sorted( ( common / "obj" ).glob( "test_generated_headers_deps_*.o" ), key = lambda p: p.stat().st_mtime )
+    assert objs, "no unit object found"
+    # the overlay of the unit lives under `include_root()` too ( `loom_modules/<module>.d` ): the shared tree is the generated one
+    shared = str( include_root() / "sdot" / "generated" )
+    deps = subprocess.run( [ ninja_path(), "-C", str( common ), "-t", "deps", str( objs[ -1 ] ) ],
+                           stdout = subprocess.PIPE, text = True, check = True ).stdout
+    assert "RaceAgg" in deps, deps
+    bad = [ l.strip() for l in deps.splitlines() if l.strip().startswith( shared ) ]
+    assert not bad, f"{ objs[ -1 ].name } depends on the shared tree: { bad }"

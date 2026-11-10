@@ -46,6 +46,75 @@ if test( "a_public_function_returns_the_framework_of_its_arguments" ):
         assert jax.grad( lambda x: pub( x ).sum() )( jnp.arange( 3.0 ) ).tolist() == [ 2, 2, 2 ]
 
 
+if test( "the_internals_only_see_loom_tensors" ):
+    # the data is HOMOGENIZED at the entry: whatever the framework, the internal function receives loom
+    # tensors ( containers looked into ), and python scalars as they are -- one code for every framework
+    import numpy
+    import loom
+
+    seen = {}
+
+    def inside( x, pair, scale ):
+        seen.update( x = x, pair = pair, scale = scale )
+        return x * scale + pair[ 0 ]
+
+    pub = _package( inside = inside )[ "inside" ]
+    res = pub( numpy.arange( 3.0 ), [ numpy.ones( 3 ) ], 2.0 )
+    assert isinstance( seen[ "x" ], loom.Tensor ), type( seen[ "x" ] )
+    assert isinstance( seen[ "pair" ][ 0 ], loom.Tensor ), type( seen[ "pair" ][ 0 ] )
+    assert seen[ "scale" ] == 2.0 and isinstance( seen[ "scale" ], float )
+    assert isinstance( res, numpy.ndarray ) and res.tolist() == [ 1, 3, 5 ], res
+
+
+if test( "inside_a_call_a_loom_tensor_counts_by_its_buffer" ):
+    # the tensors the boundary made say nothing of the caller: inside, `universe_of` reads their buffers
+    # ( a loom tensor given by a caller, outside, still says "loom" )
+    import numpy
+    import loom
+
+    def inside( x ):
+        return loom.universe_of( ( x, ) )
+
+    pub = _package( inside = inside )[ "inside" ]
+    assert pub( numpy.arange( 3.0 ) ) == "numpy"
+    assert loom.universe_of( ( loom.Tensor.as_tensor( numpy.arange( 3.0 ) ), ) ) == "loom"
+
+
+if test( "a_public_function_called_from_inside_stays_in_loom" ):
+    # after `export_namespace`, the globals of the module are the PUBLIC versions: a function of the package
+    # calling another one by its name must still get loom values back, not arrays of the caller
+    import numpy
+    import loom
+
+    def double( x ):
+        return x * 2
+
+    ns = _package( double = double )
+
+    def outer( x ):
+        y = ns[ "double" ]( x )          # the public name, as the globals of the module would give it
+        assert isinstance( y, loom.Tensor ), type( y )
+        return y
+
+    pub = _package( outer = outer )[ "outer" ]
+    res = pub( numpy.arange( 3.0 ) )
+    assert isinstance( res, numpy.ndarray ) and res.tolist() == [ 0, 2, 4 ], res
+
+
+if test( "an_object_whose_getattr_raises_is_left_alone" ):
+    # entering a call must not read public attributes of the package's objects: a lazy `__getattr__`
+    # may raise something else than `AttributeError` for them ( only the `_` names are the boundary's )
+    class Lazy:
+        def __getattr__( self, name ):
+            if name.startswith( "_" ):
+                raise AttributeError( name )
+            raise ValueError( "not known yet" )
+
+    lazy = Lazy()
+    pub = _package( inside = lambda o: o )[ "inside" ]
+    assert pub( lazy ) is lazy
+
+
 if test( "containers_are_looked_into_foreign_objects_are_not" ):
     import numpy
     from loom import RealTensor

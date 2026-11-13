@@ -67,6 +67,36 @@ loom.ffi_call( name, loom.FfiCode.inline( "...", sources = [ engine ] ), ... )
 
 The text is written to `loom_modules/<name>_<hash>.h` and `.cpp` (or `.cu`), compiled once, and the header is included by the kernels that name it. Entry points of a unit wear `LOOM_EXPORT`, since kernels are compiled with hidden visibility.
 
+## External libraries
+
+A header-only library that is not part of any package -- a sparse solver, a linear algebra library -- can be fetched by loom itself, with no system package and no manual step. A package **declares** it once, at import, with a pinned archive and its SHA-256:
+
+```python
+loom.compilation.register_external( "mylib", "1.2.0", "https://example.org/mylib-1.2.0.tar.gz",
+                                    "<sha256 of the archive>", include = "" )   # the subdirectory to put on `-I`
+```
+
+Declaring fetches nothing. A kernel that includes the library **asks** for it by name:
+
+```python
+loom.ffi_call( name, loom.FfiCode.inline( "...", sources = [ "mypackage/solver.cpp" ], externals = [ "mylib" ] ), ... )
+```
+
+The archive is then downloaded once, into `<cache>/ext/<name>-<version>` (`LOOM_EXT_DIR` puts it elsewhere), and its directory goes on the `-I` of that kernel **and of the units it links** -- of nothing else. A kernel that does not ask never triggers the download and never sees the headers, and the same unit compiled for a kernel that asks and for one that does not is two units.
+
+The request is written on the first line of the kernel's source (`// loom externals: mylib@1.2.0`), so it is part of the kernel's name and of its catalogue key: a new pin is a new kernel.
+
+Whether the library can be had is checked **once per process**. Without network, or with `LOOM_EXTERNALS=0`, it is missing, loom says so once on stderr, and the source makes do without it -- which it must be written for, with `__has_include`:
+
+```cpp
+#if __has_include( <mylib/solver.h> )
+#  include <mylib/solver.h>
+#  define HAS_MYLIB 1
+#endif
+```
+
+The flip side: a kernel that includes the library but forgets `externals` compiles without it, silently. A name nobody declared is an error.
+
 On a card, units are the only way to share code: the device code of a library cannot be linked to that of another one (`nvlink` links objects and static archives, not shared libraries), and a function pointer taken in one library is not callable from another. `kernels/cuda_support.cu` is such a unit: the fills that every call would otherwise instantiate for its own view types. The device flags of a catalogue build are `--cudart=shared` (the CUDA runtime of the framework is used), `--compress-mode=size`, and no PTX (a catalogue never falls back to another architecture).
 
 The extents and byte strides of a buffer whose layout is not the identity (a card aligns its batches) cross as attributes, not as literals of the source: the same kernel serves every size.

@@ -2,7 +2,6 @@
 from ..devices.Device import Device
 from .CallArgsAnalysis import CallArgsAnalysis
 from ..compilation.FfiCode import FfiCode, Kernels
-from ..util.info import info
 from .. import env
 import numpy
 from ..tensor.Dtype import Dtype

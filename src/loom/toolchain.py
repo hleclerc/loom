@@ -43,6 +43,9 @@ def survey( only = None ) -> int:
     except RuntimeError as e:
         print( f"ninja     : { _mark( False ) } ({ e })" )
     print( "includes  : " + ", ".join( map( str, include_dirs() ) ) )
+    from .compilation.externals import registered_externals
+    for name, ext in registered_externals().items():      # declared ones; fetched by the first kernel asking, not here
+        print( f"external  : { name } { ext.version } [{ 'cached' if ext.include_dir.is_dir() else 'not fetched yet' }]" )
 
     print( "\ndevices:" )
     rc = 0

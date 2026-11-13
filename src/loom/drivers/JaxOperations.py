@@ -4,7 +4,6 @@ import functools
 from typing import Any
 from .CallArgsAnalysis import CallArgsAnalysis
 from ..compilation.FfiCode import FfiCode, Kernels
-from ..util.info import info
 from .. import env
 from .JaxFfi import call_body, call as jax_ffi_call
 from ..tensor.Dtype import Dtype

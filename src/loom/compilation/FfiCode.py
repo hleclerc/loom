@@ -88,6 +88,11 @@ class FfiCode( AbstractFfiCode ):
     C++ units that it LINKS (`"sdot/x.cpp"` or `( "sdot/x.cpp", { "DEF": "1" } )`), compiled once
     per (source, defines, compiler) and shared by all the kernels that name them.
 
+    `externals`: the external libraries the body or its units include, by the name a package declared
+    (`compilation.register_external`): `externals = [ "eigen" ]`. Fetched at the first kernel that asks,
+    and on the `-I` of that kernel and of the units it links only -- a kernel that does not ask never
+    downloads it (see `externals.py`).
+
     `prologue`: a C++ statement emitted before the body, in the same scope. A relic of the time
     when the body was per item and could not express a pre-pass; a body that is the
     handler no longer needs it.
@@ -126,7 +131,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  allocator = False, computed_grads = "", _scaffold = False ) -> None:
+                  allocator = False, computed_grads = "", externals = (), _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -173,6 +178,7 @@ class FfiCode( AbstractFfiCode ):
         self.sources = tuple( sources )
         self.includes = tuple( includes )
         self.include_roots = tuple( include_roots )
+        self.externals = tuple( sorted( set( externals ) ) )
         self.allocator = bool( allocator )
         self.computed_grads = computed_grads
         self._scaffold = _scaffold
@@ -328,15 +334,16 @@ class FfiCode( AbstractFfiCode ):
                  ");" )
 
     def inheriting( self, other ):
-        """Ourselves, but taking from `other` what we have not said: `includes` and `sources`
-        are what the CALL compiles and links, identical in both directions. The geometry, on the other hand, is
+        """Ourselves, but taking from `other` what we have not said: `includes`, `sources`
+        and `externals` are what the CALL compiles and links, identical in both directions. The geometry, on the other hand, is
         never inherited -- that is the whole point of having taken it out."""
-        if self.includes and self.sources:
+        if self.includes and self.sources and self.externals:
             return self
         res = FfiCode( self.code, self.prologue, self.includes or other.includes,
                        self.sources or other.sources, self.include_roots or other.include_roots,
                        allocator = self.allocator,
                        computed_grads = self.computed_grads,
+                       externals = self.externals or other.externals,
                        _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
@@ -376,6 +383,10 @@ class Kernels( AbstractFfiCode ):
     @property
     def sources( self ):
         return self.forward.sources
+
+    @property
+    def externals( self ):
+        return self.forward.externals
 
     @property
     def wants_allocator( self ):

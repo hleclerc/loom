@@ -115,13 +115,13 @@ def cache_root() -> Path:
     raise RuntimeError( "loom : could not find a writable cache directory. Set LOOM_CACHE_DIR to an explicit writable path." )
 
 
-def include_dirs() -> list:
+def include_dirs( externals = () ) -> list:
     """All the `-I` of a compilation: the C++ sources (loom, then the registered packages), the
-    generated headers (under the build directory), and the declared external libraries
-    (`externals.py`, downloaded if needed)."""
+    generated headers (under the build directory), and the external libraries `externals` that the
+    kernel asks for (`externals.py`, downloaded at the first request)."""
     from .generated_headers import include_root
     from .externals import external_include_dirs
-    return [ *include_roots(), include_root(), *external_include_dirs() ]
+    return [ *include_roots(), include_root(), *external_include_dirs( externals ) ]
 
 
 from .externals import register_external as register_external
@@ -131,7 +131,7 @@ dependencies = {}      # name of a library built here -> the libraries it needs 
 
 
 def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = (), work_dir = None,
-                  include_overlay = None ):
+                  include_overlay = None, externals = () ):
     """Compile & link `src_paths` into a shared library with the compiler of `device`, through
     the build graph (see `build.py`).
 
@@ -155,12 +155,15 @@ def make_library( lib_name, src_paths, device, *, extra_flags = None, sources = 
     the generated headers this kernel rendered, written into its own directory (see
     `generated_headers.py`), so it never compiles against another call's version of them.
 
+    `externals`: the external libraries (`externals.py`) the kernel asks for -- on the `-I` of its
+    objects AND of the units it links, which are the ones that usually include them.
+
     Rebuilds are ninja's business: a target is remade iff one of ITS inputs (the exact header
     closure, from the compiler's depfile) changed. `SDOT_FORCE_BUILD=1` remakes it regardless.
     Returns the path to the built library.
     """
     from .build import Build
-    with Build( device, work_dir = work_dir ) as b:
+    with Build( device, work_dir = work_dir, externals = externals ) as b:
         # the generated source has no dependent: its object is PRIVATE to this library
         objects = [ b.object( p, extra_flags = extra_flags or [], shared = work_dir is None,
                               include_first = [ include_overlay ] if include_overlay else [] )

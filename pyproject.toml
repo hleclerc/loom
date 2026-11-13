@@ -8,16 +8,14 @@ version = "2026.11.08.1"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "typing_extensions",
-    "pyyaml",
-    "devtools",
     "ninja",
-    "pip>=26.2.1",
 ]
 
 [project.optional-dependencies]
 jax = ["jax"]
 torch = ["torch"]
+# `loom.util.info`, the debug printer ( names and colours of the arguments )
+dev = ["devtools"]
 # the pip CUDA compiler, pinned: the 13.4 frontend collapses on our kernels, 13.3 works
 cuda = ["nvidia-cuda-nvcc>=13.3,<13.4", "nvidia-cuda-crt<13.4", "nvidia-nvvm<13.4", "nvidia-cuda-cccl<13.4"]   # ( CCCL: the CUB of the 1D kernels, and the one Jax brings )
 

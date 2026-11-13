@@ -1,5 +1,4 @@
 from .collect_attributes import collect_attributes_instance
-from devtools import debug, sformat
 import sys
 
 
@@ -86,6 +85,7 @@ def custom_printer_impl( obj, nl ):
 
 
 def info( *arg, frame_depth = 2, **kwargs ):
+    from devtools import debug, sformat     # here: a debug helper, `pip install devtools` ( loom's `dev` extra )
     f = debug._process( arg, kwargs, frame_depth = frame_depth )
     s = sformat( f"{ f.filename }:{ f.lineno }:", sformat.blue )
     for argument in f.arguments:
@@ -98,6 +98,7 @@ def info( *arg, frame_depth = 2, **kwargs ):
 
 
 def infox( *arg, frame_depth = 2, **kwargs ):
+    from devtools import debug, sformat     # here: a debug helper, `pip install devtools` ( loom's `dev` extra )
     f = debug._process( arg, kwargs, frame_depth = frame_depth )
     s = sformat( f"{ f.filename }:{ f.lineno }:", sformat.blue )
     for argument in f.arguments:

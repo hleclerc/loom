@@ -550,11 +550,15 @@ def _render_source( code, ca, device, raw_frame = False ):
         ffi_namespace = "loom_raw" if shared else "xla::ffi",
         entry         = _body_export( inputs, outputs, attrs, device, scratch ) if shared else _ENTRY_TYPED.format( binds = binds ),
     )
+    # the external libraries the kernel asks for ( `FfiCode( externals = ... )` ): a first line of the source, so they are part of its
+    # name, of its catalogue key and of the render cache, and the compile step reads them from the text it compiles
+    from ..compilation.externals import externals_marker
+    marker = externals_marker( getattr( code, "externals", () ) )
     if not shared:
-        return text, inputs, outputs, attrs, tuple( sources ), None
+        return marker + text, inputs, outputs, attrs, tuple( sources ), None
     import hashlib
     symbol = "loom_body_" + hashlib.sha256( text.encode() ).hexdigest()[ :20 ]
-    return _entry_stub( symbol, inputs, outputs, attrs, raw_frame, bool( stream_param ) ), inputs, outputs, attrs, tuple( sources ), ( text, symbol )
+    return marker + _entry_stub( symbol, inputs, outputs, attrs, raw_frame, bool( stream_param ) ), inputs, outputs, attrs, tuple( sources ), ( text, symbol )
 
 
 def _scratch_loop( ca, scratch_nodes ):

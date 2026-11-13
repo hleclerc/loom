@@ -508,10 +508,15 @@ class Build:
 
     `work_dir` is the OWN directory of what is being built -- a kernel's, erasable in one go.
     Without it, everything goes into the common graph: this is what the catalog does (a single big link in
-    a throwaway directory) and the C++ tests."""
+    a throwaway directory) and the C++ tests.
 
-    def __init__( self, device, work_dir = None ):
+    `externals`: the external libraries the kernel asks for (`externals.py`), on the `-I` of every
+    object of the session but the runtime's. Part of each object's name through its roots, so a unit
+    compiled with and without one are two objects."""
+
+    def __init__( self, device, work_dir = None, externals = () ):
         self.device = device
+        self.externals = tuple( externals )
         self.compiler = device.compiler
         self.root = build_dir()
         self.sig = _short_hash( self.compiler.build_signature )
@@ -554,7 +559,7 @@ class Build:
         extra_flags = list( extra_flags )
         graph = self.common if shared else self.own
         include_first = [ graph.rel( d ) for d in include_first ]
-        roots = [ str( d ) for d in ( include_dirs() if include_only is None else include_only ) ]
+        roots = [ str( d ) for d in ( include_dirs( self.externals ) if include_only is None else include_only ) ]
         # the name says everything that makes the object: the roots it is compiled against too, so
         # that two checkouts (or two sets of registered packages) sharing this directory never share
         # an object -- and never fight over one, a command line that changes being a rebuild. The

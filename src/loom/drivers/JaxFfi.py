@@ -40,6 +40,7 @@ from ..compilation.generated_headers import headers_key, write_overlay
 from ..util.encode_base_62 import encode_base_62
 from .CallArg_Errors import ERRORS_VAR_NAME
 from .BackwardCall import call_backward
+from ..compilation.externals import externals_of
 from .FfiSource import call_signature, _render_call, _resolve_source, _batch_indices_decl, _CALL_TEMPLATE
 
 # Fixed C symbol exported by every generated library. It is looked up per-`dlopen`ed handle,
@@ -170,6 +171,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
                 sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
                 work_dir = work_dir,
                 include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
+                externals = externals_of( source ),
             )
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
         from ..compilation.Compiler import load_library

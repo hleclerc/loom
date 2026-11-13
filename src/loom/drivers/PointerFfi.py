@@ -35,6 +35,7 @@ import numpy
 from ..compilation import include_roots, journal, make_library
 from ..compilation.build import KernelDir
 from ..util.encode_base_62 import encode_base_62
+from ..compilation.externals import externals_of
 from .FfiSource import call_signature, _render_call, _resolve_source
 from ..compilation.generated_headers import headers_key, write_overlay
 
@@ -111,6 +112,7 @@ def _load( source: str, device, prefix: str, sources, code_name, signature, head
                 sources = [ ( _resolve_source( p ), dict( d ) ) for p, d in sources ],
                 work_dir = work_dir,
                 include_overlay = write_overlay( work_dir / "include", headers ) if headers else None,
+                externals = externals_of( source ),
             )
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
         from ..compilation.Compiler import load_library

@@ -16,7 +16,7 @@ build/
 compile_commands.json
 
 # the runner ( errand )
-.errand/
+errand-outputs/
 runs/
 
 # misc

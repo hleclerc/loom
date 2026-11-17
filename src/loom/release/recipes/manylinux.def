@@ -1,0 +1,30 @@
+Bootstrap: docker
+From: quay.io/pypa/manylinux_2_28_x86_64
+
+%help
+    loom's build image for the `linux-x86_64` wheels ( `loom.release.envs` writes the project's copy of it, with the
+    project's packages appended to the pip line ): PyPA's manylinux_2_28 ( glibc 2.28, AlmaLinux 8 ) with a recent clang.
+    A kernel compiled in it needs nothing newer than glibc 2.28 of the machine it runs on, and carries its own libstdc++
+    ( -static-libstdc++ ). The CUDA kernels are compiled by the pip nvcc, with GCC 14 as its host compiler; their only
+    external library is libcudart.so.13, which the machine gets from pip ( nvidia-cuda-runtime ).
+
+%post
+    dnf -y install clang llvm-toolset libomp-devel libstdc++-static gcc-toolset-14-gcc-c++
+    dnf clean all
+    /opt/python/cp313-cp313/bin/python -m venv /opt/venv
+    # loom's pinned nvcc and CCCL ( the 13.4 frontend collapses on loom's kernels, CUB is for the 1D ones ), what builds and
+    # checks a wheel, then the project's frameworks and dependencies
+    /opt/venv/bin/pip install --no-cache-dir numpy ninja pytest wheel twine auditwheel \
+        "nvidia-cuda-nvcc>=13.3,<13.4" "nvidia-cuda-crt<13.4" "nvidia-nvvm<13.4" "nvidia-cuda-cccl<13.4" {pip}
+
+%environment
+    export PATH=/opt/venv/bin:$PATH
+    GCC=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/x86_64-redhat-linux/14
+    export LOOM_CXX=/usr/bin/clang++
+    export LOOM_CXXFLAGS="-std=c++23 -static-libstdc++ -static-libgcc --gcc-install-dir=$GCC"
+    export LOOM_LDFLAGS="--gcc-install-dir=$GCC"
+    # nvcc reads the headers of GCC 14 through a g++ ( with a clang as host it sees C++23 features it cannot parse )
+    export LOOM_CUDA_HOST=/opt/rh/gcc-toolset-14/root/usr/bin/g++
+    export LOOM_CUDA_HOST_CXXFLAGS="-std=c++23"
+    # the CUDA runtime the frameworks bring ( pip: nvidia/*/lib ), which their own activation would have put on the path
+    export LD_LIBRARY_PATH=$(echo /opt/venv/lib/python3.13/site-packages/nvidia/*/lib | tr ' ' ':'):${LD_LIBRARY_PATH:-}

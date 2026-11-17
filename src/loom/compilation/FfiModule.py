@@ -49,6 +49,10 @@ class FfiModule:
         self.header_path = f"loom_modules/{ self.stem }.h"
         self.source_path = f"loom_modules/{ self.stem }{ suffix }"
 
+    def render_key( self ):
+        """What a call that links this unit renders with it ( `drivers/render_key.py` ): the stem, whose digest holds all of it"""
+        return ( "FfiModule", self.stem )
+
     def unit( self ):
         """`( path, defines )` as `FfiCode.sources` has them; the files exist when this returns."""
         self.write()

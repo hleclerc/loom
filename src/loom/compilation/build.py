@@ -555,7 +555,9 @@ class Build:
         ask for it, so it lives in the COMMON graph. `shared = False`: the object belongs to nobody
         else (a kernel's generated source), it lives in the own directory and goes away with it."""
         src = Path( src ).resolve()
-        defines = dict( defines or {} )
+        from .externals import external_defines
+        # an external's macros go where its headers do: not to a unit that says which roots it takes ( the runtime )
+        defines = { **( external_defines( self.externals ) if include_only is None else {} ), **dict( defines or {} ) }
         extra_flags = list( extra_flags )
         graph = self.common if shared else self.own
         include_first = [ graph.rel( d ) for d in include_first ]

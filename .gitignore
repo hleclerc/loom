@@ -29,7 +29,7 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 .pytest_cache/
 
-# the wheel `make wheels` builds
+# the wheel `make wheels` ( loom.release ) builds
 /dist/
 
 # what only this machine knows ( hosts, paths ): see errand-envs.py

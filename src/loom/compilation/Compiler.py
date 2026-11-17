@@ -138,14 +138,72 @@ def shared_suffix() -> str:
 _dll_directories = {}
 
 
+def _compiler_bin_dir() -> Path | None:
+    cxx = find_host_cxx()
+    found = cxx and ( shutil.which( cxx ) or ( cxx if Path( cxx ).is_file() else None ) )
+    return Path( found ).resolve().parent if found else None
+
+
+def _dll_imports( path: Path ) -> list:
+    """The names of the DLLs a PE file imports ( its import directory ), read from the file itself: no tool needed."""
+    import struct
+    data = Path( path ).read_bytes()
+    pe = struct.unpack_from( "<I", data, 0x3c )[ 0 ]
+    n_sections, opt_size = struct.unpack_from( "<H", data, pe + 6 )[ 0 ], struct.unpack_from( "<H", data, pe + 20 )[ 0 ]
+    opt = pe + 24
+    dirs = opt + ( 112 if struct.unpack_from( "<H", data, opt )[ 0 ] == 0x20b else 96 )     # PE32+ or PE32
+    import_rva = struct.unpack_from( "<I", data, dirs + 8 )[ 0 ]
+    sections = [ struct.unpack_from( "<IIII", data, opt + opt_size + 40 * i + 8 ) for i in range( n_sections ) ]
+
+    def offset( rva ):
+        for vsize, vaddr, rsize, raw in sections:
+            if vaddr <= rva < vaddr + max( vsize, rsize ):
+                return rva - vaddr + raw
+        raise ValueError( f"{ path }: rva { rva:#x } outside the sections" )
+
+    names, at = [], offset( import_rva ) if import_rva else None
+    while at is not None:
+        name_rva = struct.unpack_from( "<I", data, at + 12 )[ 0 ]
+        if name_rva == 0:
+            break
+        start = offset( name_rva )
+        names.append( data[ start : data.index( b"\0", start ) ].decode( "ascii" ) )
+        at += 20
+    return names
+
+
+def compiler_runtime_dlls( libraries ) -> list:
+    """Windows: the DLLs of the compiler's own runtime that `libraries` import, directly or through one another
+    ( `libc++.dll`, `libunwind.dll`, `libwinpthread-1.dll` for llvm-mingw; `libstdc++-6.dll`, ... for gcc ): the ones found
+    beside the compiler. A catalogue ships them ONCE per tag, beside its kernels, instead of a copy of the runtime linked
+    into every kernel ( `-static` ). Empty elsewhere, and when the runtime is linked statically."""
+    bin_dir = _compiler_bin_dir() if os.name == "nt" else None
+    if bin_dir is None:
+        return []
+    found, todo = {}, [ Path( l ) for l in libraries ]
+    while todo:
+        for name in _dll_imports( todo.pop() ):
+            dll = bin_dir / name
+            if name.lower() not in found and dll.is_file():
+                found[ name.lower() ] = dll
+                todo.append( dll )
+    return sorted( found.values() )
+
+
 def load_library( path ):
     """`ctypes.CDLL( path )`. A Windows DLL looks for its dependencies in a few system places and beside itself, not where its
-    linker found them ( no rpath ): the places loom builds the libraries a kernel needs are added first."""
+    linker found them ( no rpath ): the places loom builds the libraries a kernel needs are added first, and, for a kernel
+    compiled here ( in the cache ), the directory of the compiler, which holds its runtime ( `libc++.dll`, ... ). A kernel
+    of a catalogue finds that runtime beside itself ( `compiler_runtime_dlls` ), never the compiler's: a wheel check on a
+    machine that has one still proves the wheel."""
     import ctypes
     if os.name == "nt":
         from . import cache_root
-        for d in ( Path( path ).parent, cache_root() / "build" / "runtime", cache_root() / "build" / "units" ):
-            if d.is_dir() and d not in _dll_directories:     # once each: a long list of them makes LoadLibrary fail ( out of memory )
+        dirs = [ Path( path ).parent, cache_root() / "build" / "runtime", cache_root() / "build" / "units" ]
+        if Path( path ).resolve().is_relative_to( cache_root().resolve() ):
+            dirs.append( _compiler_bin_dir() )
+        for d in dirs:
+            if d is not None and d.is_dir() and d not in _dll_directories:     # once each: a long list of them makes LoadLibrary fail ( out of memory )
                 _dll_directories[ d ] = os.add_dll_directory( str( d ) )
     try:
         return ctypes.CDLL( str( path ) )

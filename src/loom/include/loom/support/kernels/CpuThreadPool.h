@@ -22,10 +22,14 @@ namespace sdot {
 /// than `hardware_concurrency` in a Slurm allocation), `SDOT_PIN_THREADS=1` pins worker `w` to
 /// the `w`-th of these CPUs.
 ///
-/// Distribution: `run_threads( T, job )` calls `job( t )` for `t` in `[ 0, T )`, the virtual
-/// threads being distributed in CONTIGUOUS slices over the workers. This is the split that won
-/// in the benchmark (`solvers_des_familles/src/util/parallel.h`, "blocks vs strided"): a thread
-/// stays in ITS region of space, which matters when the items are in tree order.
+/// Distribution: `run_threads( T, job )` calls `job( t )` for `t` in `[ 0, T )`, each virtual thread
+/// being CLAIMED, in increasing order, by whichever thread is free first -- the caller included. A
+/// virtual thread is a contiguous region of the work ( what won in the benchmark of
+/// `solvers_des_familles/src/util/parallel.h`, "blocks vs strided": a thread stays in ITS region of
+/// space ), so claiming them keeps that, and the launch no longer waits for the workers that are
+/// still asleep: a call too small for them is done by the caller alone before they wake ( measured
+/// on a 14-core Mac: 3-4 ms per launch, waiting for sleeping workers, for 20 cells of a few µs ),
+/// and a worker that wakes late finds nothing left.
 ///
 /// The implementation is in `loom/cpp/runtime/cpu_thread_pool.cpp`: none of this has to
 /// be recompiled with each kernel.
@@ -45,7 +49,7 @@ public:
     bool pinned    () const { return _pin; }
 
 private:
-    static void _run_slice( int w, int W, int nb_threads, const std::function<void( int )> &job );
+    void        _run_claimed();                  // runs the virtual threads it can claim in the current launch
     void        _ensure_workers();
     void        _worker_loop( int w );
     int         _cpu( int w ) const { return _cpus.empty() ? w : _cpus[ w % _cpus.size() ]; }   // where worker `w` is pinned
@@ -53,11 +57,14 @@ private:
     std::vector<std::thread>          _workers;
     std::mutex                        _mutex;
     std::condition_variable           _cv_job, _cv_done;
-    const std::function<void( int )> *_current_job        = nullptr;
-    int                               _current_nb_threads = 0;
-    // on lines of their own: the idle workers spin on `_launch` while the busy ones count down `_nb_remaining`
-    alignas( 64 ) std::atomic<int>    _nb_remaining       = 0;     // the workers of the current job still in it
+    // atomics: a worker that wakes late reads them while the next launch may be writing them ( its claim then fails )
+    std::atomic<const std::function<void( int )> *> _current_job = nullptr;
+    // on lines of their own: the idle workers spin on `_launch`, the busy ones claim from `_claim` and count in `_nb_done`
+    alignas( 64 ) std::atomic<unsigned long long> _claim  = 0;     // ( generation << 32 ) | the next virtual thread to claim
+    std::atomic<unsigned long long>   _limit              = 0;     // ( generation << 32 ) | the number of virtual threads of that launch
+    alignas( 64 ) std::atomic<int>    _nb_done            = 0;     // the virtual threads of the current launch that are done
     alignas( 64 ) std::atomic<long>   _launch             = 0;     // ( generation << 16 ) | its number of workers: what the workers wait for
+    unsigned long long                _generation         = 0;     // of the current launch ( written by the launcher only )
     alignas( 64 ) int                 _nb_workers         = 1;
     bool                              _pin                = false;
     std::atomic<bool>                 _stop               = false;

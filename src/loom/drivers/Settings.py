@@ -8,6 +8,9 @@ build a value or launch a call.
 from ..tensor.Dtype import Dtype, REAL, BOOL
 
 
+_DTYPE_VERSIONS = {}      # ( operations class, kind, size ) -> the framework's dtype: a pure function of them
+
+
 class Settings:
     def __init__( self, framework, device, ftype, itype ):
         ops = framework.operations
@@ -48,7 +51,14 @@ class Settings:
 
     def dtype_version( self, dtype ):
         """The dtype OF THIS FRAMEWORK that `dtype` denotes, sizes left open resolved by the defaults."""
-        return self.framework.operations.dtype_version( self.concrete( dtype ) )
+        d = self.concrete( dtype )
+        # remembered per framework and concrete type: a call asks it about a hundred times ( each tensor of the lowering )
+        ops = self.framework.operations
+        key = ( type( ops ), d.kind, d.size )
+        res = _DTYPE_VERSIONS.get( key )
+        if res is None:
+            res = _DTYPE_VERSIONS[ key ] = ops.dtype_version( d )
+        return res
 
     def driver_dtype_version( self, kind, size ):
         return self.dtype_version( Dtype( kind, size ) )

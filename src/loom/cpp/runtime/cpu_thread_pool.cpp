@@ -76,7 +76,7 @@ CpuThreadPool::~CpuThreadPool() {
         th.join();
 }
 
-/// One launch at a time: the pool holds ONE job ( `_current_job`, `_nb_remaining`, `_launch` ), and several threads may launch
+/// One launch at a time: the pool holds ONE job ( `_current_job`, `_claim`, `_nb_done`, `_launch` ), and several threads may launch
 /// it at once -- XLA runs independent custom calls of one program on its own threads ( measured: two adjoints of a `jax.jit`
 /// waited forever, each worker having taken the other's generation ). The callers queue here; a job still never relaunches
 /// the pool ( not reentrant ).
@@ -97,24 +97,26 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
     std::lock_guard<std::mutex> launch( launch_mutex() );
     _ensure_workers();
 
-    // the job is written BEFORE the launch moves ( release ): a spinning worker that sees the new launch sees the job. The
-    // launch is moved under the mutex so that a worker going to sleep cannot miss it. Only the `W` workers with a slice
-    // acknowledge it: the others read the launch word alone ( it carries `W` ), never the job, so the next launch may
-    // rewrite the job as soon as the `W` are out -- a small loop on a node of 128 cores waits for its few workers, not for
-    // all of them.
-    _current_job        = &job;
-    _current_nb_threads = nb_threads;
-    _nb_remaining.store( W - 1, std::memory_order_relaxed );
+    // the job is written BEFORE the claim word and the launch move ( release ): whoever claims a virtual thread of this
+    // generation sees the job. The launch is moved under the mutex so that a worker going to sleep cannot miss it; it carries
+    // `W`, and only the workers below `W` come to claim -- a small loop on a node of 128 cores wakes a few of them.
+    _current_job.store( &job, std::memory_order_relaxed );
+    _nb_done.store( 0, std::memory_order_relaxed );
+    ++_generation;
+    // the size of the launch FIRST, tagged with its generation: a claim is made only when the claim word and the limit are of the
+    // same launch ( a worker that read the size of the next launch with the claim word of the last one claimed a slot past the end
+    // of the last one -- run twice, and the count of the launch overshot: the caller waited forever )
+    _limit.store( _generation << 32 | ( unsigned long long ) nb_threads, std::memory_order_relaxed );
+    _claim.store( _generation << 32, std::memory_order_release );
     {
         std::lock_guard<std::mutex> lock( _mutex );
         _launch.store( ( ( _launch.load( std::memory_order_relaxed ) >> 16 ) + 1 ) << 16 | W, std::memory_order_release );
     }
     _cv_job.notify_all();
 
-    // The calling thread runs slice 0. With pinning on it must sit on the first allowed CPU like the workers sit on theirs:
-    // left floating it can share a core with a worker's hyperthread sibling, and since the slices are
-    // equal the whole call waits for it ( measured: a bimodal +45 % on a 3D diagram ). Its mask is
-    // restored afterwards: it is the user's thread, not ours.
+    // The calling thread claims too. With pinning on it must sit on the first allowed CPU like the workers sit on theirs:
+    // left floating it can share a core with a worker's hyperthread sibling ( measured: a bimodal +45 % on a 3D diagram ).
+    // Its mask is restored afterwards: it is the user's thread, not ours.
 #ifdef __linux__
     cpu_set_t previous;
     const bool pinned = _pin && sched_getaffinity( 0, sizeof( previous ), &previous ) == 0;
@@ -125,25 +127,46 @@ void CpuThreadPool::run_threads( int nb_threads, const std::function<void( int )
         sched_setaffinity( 0, sizeof( set ), &set );
     }
 #endif
-    _run_slice( 0, W, nb_threads, job );
+    _run_claimed();
 #ifdef __linux__
     if ( pinned )
         sched_setaffinity( 0, sizeof( previous ), &previous );
 #endif
 
-    auto done = [&] { return _nb_remaining.load( std::memory_order_acquire ) == 0; };
+    // everything is claimed: wait for the virtual threads still running elsewhere ( none when the workers were asleep )
+    auto done = [&] { return _nb_done.load( std::memory_order_acquire ) == nb_threads; };
     if ( ! spin_until( done ) ) {
         std::unique_lock<std::mutex> lock( _mutex );
         _cv_done.wait( lock, done );
     }
-    _current_job = nullptr;
+    _current_job.store( nullptr, std::memory_order_relaxed );
 }
 
-void CpuThreadPool::_run_slice( int w, int W, int nb_threads, const std::function<void( int )> &job ) {
-    const int b = int( ( long long ) w * nb_threads / W );
-    const int e = int( ( long long ) ( w + 1 ) * nb_threads / W );
-    for ( int t = b; t < e; ++t )
-        job( t );
+void CpuThreadPool::_run_claimed() {
+    for ( ;; ) {
+        // the claim word, then the limit: the limit is written before the claim word ( which releases it ), so a claim word of
+        // launch `g` is read with a limit of `g` or later. Of the same launch, the slot is claimed if it exists; of different ones,
+        // the claim word is stale ( the next launch is being written ): read again. A claim that succeeds is of a launch still
+        // running -- the next one starts only when every slot of this one is claimed AND done -- so its job is the current one.
+        unsigned long long c = _claim.load( std::memory_order_acquire );
+        const unsigned long long lim = _limit.load( std::memory_order_acquire );
+        if ( ( c >> 32 ) != ( lim >> 32 ) ) {
+            cpu_relax();
+            continue;
+        }
+        const int n = int( lim & 0xffffffffull );
+        const int t = int( c & 0xffffffffull );
+        if ( t >= n )
+            return;
+        if ( ! _claim.compare_exchange_weak( c, c + 1, std::memory_order_acq_rel, std::memory_order_acquire ) )
+            continue;
+        ( *_current_job.load( std::memory_order_relaxed ) )( t );
+        // the last one done wakes the caller if it sleeps ( under the mutex: it cannot miss the notification )
+        if ( _nb_done.fetch_add( 1, std::memory_order_acq_rel ) + 1 == n ) {
+            std::lock_guard<std::mutex> lock( _mutex );
+            _cv_done.notify_one();
+        }
+    }
 }
 
 void CpuThreadPool::_ensure_workers() {
@@ -175,13 +198,8 @@ void CpuThreadPool::_worker_loop( int w ) {
             return;
         const int W = int( seen & 0xffff );
         if ( w >= W )
-            continue;           // not in this launch: the job may already be the next launch's
-        _run_slice( w, W, _current_nb_threads, *_current_job );
-        // the last one out wakes the caller if it sleeps ( under the mutex: it cannot miss the notification )
-        if ( _nb_remaining.fetch_sub( 1, std::memory_order_acq_rel ) == 1 ) {
-            std::lock_guard<std::mutex> lock( _mutex );
-            _cv_done.notify_one();
-        }
+            continue;           // not called to this launch
+        _run_claimed();         // ( nothing left when it wakes late: the others did it )
     }
 }
 

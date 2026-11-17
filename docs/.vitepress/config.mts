@@ -48,6 +48,7 @@ export default defineConfig( {
             { text: 'Frameworks and devices',   link: '/guide/frameworks' },
             { text: 'Compilation and catalogue', link: '/guide/compilation' },
             { text: 'Distributed programs',     link: '/guide/distributed' },
+            { text: 'Releasing a package',      link: '/guide/releasing' },
           ]
         },
         {

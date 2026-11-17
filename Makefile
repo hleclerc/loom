@@ -1,15 +1,17 @@
 # The loom website lives under docs/ ( VitePress ), with its own package.json, so the project root
 # stays a Python package root. `npm install` is idempotent, so there is no separate step to remember.
 
-.PHONY: help site site-build site-deploy anim version wheels publish
+.PHONY: help site site-build site-deploy anim version bump_version wheels check_wheels publish
 
 help:
 	@echo "  make site        the website, live reloading   ( docs/, VitePress )"
 	@echo "  make site-build  the website into docs/.vitepress/dist"
 	@echo "  make site-deploy site-build, then push it to the gh-pages branch ( https://hleclerc.github.io/loom/ )"
-	@echo "  make version     write today's next version in pyproject.toml ( VERSION=x.y.z.n to choose it )"
-	@echo "  make wheels      the loom-ffi wheel ( pure Python: one for every platform ) into dist/"
-	@echo "  make publish     upload dist/ to PyPI ( TWINE_PASSWORD = your PyPI token )"
+	@echo "  make version     print the version"
+	@echo "  make bump_version write today's next version ( TO=x.y.z.n to choose it )"
+	@echo "  make wheels      the loom-ffi wheel into dist/ ( pure Python: one for every platform ), checked"
+	@echo "  make check_wheels install this version's wheel in a clean venv and check it"
+	@echo "  make publish     upload this version's wheel of dist/ ( TWINE_PASSWORD = your PyPI token )"
 	@echo "  make anim        regenerate the tutorials' animations ( docs/public/anim/*.gif ) -- needs jax + matplotlib"
 
 site: docs/node_modules
@@ -43,19 +45,21 @@ anim:
 	python docs/scripts/diffusion_inversion.py
 
 
-# ── the wheel ──
-# loom-ffi is pure Python, so it is built anywhere, and released from here: `make version` ( today's next one ), `make wheels`,
-# `make publish`. A package that ships kernels for it ( sdot ) requires at least the version it is built with: release loom first.
-
+# ── releasing ──
+# reminders: the work is in loom ( `python -m loom.release`, docs/guide/releasing.md in loom ), configured by [tool.loom.release]
 PYTHON ?= python
-VERSION ?= next
 
 version:
-	$(PYTHON) scripts/version.py $(VERSION)
+	$(PYTHON) -m loom.release show_version
+
+bump_version:
+	$(PYTHON) -m loom.release bump_version $(if $(TO),--to $(TO))
 
 wheels:
-	rm -f dist/*.whl
-	$(PYTHON) -m pip wheel --no-deps -w dist .
+	$(PYTHON) -m loom.release make_wheels
 
-wheels-publish: wheels
-	$(PYTHON) -m twine upload --skip-existing --repository-url https://upload.pypi.org/legacy/ dist/*.whl
+check_wheels:
+	$(PYTHON) -m loom.release check_wheels
+
+publish:
+	$(PYTHON) -m loom.release publish_wheels

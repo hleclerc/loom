@@ -32,8 +32,9 @@ from .. import env
 
 
 class External:
-    def __init__( self, name, version, url, sha256, include = "" ):
+    def __init__( self, name, version, url, sha256, include = "", defines = None ):
         self.name, self.version, self.url, self.sha256, self.include = name, str( version ), url, sha256, include
+        self.defines = { k: dict( v ) for k, v in ( defines or {} ).items() }
 
     @property
     def root( self ) -> Path:
@@ -48,13 +49,16 @@ _externals = {}
 _resolved = {}          # ( name, ext_root ) -> the include directory, or None: the check, made once per process
 
 
-def register_external( name, version, url, sha256, include = "" ):
+def register_external( name, version, url, sha256, include = "", defines = None ):
     """Declares a library: `url` of an archive (`.tar.gz` / `.zip`) whose top level is stripped,
     `sha256` of the archive, `include` the subdirectory to put on the include path (the root by
     default). Declaring is free: nothing is fetched until a kernel asks for `name`. Declaring the
-    same one twice has no effect."""
+    same one twice has no effect.
+
+    `defines`: macros the library needs on some systems, by `sys.platform` -- `{ "win32": { "X": None } }`
+    is `-DX` on Windows, for the kernels that ask for the library and the units they link."""
     if name not in _externals:
-        _externals[ name ] = External( name, version, url, sha256, include )
+        _externals[ name ] = External( name, version, url, sha256, include, defines )
 
 
 def registered_externals() -> dict:
@@ -125,6 +129,16 @@ def include_dir_of( name ):
     if key not in _resolved:
         _resolved[ key ] = _ensure( ext )
     return _resolved[ key ]
+
+
+def external_defines( names ) -> dict:
+    """The macros of the externals `names` on this system ( `register_external( defines = ... )` )."""
+    out = {}
+    for n in names:
+        ext = _externals.get( n )
+        if ext is not None:
+            out.update( ext.defines.get( sys.platform, {} ) )
+    return out
 
 
 def external_include_dirs( names ) -> list:

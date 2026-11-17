@@ -68,8 +68,26 @@ class CallArg_Aggregate( CallArg ):
             if ca is not None:
                 self.attributes[ name_attr ] = ca
 
+    # -- the key of the source ( see `render_key.py` ): `device` is a function of the device, which is in the key ( its class
+    # and its answers, `global_key` ); what the rendering reads of `inst` is the units its class asks for ( `cpp_sources` ) --
+    # their LIST is in the key, whatever the class reads to make it.
+    _render_key_skip = CallArg._render_key_skip + ( "device", "_units_memo" )
+
+    def _render_key_extra( self ):
+        from .render_key import plain
+        return ( plain( type( self.inst ) ), plain( self._units() ) )
+
+    def _units( self ):
+        """`ffi_units( self )` of the aggregate's class, asked once per node"""
+        memo = self.__dict__.get( "_units_memo" )
+        if memo is None:
+            hook = getattr( self.inst, "ffi_units", None )
+            memo = self._units_memo = list( hook( self ) ) if hook is not None else []
+        return memo
+
     def _clone( self, mapping ):
         res = super()._clone( mapping )
+        res.__dict__.pop( "_units_memo", None )        # ( the clone's members may differ: asked again )
         res.attributes = { n: c._clone( mapping ) for n, c in self.attributes.items() }
         return res
 
@@ -132,10 +150,7 @@ class CallArg_Aggregate( CallArg ):
         """The domain units the call must LINK for us, `( path, defines )`: what the aggregate's class asks for through
         `ffi_units( self_call_arg )` ( the call arg is passed: it knows the device and the resolved types of the members
         the unit depends on ), and whatever its members ask. The caller collects them blind, like the includes."""
-        out = []
-        hook = getattr( self.inst, "ffi_units", None )
-        if hook is not None:
-            out += list( hook( self ) )
+        out = list( self._units() )
         for child in self.attributes.values():
             out += list( getattr( child, "cpp_sources", lambda: () )() )
         return out

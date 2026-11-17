@@ -285,7 +285,9 @@ def publish( library, source: str, sources, device, code_name = None, signature 
     if needs is None:
         with Build( device ) as b:
             needs = [ Path( b.runtime_library() ) ]
-    for dep in needs:
+    # Windows: the compiler's runtime DLLs too, once per tag ( `prune` only touches `libloom_*`: they stay )
+    from .Compiler import compiler_runtime_dlls
+    for dep in [ *needs, *compiler_runtime_dlls( [ library, *needs ] ) ]:
         _copy( Path( dep ), tag_dir / Path( dep ).name )
     dest = tag_dir / ( k + library_suffix() )
     _copy( Path( library ), dest )
@@ -415,7 +417,8 @@ def build( package: str, usage, targets = None, levels = None, tolerance: float 
 
     `usage` is run on every piece of hardware present, as every architecture it can behave as; the kernels it compiles are
     collected into `<package>/precompiled-kernels/`. The loops of `loom.bench_loop` are timed on every run, which decides
-    which architecture each kernel runs as (`<package>/choices/`); what no machine will ask for is then removed (`prune`).
+    which architecture each kernel runs as (`<package>/choices/`); what no machine will ask for is then removed (`prune`),
+    unless `LOOM_CATALOGUE_PRUNE=0`: several builds into the same directory ( one per framework ) prune once, after the last.
     The places are the package's, the hardware is what is present.
 
     `targets` (`[ "x86-64-v3", "x86-64" ]`) narrows the architectures built for: a family that has some in the list is built
@@ -465,6 +468,11 @@ def build( package: str, usage, targets = None, levels = None, tolerance: float 
         if target == Device.factory( device ).real_target():
             print( f"{ name } on { device }: { target } -> { use }   ( mean time relative to the best: { ', '.join( f'{ t } { s:.3f}' for t, s in scores.items() ) } )" )
     choices.register_choices( chosen )
+    if not env.flag( "CATALOGUE_PRUNE", True ):
+        # several builds into the same `out` ( one per framework, `loom.release make_kernels` ): each one measures the choices
+        # again, and a later one may send a kernel back to a level an earlier prune emptied -- the caller prunes once, at the end
+        print( report( out ) )
+        return
     removed = prune( out, [ chosen ] )
     print( f"pruned { len( removed ) } kernel(s) that no machine will ask for" )
     print( report( out ) )

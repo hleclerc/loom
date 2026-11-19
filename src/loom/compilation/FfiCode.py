@@ -131,7 +131,7 @@ class FfiCode( AbstractFfiCode ):
 
     def __init__( self, code = "", prologue = "", includes = (), sources = (), include_roots = (),
                   max_nb_threads = "", group_size = "", local_mem_elems = "",
-                  allocator = False, computed_grads = "", externals = (), _scaffold = False ) -> None:
+                  allocator = False, computed_grads = "", externals = (), depends_on = (), _scaffold = False ) -> None:
         if group_size and not local_mem_elems:
             raise ValueError( "FfiCode: `group_size` without `local_mem_elems` -- `run_parallel` "
                               "only takes the cooperative path when BOTH hooks exist, so this "
@@ -173,6 +173,11 @@ class FfiCode( AbstractFfiCode ):
         for root in include_roots:
             register_include_root( root )
 
+        # WHAT ITS CACHE ENTRY DEPENDS ON IN PYTHON ( `cache_journal` ): the `.py` that builds it -- its code changes
+        # its name, and only through that file is the old kernel found dead -- and what `depends_on` adds ( the
+        # modules a generated body is made from, when they are others ).
+        self.origin = _python_origin()
+        self.depends_on = tuple( str( Path( f ).resolve() ) for f in depends_on )
         self.code = code
         self.prologue = prologue
         self.sources = tuple( sources )
@@ -347,7 +352,33 @@ class FfiCode( AbstractFfiCode ):
                        _scaffold = self._scaffold,
                        **{ hook: self.hooks.get( hook, "" ) for hook in
                            ( "max_nb_threads", "group_size", "local_mem_elems" ) } )
+        res.origin = self.origin or other.origin               # built here, inside loom: the user's file is theirs
+        res.depends_on = tuple( dict.fromkeys( ( *self.depends_on, *other.depends_on ) ) )
         return res
+
+
+_LOOM_DIR = Path( __file__ ).resolve().parents[ 1 ]
+
+
+_origin_of_file = {}         # co_filename -> "" ( loom's, or not a file: look further ), its resolved path otherwise
+
+
+def _python_origin():
+    """The `.py` of the nearest frame outside loom: the module that builds the kernel. None for a `<stdin>`. A kernel
+    may be built at every call: each file is resolved once per process."""
+    import inspect
+    frame = inspect.currentframe()
+    while frame is not None:
+        name = frame.f_code.co_filename
+        known = _origin_of_file.get( name )
+        if known is None:
+            path = Path( name ).resolve() if not name.startswith( "<" ) else None
+            known = _origin_of_file[ name ] = \
+                "" if path is None or path.is_relative_to( _LOOM_DIR ) else ( str( path ) if path.is_file() else "<none>" )
+        if known:
+            return None if known == "<none>" else known
+        frame = frame.f_back
+    return None
 
 
 class Kernels( AbstractFfiCode ):
@@ -374,6 +405,15 @@ class Kernels( AbstractFfiCode ):
         # `BackwardCall.computed_grads_pairs`. `None` on a forward -- an adjoint with no pair still
         # has the ( empty ) struct, so a body that names `args.computed_grads` compiles.
         self.computed_grads = None if computed_grads is None else tuple( computed_grads )
+
+    @property
+    def python_files( self ):
+        """The Python its kernels depend on, for their cache entries ( `FfiCode.origin`, `depends_on` )."""
+        files = []
+        for k in ( self.forward, self.backward ):
+            if k is not None:
+                files += [ f for f in ( getattr( k, "origin", None ), *getattr( k, "depends_on", () ) ) if f ]
+        return tuple( dict.fromkeys( files ) )
 
     # what the source rendering reads on us, directly
     @property

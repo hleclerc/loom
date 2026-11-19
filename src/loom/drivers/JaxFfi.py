@@ -101,6 +101,9 @@ def render_source( body: str ) -> str:
     return _SOURCE_TEMPLATE.format( body = body )
 
 
+from ..compilation import cache_journal
+
+
 def compile_and_register( source: str, device, prefix: str = "", sources = (),
                           code_name = None, signature = None, headers = None ) -> str:
     """Compile *source* (plus the `sources` units it links, see `make_library`), load and
@@ -176,6 +179,7 @@ def compile_and_register( source: str, device, prefix: str = "", sources = (),
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
         from ..compilation.Compiler import load_library
         lib = load_library( lib_path )
+        cache_journal.record_use( kernel_dir.final )
         handler = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
         catalogue.publish( lib_path, source, sources, device, code_name, signature )
@@ -231,9 +235,10 @@ def _make_op( code, ca, device, prefix ):
     def op( *arrays ):
         with hardware.masked( level ):
             source, _, outputs, attrs, sources, headers = _render_call( code, ca, device, raw = True )
-            target = compile_and_register( source, device, prefix, sources,
-                                           code_name = code.name, signature = call_signature( ca ),
-                                           headers = headers )
+            with cache_journal.declaring( getattr( code, "python_files", () ) ):
+                target = compile_and_register( source, device, prefix, sources,
+                                               code_name = code.name, signature = call_signature( ca ),
+                                               headers = headers )
         results = jax.ffi.ffi_call( target, [ b.jax_out_spec() for b in outputs ] )(
             *arrays, **{ name: numpy.int64( value ) for name, _, value in attrs }
         )

@@ -80,6 +80,9 @@ def _lib_suffix() -> str:
 _FLAVOR = "pointer"
 
 
+from ..compilation import cache_journal
+
+
 def _load( source: str, device, prefix: str, sources, code_name, signature, headers = None ):
     """The handler of this source, compiled (or reused from disk) and loaded."""
     # the key is what changes the binary: the source, how it is compiled -- and WHICH FFI it is
@@ -117,6 +120,7 @@ def _load( source: str, device, prefix: str, sources, code_name, signature, head
         lib_path = kernel_dir.final / ( name + _lib_suffix() )
         from ..compilation.Compiler import load_library
         lib = load_library( lib_path )
+        cache_journal.record_use( kernel_dir.final )
         entry = getattr( lib, _HANDLER_SYMBOL )
         journal.record( name, code_name, signature, "compiled", time.monotonic() - started )
         catalogue.publish( lib_path, source, sources, device, code_name, signature, _FLAVOR )
@@ -228,7 +232,8 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
     `values`: the inputs to read in place of the ones `ca` holds ( same order ) -- what a batched call
     is handed, whose buffers are not the ones the lowering was built on."""
     source, inputs, outputs, attrs, sources, headers = _render_call( code, ca, device )
-    entry = _load( source, device, prefix, sources, code.name, call_signature( ca ), headers )
+    with cache_journal.declaring( getattr( code, "python_files", () ) ):
+        entry = _load( source, device, prefix, sources, code.name, call_signature( ca ), headers )
 
     # kept alive by these lists until the kernel is done: the frame only holds addresses
     if values is None:

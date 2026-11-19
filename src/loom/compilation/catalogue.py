@@ -113,6 +113,11 @@ def key( source: str, sources, flavor: str = "" ) -> str:
 
 # ── serving ─────────────────────────────────────────────────────────────────
 
+# The catalogue of a package: `<package>/kernel-catalogue/<tag>/<key>.so`. Not `catalogue/`: the module that builds it is
+# usually `<package>/catalogue.py`. Tagged as a cache ( CACHEDIR.TAG ) when collected: a sync of a checkout leaves it alone
+DIRECTORY = "kernel-catalogue"
+
+
 def register_catalogue( root ):
     """Add a catalogue directory (`<root>/<tag>/<key>.so`). Called by the package that ships one (`sdot/__init__.py`);
     a missing directory is not an error -- a checkout has none."""
@@ -205,6 +210,8 @@ def collect( out ):
         raise RuntimeError( "loom: a catalogue is already being collected" )
     _collecting = Path( out ).resolve()
     _collecting.mkdir( parents = True, exist_ok = True )
+    from . import tag_as_cache
+    tag_as_cache( _collecting )
     _published.clear()
     _published_ffi.clear()
     try:
@@ -416,7 +423,7 @@ def build( package: str, usage, targets = None, levels = None, tolerance: float 
         loom.catalogue.build( "my_package", usage )
 
     `usage` is run on every piece of hardware present, as every architecture it can behave as; the kernels it compiles are
-    collected into `<package>/precompiled-kernels/`. The loops of `loom.bench_loop` are timed on every run, which decides
+    collected into `<package>/kernel-catalogue/`. The loops of `loom.bench_loop` are timed on every run, which decides
     which architecture each kernel runs as (`<package>/choices/`); what no machine will ask for is then removed (`prune`),
     unless `LOOM_CATALOGUE_PRUNE=0`: several builds into the same directory ( one per framework ) prune once, after the last.
     The places are the package's, the hardware is what is present.
@@ -440,7 +447,7 @@ def build( package: str, usage, targets = None, levels = None, tolerance: float 
     from ..drivers.Framework import UnsupportedDevice
     from .. import choices
     base = Path( find_spec( package ).submodule_search_locations[ 0 ] )
-    out, chosen = base / "precompiled-kernels", base / "choices"
+    out, chosen = base / DIRECTORY, base / "choices"
     from ..devices.Device import Device
     families = { kind: Device.factory( kind ).catalogue_targets() for kind in { r.device.split( ":" )[ 0 ] for r in hardware.runs() } }
     if targets is not None:

@@ -655,9 +655,44 @@ class Build:
             if worked:
                 raise RuntimeError( f"loom: the fast path said { targets } were up to date, ninja rebuilt them" )
             return
-        worked = self.common.run( list( self.common.edges ) ) | self.own.run( targets )
+        started = time.monotonic()
+        common_worked = self.common.run( list( self.common.edges ) )
+        common_s, started = time.monotonic() - started, time.monotonic()
+        own_worked = self.own.run( targets )
         if not force_build():
             self._write_stamp( stamp_path, declared, targets )
+        if common_worked or own_worked:
+            self._journal( common_worked, common_s, own_worked, time.monotonic() - started )
+
+    def _journal( self, common_worked, common_s, own_worked, own_s ):
+        """What ninja just built, said to the cache's journal ( `cache_journal` ): the shared libraries of the common
+        graph when it worked, the kernel when its own graph did -- each with the headers ninja found it depends on."""
+        from . import cache_journal
+        if cache_journal.root() is None:
+            return
+        link = self._rule( "link_shared" )
+        libs = { out: [ i for i in e[ "inputs" ] if i.endswith( ".o" ) ]
+                 for out, e in self.common.edges.items() if e[ "rule" ] == link }
+
+        def closure( graph, objs ):
+            if not objs:
+                return {}
+            with _Lock( graph.root ):
+                got = _ninja_closure( graph, sorted( set( objs ) ) ) or {}
+            return { o: [ f for f in files if os.path.isabs( f ) ] for o, files in got.items() }
+
+        if common_worked and libs:
+            deps = closure( self.common, [ o for objs in libs.values() for o in objs ] )
+            for lib, objs in libs.items():
+                cache_journal.record_create( lib, [ lib, *objs ], deps = { f for o in objs for f in deps.get( o, () ) },
+                                             cost_s = common_s / len( libs ), shared = True )
+        if own_worked:
+            objs = [ o for o in self.own.edges if o.endswith( ".o" ) ]
+            deps = closure( self.own, objs )
+            needs = { i for e in self.own.edges.values() for i in e[ "implicit" ] if os.path.isabs( i ) }
+            final = kernels_root() / self.own.root.name           # built in a staging directory, published there
+            cache_journal.record_create( final, [ final ], needs = needs, deps = { f for fs in deps.values() for f in fs },
+                                         cost_s = own_s, size_of = self.own.root )
 
     def _declared( self ) -> str:
         edges = { **self.common.edges, **self.own.edges }

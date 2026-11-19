@@ -134,7 +134,8 @@ class Project:
 
     @property
     def kernels_dir( self ) -> Path:
-        return self.package_dir / "precompiled-kernels"
+        from ..compilation.catalogue import DIRECTORY
+        return self.package_dir / DIRECTORY
 
     def kernel_files( self ):
         return [ f for f in self.kernels_dir.rglob( "*" ) if f.is_file() and f.suffix in ( ".so", ".dylib", ".dll" ) ] \

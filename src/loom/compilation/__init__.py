@@ -90,14 +90,38 @@ def _resolve_build_dir( override ):
     return path
 
 
+CACHEDIR_TAG = "CACHEDIR.TAG"
+CACHEDIR_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
+_tagged = set()
+
+
+def tag_as_cache( directory ):
+    """Write a `CACHEDIR.TAG` ( https://bford.info/cachedir/ ) in `directory` if it has none: what it holds is regenerated,
+    and a tool that copies or backs up a tree leaves it alone -- errand's sync among them, which then never sends it, never
+    removes it, never reports it as a change. Best effort: a directory we cannot write in is left as it is."""
+    directory = Path( directory )
+    if directory in _tagged:
+        return
+    _tagged.add( directory )
+    tag = directory / CACHEDIR_TAG
+    try:
+        if not tag.exists():
+            tag.write_text( f"{ CACHEDIR_SIGNATURE }\n# written by loom: compiled kernels, regenerated when missing\n" )
+    except OSError:
+        pass
+
+
 def cache_root() -> Path:
-    """The first writable user cache directory: `LOOM_CACHE_DIR` if set, otherwise the platform
-    convention (`~/.cache/loom`, `~/Library/Caches/loom`, `%LOCALAPPDATA%/loom/cache`), then
-    `/tmp` as a last resort."""
+    """The first writable user cache directory: `LOOM_CACHE_DIR` if set, otherwise `$ERRAND_CACHES/loom` for a run
+    under errand ( the caches of the place it runs on, see errand's ADR 0019 ), otherwise the platform convention
+    (`~/.cache/loom`, `~/Library/Caches/loom`, `%LOCALAPPDATA%/loom/cache`), then `/tmp` as a last resort. Tagged as a
+    cache ( `tag_as_cache` )."""
     candidates = []
     override = env.var( "CACHE_DIR" )
     if override:
         candidates.append( Path( override ).expanduser() )
+    if os.environ.get( "ERRAND_CACHES" ):
+        candidates.append( Path( os.environ[ "ERRAND_CACHES" ] ) / "loom" )
     if sys.platform == "darwin":
         candidates.append( Path.home() / "Library" / "Caches" / "loom" )
     elif os.name == "nt":
@@ -111,6 +135,7 @@ def cache_root() -> Path:
         candidates.append( Path( "/tmp" ) / f"loom-cache-{ uid }" )
     for p in candidates:
         if _is_writable_dir( p ):
+            tag_as_cache( p )
             return p
     raise RuntimeError( "loom : could not find a writable cache directory. Set LOOM_CACHE_DIR to an explicit writable path." )
 

@@ -31,6 +31,12 @@ class NumpyAdapter( PointerAdapter ):
         x = numpy.ascontiguousarray( x )
         return Operand( x.ctypes.data, x.shape, x, itemsize = x.itemsize )
 
+    def signature( self, x ):
+        """The FORM of `x` for a call plan ( `CallPlan.key_of` ): a plain array's dtype, shape and strides."""
+        if type( x ) is not numpy.ndarray:
+            return None
+        return ( "numpy", x.dtype.str, x.shape, x.strides )
+
     def zeros( self, shape, dtype, device ):
         return numpy.zeros( shape, dtype )
 

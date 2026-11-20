@@ -236,24 +236,36 @@ class NumpyOperations:
         as under Jax -- and here nothing traces, so this always applies.
         """
         from ..calls import lower_args, returned
-        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, returns, output_exceptions = lower_args( args )
-
+        from . import CallPlan
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
             raise ValueError( f"loom.ffi_call: expected one kernel (the forward) or two (forward, "
                               f"backward), got { len( kernels ) }" )
-        code = Kernels( name, *kernels )
 
+        # a call of a form already analysed is REPLAYED ( see `CallPlan` ): no analysis, no rendering, the same handler
+        ffi = self._ffi()
+        plan_key, plan = CallPlan.find( name, kernels, args, device, nb_items, batch_alignment, has_dynamic_capacity, failures, ffi._adapter )
+
+        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, returns, output_exceptions = lower_args( args )
+        code = Kernels( name, *kernels )
         prefix = name + "_"
+        analyse = lambda: CallArgsAnalysis( kwargs, device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
+        if plan and CallPlan.replay( plan, kwargs, device, ffi._adapter, code, analyse ):
+            return returned( returns )
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
             ca = CallArgsAnalysis( kwargs, device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
             ca.errors.call_name, ca.errors.failure_messages = name, dict( failures or {} )
-            self._ffi().call( code, ca, device, prefix )
+            # `has_dynamic_capacity = False` and no failure to report: the error buffer is not read back ( on a card, cupy's,
+            # a synchronization per call )
+            ca.errors.checked = bool( has_dynamic_capacity or failures )
+            ffi.call( code, ca, device, prefix )
 
-            overflows = ca.capacity_overflows()
+            overflows = ca.capacity_overflows() if ca.errors.checked else None
             if not overflows:
+                if plan is False:
+                    CallPlan.record( plan_key, code, ca, kwargs, device, prefix, ffi._adapter, failures, forward_only = True )
                 return returned( returns )
 
             if env.flag( "DEBUG_CAPACITY" ):

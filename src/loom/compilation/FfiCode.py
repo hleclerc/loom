@@ -162,16 +162,23 @@ class FfiCode( AbstractFfiCode ):
             # context of each frame ( it reads the files ), which costs tens of
             # milliseconds -- invisible as long as a kernel was a module constant, measurable as soon
             # as it is built where it is used, that is to say at every call.
+            # Each file is looked at once per process ( `_root_of_file` ): a kernel built at every call stats nothing.
             import inspect
             frame = inspect.currentframe()
             while frame is not None:
-                path = Path( frame.f_code.co_filename )
-                if path.is_file() and "loom/compilation" not in path.as_posix():
-                    include_roots = [ path.resolve().parent ]
+                name = frame.f_code.co_filename
+                root = _root_of_file.get( name )
+                if root is None:
+                    path = Path( name )
+                    root = _root_of_file[ name ] = path.resolve().parent if path.is_file() and "loom/compilation" not in path.as_posix() else ""
+                if root:
+                    include_roots = [ root ]
                     break
                 frame = frame.f_back
         for root in include_roots:
-            register_include_root( root )
+            if root not in _registered_roots:
+                register_include_root( root )
+                _registered_roots.add( root )
 
         # WHAT ITS CACHE ENTRY DEPENDS ON IN PYTHON ( `cache_journal` ): the `.py` that builds it -- its code changes
         # its name, and only through that file is the old kernel found dead -- and what `depends_on` adds ( the
@@ -361,6 +368,12 @@ _LOOM_DIR = Path( __file__ ).resolve().parents[ 1 ]
 
 
 _origin_of_file = {}         # co_filename -> "" ( loom's, or not a file: look further ), its resolved path otherwise
+
+
+# file name -> the include root a kernel built there defaults to ( its directory, resolved ), "" for a file that is not one
+_root_of_file: dict = {}
+# the roots already handed to `register_include_root`, as given
+_registered_roots: set = set()
 
 
 def _python_origin():

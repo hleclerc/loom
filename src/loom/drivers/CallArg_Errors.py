@@ -63,6 +63,10 @@ class CallArg_Errors( CallArg ):
         # and its name, for the message
         self.failure_messages = {}
         self.call_name = getattr( call_args_analysis, "name", "" ) or ""
+        # does the host read the buffer back after the call? Not when the caller said that no count can overflow
+        # ( `has_dynamic_capacity = False` ) and gave no failure to report: a kernel may still record, nobody would act on
+        # it, and on a card the read is a copy plus a synchronization of the stream -- per call ( see `PointerFfi.run` )
+        self.checked = True
 
     def is_ffi_buffer( self ):
         return True

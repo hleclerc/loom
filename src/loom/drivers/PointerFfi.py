@@ -198,6 +198,12 @@ class PointerAdapter:
         broadcast? What the code generator asks, to spell a view that reads the strides."""
         return False
 
+    def signature( self, x ):
+        """The FORM of an input value -- what a call plan is keyed on ( `CallPlan` ): hashable, everything the analysis reads
+        of it ( dtype, shape, strides, device ), never its content. `None`: not a value of this framework read in place, so
+        the call is analysed every time."""
+        return None
+
     def zeros( self, shape, dtype, device ):
         """A new output buffer of `shape` and `dtype` ( a numpy dtype: what `out_shape_dtype` says,
         the error buffer's too ), zero-filled."""
@@ -264,6 +270,10 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
 
     from .CallArg_Errors import CallArg_Errors
     errors_ret = next( ( i for i, b in enumerate( outputs ) if isinstance( b, CallArg_Errors ) ), -1 )
+    if errors_ret >= 0 and not outputs[ errors_ret ].checked:
+        # nothing the host would do with what the buffer says ( see `CallArg_Errors.checked` ): the handler does not read it
+        # back either, which on a card would be a copy and a synchronization of the stream per call
+        errors_ret = -1
 
     # THE CALL GROWS ITS OUTPUTS ITSELF: when a capacity overflows, the handler asks for larger outputs and runs the body again,
     # in the same call ( see the shim's `regrow` ). Python is only asked on an overflow: the analysis is made again with the
@@ -304,8 +314,20 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
     values = attrs_of( attrs )
     regrow_fn = _REGROW( regrow )
     frame = _CallFrame( args, rets, values, adapter.stream( device ), _ALLOCATE( allocate ), None,
-                        regrow_fn if errors_ret >= 0 else _REGROW(), None, errors_ret )
+                        regrow_fn if errors_ret >= 0 else _NO_REGROW, None, errors_ret )
+    _enter( entry, frame, device, adapter )
+    if state[ "ca" ] is not ca:
+        # grown in the call: the caller's analysis reads the error buffer of the LAST run ( the one whose outputs it gets ), not
+        # the one that overflowed -- whichever outputs it writes back
+        ca.errors.raw = state[ "outs" ][ errors_ret ]
+    return state[ "outputs" ], state[ "outs" ]
 
+
+_NO_REGROW = _REGROW()
+
+
+def _enter( entry, frame, device, adapter ):
+    """Run the handler on a filled frame, ordered with what the framework launched around it."""
     adapter.order_before( device )
     try:
         error = entry( ctypes.byref( frame ) )
@@ -313,11 +335,43 @@ def run( code, ca, device, prefix, adapter: PointerAdapter, values = None ):
         adapter.order_after( device )
     if error:
         raise RuntimeError( ctypes.string_at( error ).decode( errors = "replace" ) )
-    if state[ "ca" ] is not ca:
-        # grown in the call: the caller's analysis reads the error buffer of the LAST run ( the one whose outputs it gets ), not
-        # the one that overflowed -- whichever outputs it writes back
-        ca.errors.raw = state[ "outs" ][ errors_ret ]
-    return state[ "outputs" ], state[ "outs" ]
+
+
+def prepare( code, ca, device, prefix ):
+    """What `run` derives from the analysis before it touches a buffer: `( entry, input CallArgs, output CallArgs, attribute
+    values )`. A second time on the same analysis, the render and the load are cache hits."""
+    source, inputs, outputs, attrs, sources, headers = _render_call( code, ca, device )
+    with cache_journal.declaring( getattr( code, "python_files", () ) ):
+        entry = _load( source, device, prefix, sources, code.name, call_signature( ca ), headers )
+    return entry, inputs, outputs, [ int( v ) for _, _, v in attrs ]
+
+
+def launch( entry, values, strided, out_specs, attr_values, device, adapter: PointerAdapter ):
+    """The handler run on `values` (the inputs, in FFI order; `strided[ i ]`: the kernel reads the strides of input `i`), with
+    outputs allocated from `out_specs` ( `( shape, numpy dtype )` each ) and the attributes `attr_values`: the result buffers.
+
+    No analysis, no rendering: what `run` does once these are known -- a call replayed ( see `CallPlan` ). No capacity can
+    grow here ( no `regrow` ): a call that can overflow is not replayed. The scratch pool is there, as in `run`."""
+    ins = [ foreign_operand( x, device, s, adapter.framework ) or adapter.operand( x, device, s ) for x, s in zip( values, strided ) ]
+    outs = [ adapter.zeros( shape, dtype, device ) for shape, dtype in out_specs ]
+    scratch = []
+
+    def allocate( _, nb_bytes, alignment ):
+        try:
+            block = adapter.empty( ( nb_bytes + alignment, ), numpy.uint8, device )
+            scratch.append( block )
+            adapter.order_before( device )
+            address = adapter.operand_of_output( block ).address
+            return ( address + alignment - 1 ) // alignment * alignment
+        except Exception:
+            return None
+
+    args = ( _Buffer * max( 1, len( ins ) ) )( *[ o.as_buffer() for o in ins ] )
+    rets = ( _Buffer * max( 1, len( outs ) ) )( *[ adapter.operand_of_output( o ).as_buffer() for o in outs ] )
+    attrs = ( ctypes.c_int64 * max( 1, len( attr_values ) ) )( *attr_values )
+    frame = _CallFrame( args, rets, attrs, adapter.stream( device ), _ALLOCATE( allocate ), None, _NO_REGROW, None, -1 )
+    _enter( entry, frame, device, adapter )
+    return outs
 
 
 def call( code, ca, device, prefix, adapter: PointerAdapter ):

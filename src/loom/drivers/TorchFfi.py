@@ -51,6 +51,13 @@ class TorchAdapter( PointerAdapter ):
     def is_strided( self, x ) -> bool:
         return isinstance( x, torch.Tensor ) and x.dim() > 0 and not x.is_contiguous()
 
+    def signature( self, x ):
+        """The FORM of `x` for a call plan ( `CallPlan.key_of` ): a plain tensor's dtype, shape, strides and device; `None` for
+        anything else ( a subclass -- a `vmap`'s batched tensor --, a meta tensor, a value to convert )."""
+        if type( x ) is not torch.Tensor or x.is_meta:
+            return None
+        return ( "torch", x.dtype, tuple( x.shape ), x.stride(), x.device )
+
     def operand( self, x, device, strided = False ) -> Operand:
         wanted = self.torch_device( device )
         if not isinstance( x, torch.Tensor ):

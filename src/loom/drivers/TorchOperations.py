@@ -495,25 +495,39 @@ class TorchOperations:
         under Jax (nothing traces here, so this always applies).
         """
         from ..calls import lower_args, returned
-        from .TorchFfi import call as ffi_call
-        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, returns, output_exceptions = lower_args( args )
-
+        from . import CallPlan
+        from .TorchFfi import call as ffi_call, _adapter
         kernels = [ FfiCode( k ) if isinstance( k, str ) else k for k in kernels ]
         if not 1 <= len( kernels ) <= 2:
             raise ValueError( f"loom.ffi_call: expected one kernel (the forward) or two (forward, "
                               f"backward), got { len( kernels ) }" )
-        code = Kernels( name, *kernels )
 
+        # a call of a form already analysed is REPLAYED ( see `CallPlan` ): no analysis, no rendering, the same handler. Not
+        # under a `torch.func` transform: there the call is the autograd function's, batched or differentiated
+        plan_key, plan = None, None
+        if torch._C._functorch.peek_interpreter_stack() is None:
+            plan_key, plan = CallPlan.find( name, kernels, args, device, nb_items, batch_alignment, has_dynamic_capacity, failures, _adapter )
+
+        kwargs, output_attributes, scratch_attributes, input_exceptions, output_capacities, groups, returns, output_exceptions = lower_args( args )
+        code = Kernels( name, *kernels )
         prefix = name + "_"
+        analyse = lambda: CallArgsAnalysis( kwargs, device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
+        if plan and CallPlan.replay( plan, kwargs, device, _adapter, code, analyse ):
+            return returned( returns )
 
         output_capacities = dict( output_capacities )   # ours to grow: the caller's dict is not ours to touch
         while True:
             ca = CallArgsAnalysis( kwargs, device, output_attributes, output_capacities, output_exceptions, input_exceptions, batch_alignment, scratch_attributes, groups, name, nb_items )
             ca.errors.call_name, ca.errors.failure_messages = name, dict( failures or {} )
+            # `has_dynamic_capacity = False` and no failure to report: the error buffer is not read back ( on a card, a
+            # synchronization per call )
+            ca.errors.checked = bool( has_dynamic_capacity or failures )
             ffi_call( code, ca, device, prefix )
 
-            overflows = ca.capacity_overflows()
+            overflows = ca.capacity_overflows() if ca.errors.checked else None
             if not overflows:
+                if plan is False:
+                    CallPlan.record( plan_key, code, ca, kwargs, device, prefix, _adapter, failures )
                 return returned( returns )
 
             if env.flag( "DEBUG_CAPACITY" ):

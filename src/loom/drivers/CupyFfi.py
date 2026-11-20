@@ -45,6 +45,12 @@ class CupyAdapter( PointerAdapter ):
         x = cupy.ascontiguousarray( x )
         return Operand( x.data.ptr, x.shape, x, itemsize = x.itemsize )
 
+    def signature( self, x ):
+        """The FORM of `x` for a call plan ( `CallPlan.key_of` ): a plain array's dtype, shape, strides and card."""
+        if type( x ) is not cupy.ndarray:
+            return None
+        return ( "cupy", x.dtype.str, x.shape, x.strides, x.device.id )
+
     def zeros( self, shape, dtype, device ):
         with self._on( device ):
             return cupy.zeros( tuple( shape ), dtype )
